@@ -32,13 +32,15 @@ and replayable, which is the exact opposite of what a one-time secret needs to
 be. Invitations keep their own carrier: the scanned or tapped `myco://link/…`
 payload ([nap-neighbor/links.md](../nap-neighbor/links.md)), exchanged
 face to face, one-shot, and short-lived. `myco://share/…` (an app shared face to
-face) carries the sharer's npub as the holder to try first. `myco://pair/…` is
+face) may still carry the sharer's npub, but nobody is contacted directly any
+more. `myco://pair/…` is
 gone with pairing.
 
-Dropping the holder hint costs a retry and nothing else. `Content::open_site` with
-`holder = None` already walks every app peer in turn and then the public IP source
-(`myco-core/src/content.rs`), so a link with no sharer attached still finds the app
-through whoever nearby happens to have it.
+A deep link loses nothing by having no holder. Opening an app looks in the
+local store, then the neighborhoods where this device gets the matching
+extension, then the public internet unless offline-only
+([nap-neighbor/extensions.md](../nap-neighbor/extensions.md#getting-an-app-that-isnt-here-yet)),
+so a link still finds the app through a linked neighbor who has it.
 
 ## §2 The deferred open
 
@@ -52,7 +54,7 @@ tap myco://app/<host>/dumpling/…
         │
         └── not ready
               │  remember {host → path} in SharedPreferences
-              │  dispatch OpenNsite{link: host, holder: null}
+              │  dispatch OpenNsite{link: host}
               │
               ├── foreground watcher (3 min, 1s poll) ──► ready ──► open at path
               ├── every MainActivity.onResume ──────────► ready ──► open at path

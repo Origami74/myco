@@ -613,8 +613,8 @@ pub(crate) async fn dials_public(url: &str) -> bool {
 
 impl OutboxService {
     /// Accept an event into this device's relay **unforwarded**: stored, shown
-    /// to live subscriptions here (the WebView's, other napplets'), handed to
-    /// no gossiper. Returns whether it was the first sighting.
+    /// to live subscriptions here (the WebView's, other napplets'). Returns
+    /// whether it was the first sighting.
     ///
     /// Falls back to storing when no hub is up — the host-build and pre-start
     /// case, not a silent downgrade in the field: on a phone the hub is stood
@@ -1893,7 +1893,7 @@ mod tests {
         let hostile = EventBuilder::new(Kind::RelayList, "")
             .tags([
                 Tag::parse(["r", "ws://npub1peer.fips:4870@evil.example/"]).unwrap(),
-                Tag::parse(["r", "ws://npub1peer.fips:24243"]).unwrap(),
+                Tag::parse(["r", "ws://npub1peer.fips:4873"]).unwrap(),
                 Tag::parse(["r", "ws://npub1peer.fips:4870/path"]).unwrap(),
                 Tag::parse(["r", "ws://npub1peer.fips"]).unwrap(),
                 Tag::parse(["r", "ws://127.0.0.1:4870"]).unwrap(),
@@ -2049,28 +2049,16 @@ mod tests {
         Arc::new(Content::open(&dir).unwrap())
     }
 
-    /// NAP-RELAY: a relay publish goes to the relay pool, not the mesh. The
-    /// event is stored, this phone's live subscriptions hear it, and the
-    /// gossiper is never handed it — a `relay` grant is not a back door to
-    /// the mesh.
+    /// NAP-RELAY: a relay publish is stored and this phone's live
+    /// subscriptions hear it.
     #[tokio::test]
-    async fn a_relay_publish_is_stored_and_shown_here_but_never_flooded() {
-        use crate::mesh_relay::{Gossiper, Inbound};
+    async fn a_relay_publish_is_stored_and_shown_here() {
         use myco_napplet_runtime::seams::EventSink;
-
-        struct Count(std::sync::Mutex<usize>);
-        #[async_trait::async_trait]
-        impl Gossiper for Count {
-            async fn on_event(&self, _event: Event, _inbound: Inbound) {
-                *self.0.lock().unwrap() += 1;
-            }
-        }
 
         let content = scratch_content("sink-local");
         content.set_offline_only(true);
         let store = content.relay();
-        let count = Arc::new(Count(std::sync::Mutex::new(0)));
-        let hub = RelayHub::new(store.clone(), Some(count.clone()));
+        let hub = RelayHub::new(store.clone());
         let mut live = hub.live_events();
         let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(Some(hub))), content)
             .allowing_private_dials();
@@ -2090,12 +2078,6 @@ mod tests {
                 .len(),
             1
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            *count.0.lock().unwrap(),
-            0,
-            "a relay publish reached the gossiper"
-        );
     }
 
     /// NAP-LOCAL: `keep` stores here and sends nowhere; `rebroadcast` sends
@@ -2108,7 +2090,7 @@ mod tests {
         let (remote, url) = mock_relay().await;
         let content = scratch_content("keep-rebroadcast");
         let store = content.relay();
-        let hub = RelayHub::new(store.clone(), None);
+        let hub = RelayHub::new(store.clone());
         let svc = OutboxService::new(
             store.clone(),
             Arc::new(Mutex::new(Some(hub.clone()))),
@@ -2671,7 +2653,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
         let store = content.relay();
-        let hub = RelayHub::new(store.clone(), None);
+        let hub = RelayHub::new(store.clone());
         let mut live = hub.live_events();
         let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(Some(hub))), content)
             .allowing_private_dials();
@@ -2774,7 +2756,7 @@ mod tests {
     ) -> (OutboxService, Arc<dyn RelayBackend>, Arc<RelayHub>) {
         let content = scratch_content(tag);
         let store = content.relay();
-        let hub = RelayHub::new(store.clone(), None);
+        let hub = RelayHub::new(store.clone());
         let svc = OutboxService::new(
             store.clone(),
             Arc::new(Mutex::new(Some(hub.clone()))),

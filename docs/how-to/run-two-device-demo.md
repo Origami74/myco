@@ -63,8 +63,8 @@ other phone: B joins over the mesh, so it needs a route to A.
 
 B sets up a link with A's link service (`<npubA>.fips:4873`). Both phones now
 list the neighborhood and each other under **People**, by the names from
-Step 1. Leave **Updates** (Get and Share) on for the neighborhood (the default): that makes each
-phone an *app peer* of the other, which Step 5 needs.
+Step 1. Leave **Updates** (Get and Share) on for the neighborhood (the default):
+Step 5 fetches the app through it.
 
 ## Step 4 — Go fully offline
 
@@ -83,8 +83,20 @@ On **A**: long-press the tile › **Share**. A QR appears — and, while that sh
 is open, the same payload is presented over NFC.
 
 On **B**: Apps › **+** › **Scan**, or hold the phones together. The share
-payload names the app *and* A as its holder, so B pulls the manifest and
-blobs straight from A over the mesh — the ring fills — and the tile appears.
+payload names the app. B looks for it in the neighborhoods where it gets
+updates: the manifest and files come from A over the link service
+(`<npubA>.fips:4873`) — the ring fills — and the tile appears. Nobody else is
+asked, and with the internet off there is no other source.
+
+### What A can hand over
+
+A link serves only what is in the neighborhood's scope. An app gets there
+when A **shares a new version** of it (an update A installed after joining).
+An app A merely has installed is not in scope, so offline B finds nothing.
+
+To demo the offline path, publish a new version of the app between Step 3 and
+Step 4 and let A update to it while both phones are online. Otherwise keep the
+internet on for this step.
 For a napplet, B sees the install review first; its capabilities are listed in
 words. Add it.
 
@@ -99,7 +111,7 @@ relay and Blossom.
   B's app still opens and its pages still load. Settings › Storage on B shows
   the event and blob counts that grew in Step 5.
 - **Logs.** `adb -s <B> logcat | grep myco` during Step 5 shows the pull from
-  `<npubA>.fips:4870` / `:24243`.
+  `<npubA>.fips:4873/nh/…`.
 
 ---
 
@@ -109,11 +121,11 @@ relay and Blossom.
 | --- | --- | --- |
 | The other phone missing from the mesh bar | BLE off after airplane mode; phones too far; one phone's radio rejected the L2CAP listener | Toggle Bluetooth on; bring within ~1 m; check the Dev tab's attempt log (`connect-timeout`, `pool-rejected`) |
 | Join fails ("refused" or no answer) | No mesh route to A yet; the invitation expired (15 min) or was already used | Wait for the mesh bar to show A, then make a fresh invitation |
-| Share scanned, but A refuses the pull | Every **Updates** chip is off in the neighborhoods the phones share, so B is not an app peer | Turn one on for the neighborhood |
-| Share scanned, ring never fills | No mesh route yet — the link came up after the pull started | Wait for the lane icon, then scan again; the pull retries the holder first |
-| "Couldn't find this app" on a napplet share | Same as above, or the sharer's link dropped mid-fetch | **Try again** on the sheet |
+| Share scanned, but nothing arrives | **Get** is off on B, or **Share** is off on A, for that kind of update in the neighborhoods the phones share | Turn it on for the neighborhood |
+| Share scanned, ring never fills | No mesh route yet — the link came up after the pull started | Wait for the lane icon, then scan again |
+| "Couldn't find this app" on a napplet share | Same as above, or the link dropped mid-fetch | **Try again** on the sheet |
 | App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Permissions** |
-| Everything works until the phones are apart | That's the mesh: live-path only. The app stays, the feed does not | Expected — B is now a holder; a third phone can pull from B |
+| Everything works until the phones are apart | That's the mesh: live-path only. The app stays, the feed does not | Expected — B now holds the app; a third phone linked to B in that neighborhood can get it from B |
 | VPN consent dialog again | "Allow other apps to use mesh" is on and the TUN was revoked (another VPN, or the system) | Accept; Settings › Permissions › VPN for other apps › Fix re-prompts. Myco's own mesh is unaffected |
 | "Another VPN is always on" card | "Allow other apps to use mesh" is on, and another app is the always-on VPN | Settings › Network & internet › VPN › that app: turn off Always-on VPN, then Try again — or leave other apps off the mesh |
 
@@ -125,7 +137,7 @@ relay and Blossom.
 | --- | --- |
 | 1 | device identity (4), radios (4) |
 | 2 | nsite/napplet sync from the internet (1, 3) |
-| 3 | a link from a one-time invitation over the link service, a neighborhood, app peers (2) |
+| 3 | a link from a one-time invitation over the link service, a neighborhood, its update extensions (2) |
 | 4 | BLE L2CAP link, Noise, the TUN (4) |
-| 5 | share payload, holder-first pull over `.fips`, install review and grants (1, 2, 3) |
+| 5 | share payload, fetching through a neighborhood over `:4873`, install review and grants (1, 2, 3) |
 | 6 | store-and-forward: B as a holder (3) |

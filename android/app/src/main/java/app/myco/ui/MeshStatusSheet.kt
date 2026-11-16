@@ -40,7 +40,6 @@ import app.myco.core.AppState
 import app.myco.core.PeerDiagnostic
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
-import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
 import kotlinx.coroutines.delay
 

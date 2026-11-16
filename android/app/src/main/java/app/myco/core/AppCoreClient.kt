@@ -102,8 +102,6 @@ data class NappletReview(
     val grants: List<String>,
     /** Non-empty when the fetch failed; show this instead of asking. */
     val error: String,
-    /** The peer who shared it, if any — so a retry tries their phone first again. */
-    val holder: String? = null,
     /** A NAP-INTENT delivery waiting for this app: Open passes it to the
      *  window it starts. Empty when none. */
     val intentToken: String = "",
@@ -139,7 +137,6 @@ data class NappletReview(
                 (0 until g.length()).map { g.optString(it) }
             }.orEmpty(),
             error = json.optString("error"),
-            holder = json.optString("holder").ifEmpty { null },
             intentToken = json.optString("intentToken"),
         )
     }
@@ -293,34 +290,8 @@ data class RelayBackendHealth(
 )
 
 /**
- * An app peer: a linked device sharing an update extension with us. Myco fetches and
- * serves apps, updates and file transfers with these.
- */
-data class AppPeer(
-    val npub: String,
-    val name: String,
-)
-
-/** Native app-peer file transfer, including incoming offers awaiting a decision. */
-data class FileTransfer(
-    val id: String,
-    val direction: String,
-    val peerNpub: String,
-    val peerName: String,
-    val name: String,
-    val mime: String,
-    val size: Long,
-    val status: String,
-    val blobHash: String,
-    val receivedPath: String,
-    val publishPending: Boolean,
-    val error: String,
-    val updatedAt: Long,
-)
-
-/**
  * One merged, npub-or-address-keyed peer diagnostics row (DIAG-01/03/04/06),
- * built once in Rust from `ble_peers` / `ble_adverts` / app peers — never
+ * built once in Rust from `ble_peers` / `ble_adverts` / neighborhood links — never
  * re-joined here. `key` is the `npub` when resolved, else
  * `nodeAddrHex`, else the raw BLE address of an unresolved advert.
  */
@@ -330,7 +301,7 @@ data class PeerDiagnostic(
     val nodeAddrHex: String,
     val bleAddr: String,
     val name: String,
-    /** "connected" | "reachable-via-relay" | "seen-unidentified" | "app-peer-offline" | "unreachable". */
+    /** "connected" | "seen-unidentified" | "unreachable". */
     val state: String,
     /** Transport carrying this row when connected ("ble", "aware", "udp", "tcp"); empty otherwise. */
     val transport: String,
@@ -350,14 +321,15 @@ data class PeerDiagnostic(
      *  **Unauthenticated** — anyone in radio range can forge it. Ranks below
      *  every name learned from a neighborhood, never above. */
     val advertisedName: String = "",
+    /** The name this peer gave in its neighborhood invitation; empty when
+     *  unknown or not linked. Ranks above [advertisedName]. */
+    val linkName: String = "",
     /** Smoothed round-trip time over this peer's link in milliseconds, as MMP
      *  measured it; null when the link has never been timed (renders as an
      *  em-dash, never "0ms"). */
     val srttMs: Double? = null,
     val rssi: Int?,
     val psm: Int,
-    /** A linked neighbor sharing an update extension with us. */
-    val appPeer: Boolean,
     /** BLE role this device chose on the most recent recorded attempt:
      *  "central" | "peripheral" | "" when nothing has been recorded. Never a guess. */
     val role: String = "",
@@ -491,10 +463,6 @@ data class AppState(
     /** NAP-INTENT default apps, per archetype. */
     val intentHandlers: List<IntentArchetype> = emptyList(),
     val cache: CacheStatus,
-    val appPeers: List<AppPeer> = emptyList(),
-    /** App peers with a live mesh relay connection right now — reachable
-     *  at any hop count, not just direct neighbours. */
-    val reachableNpubs: Set<String> = emptySet(),
     val offlineOnly: Boolean,
     /** Public internet mesh nodes (N10). */
     val publicNodes: PublicNodes = PublicNodes(),
@@ -507,12 +475,10 @@ data class AppState(
     /** The custom Blossom URL as last saved. */
     val pendingBlossomUrl: String = "",
     val updateCheck: UpdateCheck = UpdateCheck(),
-    val fileTransfers: List<FileTransfer> = emptyList(),
-    val speedtest: SpeedtestStatus = SpeedtestStatus(),
     /** Neighborhoods and links (NAP-NEIGHBOR). */
     val neighborhoods: app.myco.neighbor.NeighborhoodsState = app.myco.neighbor.NeighborhoodsState(),
     /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
-     *  in Rust; the UI renders this directly, it never re-joins blePeers/appPeers. */
+     *  in Rust; the UI renders this directly, it never re-joins blePeers/neighborhoods. */
     val peers: List<PeerDiagnostic> = emptyList(),
 ) {
     companion object {
@@ -619,20 +585,6 @@ data class AppState(
                 eventCache = cacheTier(cacheJson.optJSONObject("eventCache")),
                 blobCache = cacheTier(cacheJson.optJSONObject("blobCache")),
             )
-            val appPeersJson = o.optJSONArray("appPeers")
-            val appPeers = buildList {
-                if (appPeersJson != null) {
-                    for (i in 0 until appPeersJson.length()) {
-                        val c = appPeersJson.optJSONObject(i) ?: continue
-                        add(
-                            AppPeer(
-                                npub = c.optString("npub"),
-                                name = c.optString("name"),
-                            )
-                        )
-                    }
-                }
-            }
             val peerDiagnosticsJson = o.optJSONArray("peers")
             val peerDiagnostics = buildList {
                 if (peerDiagnosticsJson != null) {
@@ -694,39 +646,14 @@ data class AppState(
                                 lastSeenMs = p.optLong("lastSeenMs"),
                                 authenticatedAtMs = p.optLong("authenticatedAtMs"),
                                 advertisedName = p.optString("advertisedName"),
+                                linkName = p.optString("linkName"),
                                 srttMs = if (p.isNull("srttMs")) null else p.optDouble("srttMs"),
                                 rssi = if (p.isNull("rssi")) null else p.optInt("rssi"),
                                 psm = p.optInt("psm"),
-                                appPeer = p.optBoolean("appPeer"),
                                 role = p.optString("role"),
                                 discoveryMs = p.optLong("discoveryMs"),
                                 sendDrops = p.optLong("sendDrops"),
                                 attempts = attempts,
-                            )
-                        )
-                    }
-                }
-            }
-            val transfersJson = o.optJSONArray("fileTransfers")
-            val fileTransfers = buildList {
-                if (transfersJson != null) {
-                    for (i in 0 until transfersJson.length()) {
-                        val t = transfersJson.optJSONObject(i) ?: continue
-                        add(
-                            FileTransfer(
-                                id = t.optString("id"),
-                                direction = t.optString("direction"),
-                                peerNpub = t.optString("peerNpub"),
-                                peerName = t.optString("peerName"),
-                                name = t.optString("name"),
-                                mime = t.optString("mime"),
-                                size = t.optLong("size"),
-                                status = t.optString("status"),
-                                blobHash = t.optString("blobHash"),
-                                receivedPath = t.optString("receivedPath"),
-                                publishPending = t.optBoolean("publishPending", false),
-                                error = t.optString("error"),
-                                updatedAt = t.optLong("updatedAt"),
                             )
                         )
                     }
@@ -818,12 +745,6 @@ data class AppState(
                     }
                 },
                 cache = cache,
-                appPeers = appPeers,
-                reachableNpubs = buildSet {
-                    o.optJSONArray("reachableNpubs")?.let { arr ->
-                        for (i in 0 until arr.length()) add(arr.optString(i))
-                    }
-                },
                 offlineOnly = o.optBoolean("offlineOnly"),
                 publicNodes = PublicNodes.parse(o.optJSONObject("publicNodes")),
                 relayBackend = o.optJSONObject("relayBackend").let { rb ->
@@ -840,17 +761,6 @@ data class AppState(
                     )
                 },
                 pendingBlossomUrl = o.optString("pendingBlossomUrl"),
-                speedtest = o.optJSONObject("speedtest")?.let { s ->
-                    SpeedtestStatus(
-                        running = s.optBoolean("running"),
-                        peerNpub = s.optString("peerNpub"),
-                        bytes = s.optLong("bytes"),
-                        upMbps = s.optDouble("upMbps", 0.0),
-                        downMbps = s.optDouble("downMbps", 0.0),
-                        error = s.optString("error"),
-                        generation = s.optLong("generation"),
-                    )
-                } ?: SpeedtestStatus(),
                 updateCheck = o.optJSONObject("updateCheck")?.let { u ->
                     UpdateCheck(
                         checking = u.optBoolean("checking"),
@@ -858,24 +768,12 @@ data class AppState(
                         generation = u.optLong("generation"),
                     )
                 } ?: UpdateCheck(),
-                fileTransfers = fileTransfers,
                 neighborhoods = app.myco.neighbor.NeighborhoodsState.parse(o.optJSONObject("neighborhoods")),
                 peers = peerDiagnostics,
             )
         }
     }
 }
-
-/** Result of the dev-menu peer speedtest (a Blossom upload+download round-trip). */
-data class SpeedtestStatus(
-    val running: Boolean = false,
-    val peerNpub: String = "",
-    val bytes: Long = 0,
-    val upMbps: Double = 0.0,
-    val downMbps: Double = 0.0,
-    val error: String = "",
-    val generation: Long = 0,
-)
 
 /** Feedback for the "Check for updates" action: in-progress + last result. */
 data class UpdateCheck(
@@ -1132,11 +1030,9 @@ object NativeActions {
         JSONObject().put("type", "set_wifi_aware_enabled").put("enabled", enabled)
 
     // --- content (P2) ---
-    /** `holder` is a sharer's device npub (from a share QR) to pull from over the
-     *  mesh first; null for a plain pasted link. */
-    fun openNsite(link: String, holder: String? = null): JSONObject =
+    /** Looked for in the neighborhoods that carry nsites here, then the internet. */
+    fun openNsite(link: String): JSONObject =
         JSONObject().put("type", "open_nsite").put("link", link)
-            .apply { if (!holder.isNullOrEmpty()) put("holder", holder) }
     fun importNsite(dir: String): JSONObject =
         JSONObject().put("type", "import_nsite").put("dir", dir)
     fun addToLibrary(link: String): JSONObject =
@@ -1158,11 +1054,10 @@ object NativeActions {
      * Fetch + verify a napplet without installing it. Reports what it
      * `requires` so the review screen can ask; grants nothing on its own.
      */
-    fun fetchNapplet(pointer: String, holder: String? = null): JSONObject =
+    fun fetchNapplet(pointer: String): JSONObject =
         JSONObject()
             .put("type", "fetch_napplet")
             .put("pointer", pointer)
-            .apply { if (!holder.isNullOrEmpty()) put("holder", holder) }
 
     /** Record what review granted, and pin the napplet to the Library. */
     fun installNapplet(pointer: String, granted: List<String>): JSONObject {
@@ -1350,30 +1245,6 @@ object NativeActions {
             .put("share", share)
             .put("enabled", enabled)
 
-    /** Dev-menu speedtest: round-trip a payload through `npub`'s mesh Blossom. */
-    fun speedtestPeer(npub: String): JSONObject =
-        JSONObject().put("type", "speedtest_peer").put("npub", npub)
-
-    /** Encrypt a local file and send a private offer to an app peer. */
-    fun shareFile(path: String, name: String, mime: String, peerNpub: String): JSONObject =
-        JSONObject().put("type", "share_file")
-            .put("path", path)
-            .put("name", name)
-            .put("mime", mime)
-            .put("peerNpub", peerNpub)
-
-    fun acceptFileTransfer(transferId: String): JSONObject =
-        JSONObject().put("type", "accept_file_transfer").put("transferId", transferId)
-
-    fun declineFileTransfer(transferId: String): JSONObject =
-        JSONObject().put("type", "decline_file_transfer").put("transferId", transferId)
-
-    /** Stop a transfer that is still in flight and tell the other phone. */
-    fun cancelFileTransfer(transferId: String): JSONObject =
-        JSONObject().put("type", "cancel_file_transfer").put("transferId", transferId)
-
-    fun forgetFileTransfer(transferId: String): JSONObject =
-        JSONObject().put("type", "forget_file_transfer").put("transferId", transferId)
 }
 
 /**

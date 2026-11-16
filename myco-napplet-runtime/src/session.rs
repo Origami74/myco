@@ -63,8 +63,8 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// `local` keeps on this device what the napplet was shown (`local.publish`
 /// of a delivered event, `resource.keep`). It signs nothing on its own — a
 /// note-to-self template also needs `relay` — and publishes nowhere; but kept
-/// is not private: the local relay and Blossom are read by app peers and
-/// the device's own nsites, and with a custom backend they are that server.
+/// is not private: the local relay and Blossom are read by the device's own
+/// nsites and napplets, and with a custom backend they are that server.
 /// Keeps are permanent and unquota'd, which is why it can be switched off.
 ///
 /// `neighbor` is a default **for now**, not by design. The upstream napplet

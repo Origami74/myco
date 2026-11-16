@@ -328,10 +328,9 @@ fun AppsScreen(
             onInstall = { granted ->
                 client.dispatch(NativeActions.installNapplet(review.pointer, granted))
             },
-            // The same fetch again, sharer first — a tap in a room with no
-            // internet fails when the sharer's link is still coming up, and
-            // that is the case a retry is for.
-            onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer, review.holder)) },
+            // The same fetch again — a neighbor's link may have come up
+            // since, and that is the case a retry is for.
+            onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer)) },
             onOpen = {
                 val (pointer, title) = nappletLaunchTarget(review, state.library)
                 client.dispatch(NativeActions.dismissNappletReview())

@@ -9,7 +9,7 @@
 //! Gated by `sync.offline_only`: when set, no IP source is installed and Myco
 //! never reaches the internet (`docs/reference/config.md`).
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -333,7 +333,7 @@ impl AuthorOutbox {
     }
 
     /// Keep a server list (kind 10063) fetched from the network — kept like
-    /// a relay list, so it travels over the mesh and serves offline.
+    /// a relay list, so it serves offline.
     pub async fn remember_server_list(&self, list: Event) {
         server_list_misses().lock().unwrap().remove(&list.pubkey);
         if let Err(e) = self.store.publish(list).await {
@@ -736,28 +736,18 @@ pub fn default_blossom_servers() -> Vec<String> {
     .collect()
 }
 
-/// The most a zstd variant may decode to when the source sets no
-/// [`IpPeerSource::with_max_blob_bytes`].
-const MAX_DECODED_VARIANT: usize = 64 * 1024 * 1024;
-
 /// Fetches manifests from public relays and blobs from public Blossom over IP.
 pub struct IpPeerSource {
     relays: Vec<String>,
     blossom_servers: Vec<String>,
     /// Every blob fetch goes through it, whoever named the server: the
-    /// public internet only, unless this is a mesh source
-    /// ([`IpPeerSource::on_mesh`]), which reaches app peers only. See
-    /// [`crate::http`].
+    /// public internet only, unless the caller hands in another
+    /// ([`IpPeerSource::with_http_client`]). See [`crate::http`].
     http: crate::http::HttpClient,
     timeout: Duration,
     /// When true, blob fetches ignore the manifest's `["server", …]` hints and
-    /// use only `blossom_servers` — so a **mesh** source never reaches out to
-    /// public Blossom over the internet (it stays on the peer's `[fd00::]:24243`).
+    /// use only `blossom_servers`.
     ignore_manifest_servers: bool,
-    /// For a **mesh** source: the shared peer-relay pool + the holder's npub, so a
-    /// manifest REQ reuses the one persistent WS connection to the peer instead of
-    /// opening a fresh `query_relay` socket. `None` for a public-relay source.
-    peer_relay: Option<(std::sync::Arc<crate::peer_relay::PeerRelayPool>, String)>,
     /// Fetch manifests of this kind instead of the nsite kind implied by the
     /// `d` tag. Set for napplets — see [`IpPeerSource::with_kind`].
     kind_override: Option<u16>,
@@ -784,16 +774,6 @@ pub struct IpPeerSource {
     /// Give up on one server's blob after this long in all. See
     /// [`IpPeerSource::with_total_timeout`].
     total_timeout: Option<Duration>,
-    /// Ask for a server's zstd variant. See [`IpPeerSource::accept_zstd`].
-    accept_zstd: bool,
-}
-
-/// How one server answered a blob fetch.
-enum Fetched {
-    Blob(Vec<u8>),
-    /// Its zstd variant did not decode to the blob; the plain blob may.
-    BadVariant,
-    Miss,
 }
 
 impl IpPeerSource {
@@ -807,25 +787,12 @@ impl IpPeerSource {
             http: crate::http::shared_internet(),
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
-            peer_relay: None,
             kind_override: None,
             first_answer_grace: None,
             max_blob_bytes: None,
             stall_timeout: None,
             total_timeout: None,
-            accept_zstd: false,
         }
-    }
-
-    /// Route this (mesh) source's manifest REQs through the shared peer-relay pool,
-    /// reusing the persistent WS connection to `npub` instead of a one-shot socket.
-    pub fn over_peer_relay(
-        mut self,
-        pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
-        npub: &str,
-    ) -> Self {
-        self.peer_relay = Some((pool, npub.to_string()));
-        self
     }
 
     /// Use `http` rather than a client of this source's own, so repeated
@@ -836,17 +803,8 @@ impl IpPeerSource {
         self
     }
 
-    /// A source that reaches app peers over the mesh, and nothing else:
-    /// its blob client is [`crate::http::shared_mesh`], and it never asks a
-    /// manifest's public `server` hints.
-    pub fn on_mesh(mut self) -> Self {
-        self.http = crate::http::shared_mesh();
-        self.ignore_manifest_servers = true;
-        self
-    }
-
     /// Fetch blobs only from this source's own servers, never the manifest's
-    /// public `server` hints (used by the mesh source — keep it on the mesh).
+    /// `server` hints: for a caller that knows where the blob is.
     pub fn ignoring_manifest_servers(mut self) -> Self {
         self.ignore_manifest_servers = true;
         self
@@ -857,7 +815,7 @@ impl IpPeerSource {
         Self::new(default_relays(), default_blossom_servers())
     }
 
-    /// Override the per-relay timeout (mesh links want a longer one than IP).
+    /// Override the per-relay timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -886,7 +844,7 @@ impl IpPeerSource {
     ///
     /// For fetches a napplet asked for by hash: it names the blob, not the
     /// size, and a cap checked on the finished body has already paid for the
-    /// body, over BLE if the holder is a peer in the room.
+    /// body.
     pub fn with_max_blob_bytes(mut self, max: usize) -> Self {
         self.max_blob_bytes = Some(max);
         self
@@ -896,18 +854,18 @@ impl IpPeerSource {
     /// next chunk — for `stall`, rather than when the whole download has
     /// taken the client's 60 s.
     ///
-    /// A peer that walked out of range sends nothing at all; one on a slow
-    /// link still sends something every few hundred milliseconds. Telling
-    /// the two apart by silence, not total time, lets a caller with other
-    /// peers to ask (see [`FirstOf`]) move on in seconds without cutting off
-    /// a large download that is getting there.
+    /// A server that went away sends nothing at all; one on a slow link
+    /// still sends something every few hundred milliseconds. Telling the two
+    /// apart by silence, not total time, lets a caller with other servers to
+    /// ask move on in seconds without cutting off a large download that is
+    /// getting there.
     pub fn with_stall_timeout(mut self, stall: Duration) -> Self {
         self.stall_timeout = Some(stall);
         self
     }
 
     /// Give up on one server's blob after `total`, however steadily it
-    /// arrives — for a caller that must finish: a peer sending a byte just
+    /// arrives — for a caller that must finish: a server sending a byte just
     /// inside the stall timeout would otherwise hold the fetch for good.
     /// Size it from the blob: a slow honest link must still fit.
     pub fn with_total_timeout(mut self, total: Duration) -> Self {
@@ -915,48 +873,35 @@ impl IpPeerSource {
         self
     }
 
-    /// Ask each server for its zstd variant of the blob (`Accept-Encoding:
-    /// zstd`, see `myco_blossom::server`), decoded bounded by
-    /// [`IpPeerSource::with_max_blob_bytes`]. The decoded bytes are checked
-    /// against the name like any blob; when a variant fails that, the same
-    /// server is asked once more for the plain blob.
-    pub fn accept_zstd(mut self) -> Self {
-        self.accept_zstd = true;
-        self
-    }
-
     /// [`IpPeerSource::fetch_once`], held to [`IpPeerSource::with_total_timeout`].
-    async fn fetch_bounded(&self, server: &str, url: &str, want: &str, zstd: bool) -> Fetched {
-        let attempt = self.fetch_once(server, url, want, zstd);
+    async fn fetch_bounded(&self, server: &str, url: &str, want: &str) -> Option<Vec<u8>> {
+        let attempt = self.fetch_once(server, url, want);
         match self.total_timeout {
             Some(total) => tokio::time::timeout(total, attempt)
                 .await
                 .unwrap_or_else(|_| {
                     tracing::debug!("{server}: blob not done in {total:?}");
-                    Fetched::Miss
+                    None
                 }),
             None => attempt.await,
         }
     }
 
     /// One GET of `url`, accepted only as bytes hashing to `want`.
-    async fn fetch_once(&self, server: &str, url: &str, want: &str, zstd: bool) -> Fetched {
-        let mut request = match self.http.get(url) {
+    async fn fetch_once(&self, server: &str, url: &str, want: &str) -> Option<Vec<u8>> {
+        let request = match self.http.get(url) {
             Ok(request) => request,
             Err(why) => {
                 tracing::debug!("blob server {server}: {why}");
-                return Fetched::Miss;
+                return None;
             }
         };
-        if zstd {
-            request = request.header(reqwest::header::ACCEPT_ENCODING, "zstd");
-        }
         let sent = match self.stall_timeout {
             Some(stall) => match tokio::time::timeout(stall, request.send()).await {
                 Ok(sent) => sent,
                 Err(_) => {
                     tracing::debug!("{server}: no response in {stall:?}");
-                    return Fetched::Miss;
+                    return None;
                 }
             },
             None => request.send().await,
@@ -975,51 +920,23 @@ impl IpPeerSource {
                 );
                 if !r.status().is_success() {
                     // A 404 is "not here", and the server up and answering.
-                    return Fetched::Miss;
+                    return None;
                 }
                 r
             }
             Err(e) if crate::http::refused_by_guard(&e) => {
                 // The guard's refusal says nothing of the server's health.
                 tracing::debug!("blob server {server} refused: {e}");
-                return Fetched::Miss;
+                return None;
             }
             Err(e) => {
                 crate::relay_health::record_http_error(server, &e);
-                return Fetched::Miss;
+                return None;
             }
         };
-        let encoded = zstd
-            && resp
-                .headers()
-                .get(reqwest::header::CONTENT_ENCODING)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"));
-        // A variant of an incompressible blob can be a little larger than it.
-        let body_max = match (encoded, self.max_blob_bytes) {
-            (true, Some(max)) => Some(max + max / 64 + 4096),
-            (_, max) => max,
-        };
-        let Some(body) = read_body_bounded(resp, body_max, self.stall_timeout).await else {
-            return Fetched::Miss;
-        };
-        let bytes = if encoded {
-            let max = self.max_blob_bytes.unwrap_or(MAX_DECODED_VARIANT);
-            match myco_blossom::decode_zstd_bounded(&body, max) {
-                Some(bytes) => bytes,
-                None => return Fetched::BadVariant,
-            }
-        } else {
-            body
-        };
+        let bytes = read_body_bounded(resp, self.max_blob_bytes, self.stall_timeout).await?;
         // Self-authenticating: only accept bytes that hash to the wanted name.
-        if sha256_hex(&bytes) == want {
-            Fetched::Blob(bytes)
-        } else if encoded {
-            Fetched::BadVariant
-        } else {
-            Fetched::Miss
-        }
+        (sha256_hex(&bytes) == want).then_some(bytes)
     }
 
     /// Fetch manifests of an explicit kind instead of the nsite kind implied by
@@ -1064,8 +981,6 @@ impl IpPeerSource {
     /// worst case is what a lookup without the list took. An author found to
     /// have no list anywhere is remembered for [`LIST_MISS_REMEMBERED_FOR`],
     /// and the indexers are not asked about them again until then.
-    ///
-    /// A mesh source (`over_peer_relay`) ignores this: it asks one peer.
     pub fn with_author_outbox(mut self, outbox: std::sync::Arc<AuthorOutbox>) -> Self {
         self.author_lists = Some(outbox.clone());
         self.author_outbox = Some(outbox);
@@ -1252,18 +1167,6 @@ impl IpPeerSource {
     }
 }
 
-/// A [`PeerSource`] that pulls from a specific **holder's** embedded relay +
-/// A peer's mesh relay, addressed by **name**: `ws://<npub>.fips:4870`.
-///
-/// Always name, never the `fd00::` literal the name resolves to. Resolving it
-/// is what teaches the node the address→pubkey mapping, and without that the
-/// node has no pubkey to open a session with and the dial fails as unroutable
-/// for anyone who is not already a direct neighbour. The literal happens to
-/// work for adjacent peers, which is exactly what made this hard to spot.
-pub(crate) fn mesh_relay_url(npub: &str) -> String {
-    format!("ws://{npub}.fips:4870")
-}
-
 /// Run every query concurrently, but stop `grace` after the first one comes
 /// back with something.
 ///
@@ -1310,272 +1213,8 @@ where
     out
 }
 
-/// A peer's mesh Blossom endpoint, by name. See [`mesh_relay_url`].
-pub(crate) fn mesh_blossom_url(npub: &str) -> String {
-    format!("http://{npub}.fips:24243")
-}
-
-/// Blossom over the FIPS mesh, addressed by the holder's npub — see
-/// [`mesh_relay_url`]. Requires the app-owned TUN to be up so the socket routes
-/// over the mesh. A longer timeout than the IP source absorbs BLE latency +
-/// first-contact session setup.
-pub fn mesh_source_for(
-    pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
-    holder_npub: &str,
-) -> anyhow::Result<IpPeerSource> {
-    fips::PeerIdentity::from_npub(holder_npub)
-        .map_err(|e| anyhow::anyhow!("invalid holder npub {holder_npub}: {e}"))?;
-    Ok(IpPeerSource::new(
-        vec![mesh_relay_url(holder_npub)],
-        vec![mesh_blossom_url(holder_npub)],
-    )
-    .with_timeout(Duration::from_secs(20))
-    .on_mesh()
-    .over_peer_relay(pool, holder_npub))
-}
-
-/// Several sources asked at once — the sharer and the app peers in
-/// reach — for one napplet or nsite slot, where the first good answer wins.
-///
-/// Asking them in turn would cost a dead peer's whole timeout (20 s for a
-/// mesh source) before the next is tried, while the user watches "Looking
-/// for this app". Every answer is still untrusted: a manifest that is not
-/// signed by the slot's author for the slot, or bytes that do not hash to
-/// the asked name, are passed over as if the source had said nothing, so one
-/// bad peer cannot shadow a good one. The caller verifies what wins as it
-/// would any single source's answer.
-///
-/// Manifests are raced: a `REQ` is small. Blobs are not — racing a blob
-/// across every peer downloads it from all of them at once, over BLE. A blob
-/// comes from one source at a time: the one that answered last, or, when
-/// none has (install starts from a fresh source), the winner of a manifest
-/// race — in reach, quick, and holding this app. When that source has
-/// nothing, fails, or stalls (give mesh sources a
-/// [`IpPeerSource::with_stall_timeout`]), it is dropped and the next is
-/// picked the same way from the sources not yet asked for this blob.
-pub struct FirstOf {
-    sources: Vec<Box<dyn PeerSource>>,
-    author: PublicKey,
-    d_tag: Option<String>,
-    /// Only manifests of this kind count.
-    kind: u16,
-    /// Index of the source that answered last; `usize::MAX` for none yet.
-    preferred: std::sync::atomic::AtomicUsize,
-}
-
-impl FirstOf {
-    pub fn new(
-        sources: Vec<Box<dyn PeerSource>>,
-        author: PublicKey,
-        d_tag: Option<String>,
-        kind: u16,
-    ) -> Self {
-        Self {
-            sources,
-            author,
-            d_tag,
-            kind,
-            preferred: std::sync::atomic::AtomicUsize::new(usize::MAX),
-        }
-    }
-
-    fn prefer(&self, index: usize) {
-        self.preferred
-            .store(index, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Whether `event` is a signed manifest by `author` for the asked slot.
-    fn answers(&self, event: &Event, author: &PublicKey, d_tag: Option<&str>) -> bool {
-        event.verify().is_ok()
-            && event.pubkey == *author
-            && event.kind.as_u16() == self.kind
-            && (d_tag.is_none() || event_d_tag(event).as_deref() == d_tag)
-    }
-
-    /// Race the manifest across every source not in `skip`; the first good
-    /// answer and whose it was. The winner becomes the preferred source.
-    async fn race_manifest(
-        &self,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-        skip: &[usize],
-    ) -> Option<(usize, Event)> {
-        let mut asks: futures_util::stream::FuturesUnordered<_> = self
-            .sources
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !skip.contains(i))
-            .map(|(i, source)| async move { (i, source.fetch_manifest(author, d_tag).await) })
-            .collect();
-        while let Some((i, answer)) = asks.next().await {
-            match answer {
-                Ok(Some(event)) if self.answers(&event, author, d_tag) => {
-                    self.prefer(i);
-                    return Some((i, event));
-                }
-                Ok(Some(_)) => tracing::debug!("source {i} answered with the wrong manifest"),
-                Ok(None) => {}
-                Err(e) => tracing::debug!("source {i}: {e}"),
-            }
-        }
-        None
-    }
-}
-
-#[async_trait]
-impl PeerSource for FirstOf {
-    async fn fetch_manifest(
-        &self,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>> {
-        Ok(self
-            .race_manifest(author, d_tag, &[])
-            .await
-            .map(|(_, event)| event))
-    }
-
-    async fn fetch_blob(
-        &self,
-        sha256_hex_want: &str,
-        servers: &[String],
-    ) -> anyhow::Result<Option<Vec<u8>>> {
-        let mut asked: Vec<usize> = Vec::new();
-        while asked.len() < self.sources.len() {
-            let preferred = self.preferred.load(std::sync::atomic::Ordering::Relaxed);
-            let pick = if preferred < self.sources.len() && !asked.contains(&preferred) {
-                preferred
-            } else {
-                match self
-                    .race_manifest(&self.author, self.d_tag.as_deref(), &asked)
-                    .await
-                {
-                    Some((i, _)) => i,
-                    // No one left holds the app; the caller moves on to its
-                    // next source.
-                    None => break,
-                }
-            };
-            asked.push(pick);
-            match self.sources[pick]
-                .fetch_blob(sha256_hex_want, servers)
-                .await
-            {
-                Ok(Some(bytes)) if sha256_hex(&bytes) == sha256_hex_want => {
-                    self.prefer(pick);
-                    return Ok(Some(bytes));
-                }
-                Ok(_) => tracing::debug!("source {pick} has no {sha256_hex_want}"),
-                Err(e) => tracing::debug!("source {pick}: {e}"),
-            }
-        }
-        Ok(None)
-    }
-
-    async fn author_servers(&self, author: &PublicKey) -> Vec<String> {
-        let mut out = Vec::new();
-        for source in &self.sources {
-            for server in source.author_servers(author).await {
-                if !out.contains(&server) {
-                    out.push(server);
-                }
-            }
-        }
-        out
-    }
-}
-
-/// Dev-menu **speedtest** against a mesh peer: PUT a fresh `bytes`-sized payload to
-/// the peer's Blossom (`http://[fd00::peer]:24243/upload`), then GET it back, timing
-/// each leg. Returns `(up_mbps, down_mbps)` — upload (this device → peer) and
-/// download (peer → this device) throughput in megabits per second. The whole call
-/// is bounded by `timeout`. The peer's Blossom admits only its app peers from
-/// the mesh, so this only succeeds against a reachable app peer.
-///
-/// Note: the payload is content-addressed and there is no Blossom DELETE, so a run
-/// leaves a `bytes`-sized blob on the peer until its next cache wipe — fine for the
-/// occasional dev measurement, but keep `bytes` modest.
-pub async fn speedtest_peer(
-    npub: &str,
-    bytes: usize,
-    timeout: Duration,
-) -> anyhow::Result<(f64, f64)> {
-    // Addressed by name, resolved by the system resolver like any other host: the
-    // tunnel advertises the in-mesh sentinel as its DNS server, so `<npub>.fips`
-    // resolves for every process on the device, this one included. (It used to be
-    // mapped to the peer's `fd00::` literal by hand via `.resolve`, from before
-    // that resolver existed. Doing so skipped resolution, which is also what
-    // registers the peer's identity with the node — so the literal only ever
-    // worked for a peer the node already knew: a direct neighbour.)
-    fips::PeerIdentity::from_npub(npub)
-        .map_err(|e| anyhow::anyhow!("invalid peer npub {npub}: {e}"))?;
-    let host = format!("{npub}.fips");
-    let client = crate::http::HttpClient::mesh(
-        reqwest::Client::builder()
-            // A short connect timeout so an unroutable/unreachable peer fails fast
-            // instead of burning the whole `timeout` budget; the total still bounds the
-            // (potentially slow over BLE) transfer.
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(timeout),
-    );
-    speedtest_blossom(&client, &format!("http://{host}:24243"), bytes).await
-}
-
-/// The Blossom round-trip itself, against an already-built `client` + `base` URL —
-/// split out so it can be exercised against a local server in tests.
-async fn speedtest_blossom(
-    client: &crate::http::HttpClient,
-    base: &str,
-    bytes: usize,
-) -> anyhow::Result<(f64, f64)> {
-    // A fresh, incompressible payload each run so the peer can't already hold it
-    // (which would make the GET a local hit and the hash collide across runs).
-    let payload = random_bytes(bytes);
-
-    let t_up = Instant::now();
-    let resp = client
-        .put(&format!("{base}/upload"))?
-        .body(payload)
-        .send()
-        .await?;
-    if resp.status() == reqwest::StatusCode::FORBIDDEN {
-        // The speedtest is the only thing that pushes blobs to a peer, and blob
-        // upload is off by default (`reference/thinning-custom-relay.md`, D10).
-        // Say so plainly — this is a permission the peer has to grant, not a
-        // network fault to retry.
-        anyhow::bail!("peer does not allow uploads (blob write permission is off on their device)");
-    }
-    if !resp.status().is_success() {
-        anyhow::bail!("upload rejected ({})", resp.status());
-    }
-    let up_mbps = throughput_mbps(bytes, t_up.elapsed());
-    let descriptor: serde_json::Value = serde_json::from_str(&resp.text().await?)?;
-    let hash = descriptor["sha256"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("upload descriptor missing sha256"))?
-        .to_string();
-
-    let t_down = Instant::now();
-    let got = client.get(&format!("{base}/{hash}"))?.send().await?;
-    if !got.status().is_success() {
-        anyhow::bail!("download rejected ({})", got.status());
-    }
-    let body = got.bytes().await?;
-    let down_mbps = throughput_mbps(body.len(), t_down.elapsed());
-
-    Ok((up_mbps, down_mbps))
-}
-
-fn throughput_mbps(bytes: usize, elapsed: Duration) -> f64 {
-    let secs = elapsed.as_secs_f64();
-    if secs <= 0.0 {
-        return 0.0;
-    }
-    (bytes as f64 * 8.0) / secs / 1_000_000.0
-}
-
 /// `n` pseudo-random bytes from a time-seeded xorshift64 — cheap and dependency-
-/// free; we only need the bytes to be fresh per run, not cryptographically random.
+/// free, for when the bytes only need to be fresh, not cryptographically random.
 pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     let mut state = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1690,12 +1329,7 @@ impl PeerSource for IpPeerSource {
             filter["#d"] = serde_json::json!([d]);
         }
 
-        // Mesh source: reuse the persistent pooled WS to the peer (one socket per
-        // peer, shared with chat fan-out) rather than a fresh per-fetch connect.
-        let results: Vec<Vec<Event>> = if let Some((pool, npub)) = &self.peer_relay {
-            let url = self.relays.first().cloned().unwrap_or_default();
-            vec![pool.request(npub, &url, vec![filter], self.timeout).await]
-        } else if let Some(outbox) = &self.author_outbox {
+        let results: Vec<Vec<Event>> = if let Some(outbox) = &self.author_outbox {
             vec![self.fetch_via_outbox(outbox, author, filter).await]
         } else {
             // Public relays: each hard-bounded by `self.timeout` (connect + read), so
@@ -1721,7 +1355,7 @@ impl PeerSource for IpPeerSource {
         };
 
         // Pick the newest event matching the requested slot. Signatures were
-        // already checked at ingress (the pool, or `query_relay`).
+        // already checked at ingress (`query_relay`).
         let mut newest: Option<Event> = None;
         for events in results.into_iter() {
             for ev in events {
@@ -1744,8 +1378,7 @@ impl PeerSource for IpPeerSource {
         sha256_hex_want: &str,
         servers: &[String],
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        // Manifest hints first, then this source's own servers (deduped). A mesh
-        // source skips the manifest's public hints entirely (stay on the mesh).
+        // Manifest hints first, then this source's own servers (deduped).
         // Whoever named a server, it is dialled through this source's client,
         // which refuses anything outside its reach (`crate::http`).
         let mut candidates: Vec<String> = if self.ignore_manifest_servers {
@@ -1767,27 +1400,15 @@ impl PeerSource for IpPeerSource {
             if crate::relay_health::is_skipped(&server) {
                 continue;
             }
-            match self
-                .fetch_bounded(&server, &url, sha256_hex_want, self.accept_zstd)
-                .await
-            {
-                Fetched::Blob(bytes) => return Ok(Some(bytes)),
-                Fetched::BadVariant => {
-                    if let Fetched::Blob(bytes) = self
-                        .fetch_bounded(&server, &url, sha256_hex_want, false)
-                        .await
-                    {
-                        return Ok(Some(bytes));
-                    }
-                }
-                Fetched::Miss => {}
+            if let Some(bytes) = self.fetch_bounded(&server, &url, sha256_hex_want).await {
+                return Ok(Some(bytes));
             }
         }
         Ok(None)
     }
 
     async fn author_servers(&self, author: &PublicKey) -> Vec<String> {
-        // A mesh source stays on the mesh; its fetches ignore them anyway.
+        // A source that ignores servers named elsewhere offers none.
         let Some(lists) = self
             .author_lists
             .as_ref()
@@ -1855,26 +1476,6 @@ pub(crate) mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message;
-
-    #[tokio::test]
-    async fn speedtest_round_trips_through_blossom() {
-        // A real embedded Blossom (PUT /upload + GET /<hash>) on loopback.
-        let dir = std::env::temp_dir().join(format!("myco-speedtest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let store = Arc::new(myco_blossom::FsBlobStore::open(&dir).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(myco_blossom::server::serve_on(store, listener));
-
-        let base = format!("http://{addr}");
-        let client = crate::http::HttpClient::mesh(reqwest::Client::builder());
-        let (up, down) = speedtest_blossom(&client, &base, 64 * 1024).await.unwrap();
-        // Loopback: both legs move bytes and yield a finite, positive rate.
-        assert!(up > 0.0 && up.is_finite(), "up_mbps = {up}");
-        assert!(down > 0.0 && down.is_finite(), "down_mbps = {down}");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// A mock relay: accept one WS connection, read the REQ, reply with the given
     /// event then EOSE. Returns the `ws://` URL.
@@ -2523,7 +2124,7 @@ pub(crate) mod tests {
             author: site.author,
             d_tag: None,
         };
-        content.clone().open_site(addr, None).await;
+        content.clone().open_site(addr).await;
 
         let sites = content.sites_snapshot();
         assert_eq!(sites[0].state, "ready", "site should sync to ready over IP");
@@ -2552,8 +2153,8 @@ pub(crate) mod tests {
 
     /// Whoever named a server — a manifest's `server` tag, a BUD-10 `xs`
     /// hint, a kind 10063 entry, or the source's own list — a public source
-    /// never dials this phone's own network: its client refuses it. A mesh
-    /// source never dials the public internet.
+    /// never dials this phone's own network: its client refuses it. A source
+    /// on a mesh client never dials the public internet.
     #[tokio::test]
     async fn a_source_never_dials_outside_its_reach() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2581,7 +2182,7 @@ pub(crate) mod tests {
             None
         );
         let mesh = IpPeerSource::new(Vec::new(), vec!["https://example.com".into()])
-            .on_mesh()
+            .ignoring_manifest_servers()
             .with_http_client(strict(crate::http::Reach::Mesh));
         assert_eq!(mesh.fetch_blob(&hash, &[]).await.unwrap(), None);
         assert_eq!(
@@ -2637,7 +2238,7 @@ pub(crate) mod tests {
 
     /// The author's server list rides along with the manifest lookup, is
     /// kept, and the source then offers its servers to the blob fetch. A
-    /// mesh source offers none.
+    /// source that ignores servers named elsewhere offers none.
     #[tokio::test]
     async fn the_server_list_rides_along_with_the_manifest_and_is_offered() {
         let keys = nostr::Keys::generate();
@@ -2676,10 +2277,10 @@ pub(crate) mod tests {
         let blobs_only = IpPeerSource::new(Vec::new(), Vec::new())
             .with_author_servers(outbox_over(store.clone(), Vec::new()));
         assert_eq!(blobs_only.author_servers(&site.author).await.len(), 1);
-        let mesh = IpPeerSource::new(Vec::new(), Vec::new())
+        let own_only = IpPeerSource::new(Vec::new(), Vec::new())
             .with_author_servers(outbox_over(store, Vec::new()))
             .ignoring_manifest_servers();
-        assert!(mesh.author_servers(&site.author).await.is_empty());
+        assert!(own_only.author_servers(&site.author).await.is_empty());
     }
 
     /// A missing server list is looked for on the author's write relays and

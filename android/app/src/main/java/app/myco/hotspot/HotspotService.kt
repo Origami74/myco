@@ -379,7 +379,8 @@ class HotspotService : Service() {
         const val ACTION_STOP = "app.myco.hotspot.STOP"
 
         /** First port tried for the file page — high, memorable, and clear of
-         *  the embedded relay (4870), Blossom (24243), and the UDP lane (4871). */
+         *  the loopback relay (4870), the UDP lane (4871) and the link service
+         *  (4873), the one port Myco serves to other phones. */
         private const val BASE_PORT = 8080
         private const val PORT_TRIES = 4
 

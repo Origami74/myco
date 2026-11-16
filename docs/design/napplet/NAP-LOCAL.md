@@ -29,8 +29,8 @@ Two things, one rule:
 
 - **Keep.** `local.publish` stores an event in this device's own relay, which
   nothing evicts, and publishes it nowhere else. `resource.keep` does the same
-  for a blob, in this device's own Blossom. Kept is not private: app peers
-  ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)) and the device's own nsites read that relay and Blossom, and with a custom
+  for a blob, in this device's own Blossom. Kept is not private: the device's own nsites
+  and napplets read that relay and Blossom, and with a custom
   relay or Blossom configured, kept means written to that server.
 - **Pass on.** Every publish (`local`, `relay`, `outbox`) accepts a
   **signed event** in place of a template and sends it **as it is**: kept here,

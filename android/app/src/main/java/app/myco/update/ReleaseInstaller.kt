@@ -14,7 +14,7 @@ import app.myco.share.MycoApk
 import java.io.File
 import org.json.JSONObject
 
-/** A release APK this phone keeps for its app peers (`release_apk` in the core). */
+/** A release APK this phone keeps to share through neighborhoods (`release_apk` in the core). */
 data class CarriedRelease(
     val version: String,
     val versionCode: Long?,
@@ -35,7 +35,7 @@ data class CarriedRelease(
 }
 
 /**
- * Installs a Myco update an app peer carried, through Android's
+ * Installs a Myco update a neighbor shared through a neighborhood, via Android's
  * [PackageInstaller]. The core checked the bytes against the publisher-signed
  * hash; this checks the APK once more as Android reads it — this app's
  * package, a newer version, signed with the release key — and Android shows

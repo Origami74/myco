@@ -81,16 +81,43 @@ A release is Zapstore's signed announcement (kind 30063) and file event
 (kind 3063, naming the APK's sha256), plus the APK.
 
 - **Sharing.** When the phone keeps a new release APK (from the installed
-  APK, a neighbor, an app peer or the internet), it shares the file events
-  with the APK in scope, then the announcement.
+  APK, a neighborhood or the internet), it shares the file events with the
+  APK in scope, then the announcement.
 - **Receiving.** Events from the pinned publisher are kept in the phone's
   own relay, where the release check finds them. Nothing is downloaded
   then: the APK is fetched when the phone carries the update, from the
-  neighborhoods with `myco-release` on first (`release_apk.rs`,
-  `from_neighborhoods`), then app peers, then the internet.
+  neighborhoods with `myco-release` on first (`release_apk.rs`), then the
+  internet when allowed.
+
+## Getting an app that isn't here yet
+
+Opening a Library nsite that isn't ready, opening or installing from a
+share link or `naddr`, and installing a napplet all look in the same
+places, in order (`ExtensionSource` in `neighbor/updates.rs`):
+
+1. **This device's own store.**
+2. **Neighborhoods where this device gets the matching extension**
+   (`nsite-updates` for sites, `napplet-updates` for napplets). The
+   manifest is looked up in each neighborhood's scope here, then asked of
+   its links over the link relay. Files come from the scope, then the
+   links ([data-plane.md](data-plane.md#blobs)).
+3. **The public internet** (relays and Blossom servers), unless the phone
+   is offline-only.
+
+A neighborhood holds only what someone shared into it: a version a
+neighbor updated to and shared. An app a neighbor merely has installed is
+not in scope, so it is not found there.
+
+Nobody outside a shared neighborhood is contacted. A share link
+(`myco://share/…`) still opens the app, but its holder fields are not
+dialled: installing from someone you aren't linked with needs the internet,
+or a neighborhood you share with the extension on.
+
+Library sites that aren't ready are retried in the background about every
+30 s through the same places.
 
 ## Status
 
-All three extensions are built. Myco's updates still also travel to app
-peers over the mesh relay ([app-peers.md](app-peers.md)) until that path
-is removed.
+All three extensions are built. They are the only way Myco's apps, updates
+and release APK travel between phones: Myco's own relay and Blossom are not
+reachable from other phones ([../../reference/ports.md](../../reference/ports.md)).

@@ -38,6 +38,9 @@ pub struct Scoped {
     live: broadcast::Sender<(NeighborhoodId, Event)>,
 }
 
+/// Longest [`Neighbors::ask_links`] waits for the links' answers.
+const ASK_LINKS_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The scope table, under the data dir.
 pub const SCOPES_FILE: &str = "neighborhood-scopes.json";
 
@@ -310,6 +313,34 @@ impl Neighbors {
                 }
             });
         }
+    }
+
+    /// Ask every link carrying `n` for what matches, all at once, and wait
+    /// up to [`ASK_LINKS_FOR`] for the answers. Nothing is kept or passed on:
+    /// the caller decides what to do with it (an app's manifest, say).
+    pub(super) async fn ask_links(&self, n: NeighborhoodId, filters: &[Filter]) -> Vec<Event> {
+        let Some(links) = &self.links else {
+            return Vec::new();
+        };
+        let asks = links.carrying(n).into_iter().map(|link| {
+            let links = links.clone();
+            async move {
+                match super::wire::pull(&link, n, filters).await {
+                    Ok(events) => {
+                        links.mark_seen(&link.id);
+                        events
+                    }
+                    Err(e) => {
+                        tracing::debug!(link = %link.id, error = %e, "could not ask peer");
+                        Vec::new()
+                    }
+                }
+            }
+        });
+        tokio::time::timeout(ASK_LINKS_FOR, futures_util::future::join_all(asks))
+            .await
+            .map(|answers| answers.into_iter().flatten().collect())
+            .unwrap_or_default()
     }
 
     /// Ask every link carrying `n` for what matches; what comes back is kept

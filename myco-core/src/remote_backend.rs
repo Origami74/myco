@@ -7,16 +7,15 @@
 //! behaviour in the proxy in front and asks the backend only for `EVENT` and
 //! `REQ`.
 //!
-//! **Nothing Myco-specific goes over this link.** No `MESH` envelope, no ttl, no
-//! app peers. That is boundary 2 (`reference/thinning-custom-relay.md`), and it is
+//! **Nothing Myco-specific goes over this link.** Plain NIP-01, nothing
+//! else. That is boundary 2 (`reference/thinning-custom-relay.md`), and it is
 //! the reason an unmodified relay can serve here at all.
 //!
 //! One connection, held open and reopened on demand. The gateway hits the backend
 //! on every page load, so a socket per request would be wasteful even against
 //! localhost — and against a relay on the LAN it would be a round trip per blob
 //! lookup. A single actor task owns the socket and multiplexes publishes and
-//! queries over it by subscription id, the same shape
-//! [`crate::peer_relay`] uses for peers.
+//! queries over it by subscription id.
 //!
 //! Reads are **not** re-verified. NIP-01 makes signature checking mandatory for a
 //! relay accepting an `EVENT`, so a conforming relay has already done it, and

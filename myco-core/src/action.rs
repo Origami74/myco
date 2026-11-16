@@ -34,14 +34,9 @@ pub enum NativeAppAction {
     /// Resolve a pasted nsite link / `<host>` and drive its sync to readiness
     /// (author-signed manifest + its blobs). Spawns the sync; does NOT launch any
     /// UI (Kotlin opens the fullscreen NsiteActivity on `ready`). Progress is
-    /// observed via `siteStatus` on `Tick`. `holder` is the sharer's device npub
-    /// from a scanned share QR — the mesh peer to pull from first (the public IP
-    /// fallback is tried after); `None` for a plain pasted link.
-    OpenNsite {
-        link: String,
-        #[serde(default)]
-        holder: Option<String>,
-    },
+    /// observed via `siteStatus` on `Tick`. Looked for in the neighborhoods
+    /// that carry nsites to this device, then the public IP fallback.
+    OpenNsite { link: String },
     /// DEV-ONLY side-load: import an already-signed manifest + blobs from a bundle
     /// directory (`<dir>/manifest.json` + `<dir>/blobs/<sha256>`). The app never
     /// authors or signs — it only stores externally-created artifacts.
@@ -53,21 +48,13 @@ pub enum NativeAppAction {
     /// Forget a single nsite: remove it from the Library and the Apps grid.
     ForgetNsite { link: String },
     /// Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it
-    /// locally — D9's acquisition path, online once and mesh-replicable after.
+    /// locally — from the neighborhoods that carry napplets to this device,
+    /// then the internet.
     ///
     /// Deliberately **not** an install: it reports what the napplet `requires`
     /// so the review screen can ask, and grants nothing. An `naddr` arriving
     /// from outside the app routes here, never to a silent install.
-    FetchNapplet {
-        pointer: String,
-        /// The peer who shared it, when it arrived by a tap or a scan.
-        ///
-        /// Their device is tried before the internet, so a napplet handed over
-        /// in a room with no internet still arrives — which is the whole point
-        /// of handing it over that way.
-        #[serde(default)]
-        holder: Option<String>,
-    },
+    FetchNapplet { pointer: String },
     /// Record what install review granted, and pin the napplet to the Library.
     ///
     /// `granted` replaces whatever was stored: the review screen shows the whole
@@ -219,11 +206,6 @@ pub enum NativeAppAction {
     /// the number available at the one moment it is needed.
     SetAwareDataPaths { count: u8 },
 
-    /// Dev-menu speedtest against a mesh peer: PUT a fresh payload to the peer's
-    /// Blossom and GET it back, timing each leg. Spawn-not-block; the result lands
-    /// in `speedtest`. `npub` is the target peer's device identity.
-    SpeedtestPeer { npub: String },
-
     // --- neighborhoods (NAP-NEIGHBOR) ---
     /// Start a neighborhood, or with `auto_accept` join the one of that name.
     CreateNeighborhood { name: String, auto_accept: bool },
@@ -288,27 +270,6 @@ pub enum NativeAppAction {
         link_id: String,
         neighborhood: String,
     },
-
-    // --- native app peer file transfer ---
-    /// Encrypt a local file and send a private offer to an app peer. The
-    /// Android side copies a content URI into its private outbox first, then
-    /// passes that filesystem path here.
-    ShareFile {
-        path: String,
-        name: String,
-        mime: String,
-        peer_npub: String,
-    },
-    /// Accept an incoming encrypted file offer.
-    AcceptFileTransfer { transfer_id: String },
-    /// Decline an incoming encrypted file offer.
-    DeclineFileTransfer { transfer_id: String },
-    /// Cancel a transfer that is still in flight and tell the other phone, so
-    /// neither side is left waiting on a message that is no longer coming.
-    CancelFileTransfer { transfer_id: String },
-    /// Forget a finished transfer after the Android side has safely published
-    /// the received file (or after a terminal sender-side outcome).
-    ForgetFileTransfer { transfer_id: String },
 }
 
 #[cfg(test)]

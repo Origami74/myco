@@ -73,8 +73,10 @@ protocol has a number), signed by the link key, `d` tag `offer`, optional
 | --- | --- | --- |
 | `link` | `http://<npub>.fips:4873/nh/<pk>` | — |
 | `relay` | `ws://<npub>.fips:4873/nh/<pk>/relay` | read, write |
-| `blossom` | `http://<npub>.fips:24243` | read |
 
+- Both live under the link service on `:4873`. Neighborhood blobs are
+  read through the link route (`/nh/<pk>/blob/…`); there is no separate
+  Blossom service.
 - `read` / `write` cover the neighborhood's content. `own` would open what a
   device keeps outside any neighborhood. Myco does not offer it.
 - An offer is a statement, not access control. Every request is still

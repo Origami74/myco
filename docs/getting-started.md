@@ -47,9 +47,10 @@ code.
 **2. A mesh peer is not a link.** FIPS — the physical mesh — links to any
 compatible phone in range and calls it a *peer*. A **link** is set up on
 purpose, from a one-time invitation, and carries **neighborhoods**: channels
-("Household", "Sports club") that posts travel along, link to link. Only
-linked devices sharing an update extension with you — *app peers* — read your
-relay and store or get your files. A mesh peer can be a stranger; a linked
+("Household", "Sports club") that posts travel along, link to link. Apps and
+updates travel the same way, as extensions. Your relay and store are never
+reachable from another phone; linked peers reach only the neighborhoods you
+share with them. A mesh peer can be a stranger; a linked
 person can be out of range. [nap-neighbor/](design/nap-neighbor/README.md).
 
 **3. Two keys, plus one per link.** The **device key** is the phone's FIPS mesh key: mesh

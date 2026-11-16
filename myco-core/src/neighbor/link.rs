@@ -295,6 +295,21 @@ impl Link {
             .map(|(c, _)| c.services)
             .unwrap_or_default()
     }
+
+    /// The other side's device npub: the `.fips` host its offered services
+    /// are reached at (`http://npub1….fips:4873/nh/…`), if any.
+    pub fn device_npub(&self) -> Option<String> {
+        self.services().iter().find_map(|s| device_npub(&s.url))
+    }
+}
+
+/// The device npub in a `.fips` URL (`http://npub1….fips:4873/nh`), if any.
+pub fn device_npub(url: &str) -> Option<String> {
+    use nostr::nips::nip19::FromBech32;
+    let host = url.split("://").nth(1)?.split(['/', ':']).next()?;
+    let npub = host.strip_suffix(".fips")?;
+    nostr::PublicKey::from_bech32(npub).ok()?;
+    Some(npub.to_string())
 }
 
 /// An invitation not yet used, on the initiator's side.
@@ -894,5 +909,17 @@ mod tests {
         assert!(check_http_auth(&h, "GET", "http://a.fips:4873/nh/offer").is_none());
         assert!(check_http_auth(&h, "POST", "http://b.fips:4873/nh/offer").is_none());
         assert!(check_http_auth("Nostr not-base64!", "POST", "x").is_none());
+    }
+
+    #[test]
+    fn reads_the_device_npub_from_a_fips_url() {
+        use nostr::nips::nip19::ToBech32;
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        assert_eq!(
+            device_npub(&format!("http://{npub}.fips:4873/nh")).as_deref(),
+            Some(npub.as_str())
+        );
+        assert_eq!(device_npub("wss://relay.example.com"), None);
+        assert_eq!(device_npub("ws://nonsense.fips:4873"), None);
     }
 }

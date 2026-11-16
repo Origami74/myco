@@ -1,12 +1,11 @@
 //! The **auth plane**: a small HTTP service on `:4873` that carries the
 //! neighborhood link service under `/nh` (see [`crate::neighbor::service`]).
 //!
-//! Link setup is bootstrap — it is what creates a link, and links are what
-//! gate everything else — so it has no business travelling on the planes it
-//! authorises. It terminates here instead, and the content ports (`:4870`
-//! relay, `:24243` Blossom) admit only app peers, with no exceptions.
+//! Everything other phones reach on this one comes through here: link setup,
+//! and then each link's relay and blobs. The relay (`:4870`) is loopback
+//! only, and the Blossom store is not served at all.
 //!
-//! It is the one port open to anyone, so every request is paced per source
+//! It is the one port open to other phones, so every request is paced per source
 //! address ([`Limiter`]) and bodies are capped.
 
 use std::collections::HashMap;

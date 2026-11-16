@@ -1,12 +1,12 @@
 # Offline propagation
 
 > Status: built, with differences from the first draft noted inline. What
-> shipped: manifests are forwarded between **app peers** (linked devices in
-> neighborhoods sharing an update extension, see
-> [nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)) with a 3-hop budget
-> (not 5), the seen-set is the loop guard, and blobs stay pull-only
-> ([nsite-updates.md §4](./nsite-updates.md)). Negentropy / NIP-77 reconcile
-> (§5) and backlog resync are **not built**. Open questions are marked
+> shipped: manifests travel through **neighborhoods**, as the `nsite-updates`
+> and `napplet-updates` extensions
+> ([nap-neighbor/extensions.md](../nap-neighbor/extensions.md)), with the
+> neighborhood's publish hops and per-neighborhood dedup; blobs stay
+> pull-only, from the neighborhood's links. Negentropy / NIP-77 reconcile (§5)
+> and backlog resync are **not built**. Open questions are marked
 > **TBD / open**.
 
 The vision is nak's "Pillars of Propagation": small relays and Blossom blobs
@@ -82,7 +82,7 @@ The proposed default (a [LOCKED DECISION], vetoable in its parameters) is
 fan-out part of propagation small (the author-signed manifest event) and the
 heavy part (the referenced blobs) lazy and demand-driven.
 
-### Announce (flood the author-signed manifest, 3 hops)
+### Announce (share the author-signed manifest into neighborhoods)
 
 The unit that propagates is the **author-signed nsite manifest event itself**
 (nsite kinds `15128` root / `35128` named;
@@ -93,30 +93,22 @@ new event kind**: a holder that wants to "announce" a site simply re-emits the
 author's manifest unchanged. Re-emitting an already-signed event relay-to-relay
 is normal relay behaviour, not authoring, and requires no holder signature.
 
-- Manifests flood outward with a hop budget: **3 hops** (`EVENT_TTL`). Each
-  forwarder decrements, and a spent budget is stored but not forwarded; the
-  seen-set, not the budget, is what guarantees termination
-  ([nsite-updates.md §4.1](./nsite-updates.md)).
-- **Only manifests propagate multi-hop. Blobs stay pull-only** — there is no
-  TTL-flood of blobs.
+- Manifests travel a neighborhood like any neighborhood event: the
+  neighborhood's publish hops bound how far, and each event id is passed on
+  once per neighborhood
+  ([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md)).
+- **Only manifests propagate multi-hop. Blobs stay pull-only** — fetched from
+  the neighborhood's links one hop away.
 
-#### Mechanism: the nsite-deck propagator
+#### Mechanism: neighborhood extensions
 
-The flood is not a bespoke protocol, and it is **not relay behaviour** — the
-embedded `myco-relay` is a plain NIP-01 store + socket that never fans anything
-out on its own. The fanout is the job of a separate **propagator** process
-inside `nsite-deck`. The propagator holds an internal **subscription** to the
-relevant relays (the local `myco-relay` plus the relays of connected peers) and,
-when it sees a manifest, **publishes** it — an `["EVENT", …]` to each
-`<peer>.fips:4870` relay, source excluded — so a manifest ripples outward one
-relay-hop at a time. What shipped sends to app peers only (§3). This is push-based: a node need not
-ask for a site to learn it exists; the propagator at a connected neighbour
-volunteers the manifest. The relay store, the sync engine, and the propagator
-share one event intake, so an event learned by any path is both stored locally
-and re-published once. Loop/duplicate suppression is in §5; the propagator-side
-behaviour is specified in [./nsite-layer.md §2.1](./nsite-layer.md). It is wanted
-**early** (roadmap P2), with transitive discovery and scale-dedup layered on at
-P4.
+The embedded `myco-relay` is a plain NIP-01 store that never fans anything out
+on its own, and is not reachable from other phones. A device shares an update
+it activated into each neighborhood where it **shares** the matching
+extension; a device that **gets** it there stages it, and once activated
+shares it onward ([nsite-updates.md §4](./nsite-updates.md)). This is
+push-based: a node need not ask for a site to learn it exists. The propagator
+side of `nsite-deck` is specified in [./nsite-layer.md §2.1](./nsite-layer.md).
 
 **This is Plumtree.** The fanout is the **eager-push** half of a Plumtree-style
 epidemic broadcast; negentropy reconciliation (§5) is the **lazy-pull** half that
@@ -127,23 +119,24 @@ constant chatter, both **strictly neighbour-local (never relayed)**: (1) **eager
 reconcile on a new link** — fire a one-shot reconcile the moment a peer connects
 (bitchat sends a unicast sync ~5 s after a new neighbour appears); and (2) a slow
 **periodic neighbour reconcile** (bitchat ~30 s, bounded to ~100 recent items). See
-§5 for the negentropy mechanics. Neither shipped. An earlier build replayed open
-subscriptions against a peer on reconnect; that was removed with event gossip.
+§5 for the negentropy mechanics. Neither shipped.
 
 ### Pull (fetch content on demand)
 
 When a user opens a site — or when the **propagator eagerly pre-fetches a pinned
 one** — the app *pulls* the actual content from a holder whose manifest it has:
 it already has (or queries for) the manifest event, then fetches each referenced
-blob by sha256 from that holder's Blossom server (`<npub_holder>.fips:24243`),
-verifies, and caches. The pre-fetch is owned by the propagator's **pinned-site
+blob by sha256 from the neighborhood's scope here, then its links
+(`GET <npub_holder>.fips:4873/nh/{pk}/blob/<sha256>?n=…`), then public Blossom
+unless offline-only; verifies, and caches. The pre-fetch is owned by the propagator's **pinned-site
 subscription** (an internal subscription for kinds `15128`/`35128`): when a
 *newer* manifest arrives for a Library-pinned `(author, dTag)`, the propagator
 auto-runs this blob pull in the background so pinned apps stay current and
 offline-ready before the user next opens them (see
 [./nsite-layer.md §5.4](./nsite-layer.md)). The manifest identifies the site by the **author** pubkey; the holder it
-is pulled from is a *different* key, reached at `<npub_holder>.fips`. A holder's
-relay is queried with `{kinds:[15128 or 35128], authors:[<author_pubkey>]}`. The
+is pulled from is a *different* key, a linked peer reached at
+`<npub_holder>.fips:4873`. Its scoped relay is queried with
+`{kinds:[15128 or 35128], authors:[<author_pubkey>]}`. The
 browse lifecycle is detailed in
 [diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg); from
 propagation's point of view the key facts are: pulls are point-to-point Layer-A
@@ -151,7 +144,7 @@ fetches against a holder, and every pulled object is verified before it is cache
 (§4) — so the pull source need not be the original author or its first holder.
 
 This split means a site can be *known to be available* across many hops cheaply
-(the manifest has flooded), while the bytes only ever traverse the one path a
+(the manifest has travelled the neighborhood), while the bytes only ever traverse the one path a
 user actually needs, when they need it.
 
 ## 3. Who propagates to whom
@@ -161,11 +154,12 @@ pairing graph (the Circle). Pairing is gone.
 
 Now:
 
-- **App peers.** Manifests go to, and blobs are pulled from, app peers: devices
-  this one has a link with, in a neighborhood sharing an update extension
-  ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
-- **Reach past one link** comes from the hop budget: an app peer forwards to its
-  own app peers, up to 3 hops. No peer list is polled.
+- **Neighborhoods.** Manifests are shared into, and blobs pulled from, the
+  neighborhoods where the extension is on: Share to send, Get to take
+  ([nap-neighbor/extensions.md](../nap-neighbor/extensions.md)).
+- **Reach past one link** comes from the neighborhood's publish hops: a
+  device passes a neighborhood event on to its other links carrying that
+  neighborhood. No peer list is polled.
 - **Setting up a link** is a one-time invitation (`myco://link/…`), not a pairing
   card ([nap-neighbor/links.md](../nap-neighbor/links.md)).
 
@@ -200,14 +194,12 @@ Multi-hop manifest flooding needs loop suppression and duplicate suppression, or
 a small mesh will melt under re-broadcast storms. The pattern is adapted directly
 from bitchat (reference only).
 
-### TTL flood with bounded relay
+### Hops and dedup
 
-Each flooded manifest carries a hop budget (3, §2). Forwarders decrement and
-stop at zero. Probabilistic relay on large meshes (forward with probability
-< 1 to thin redundant copies, as bitchat's `PacketRelayManager` does) is
-**not built**: app peer sets are small and every one forwards.
-A node never relays its own packets and never relays a packet already addressed
-to it.
+Bounded by the neighborhood: its publish hops limit reach, and each event id
+is passed on once per neighborhood
+([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md)). Probabilistic
+relay on large meshes is **not built**.
 
 ### Set-reconciliation sync (negentropy / NIP-77), not blind reflooding
 
@@ -309,16 +301,17 @@ and a cache is a first-class source.
 
 - **Privacy of "which manifests do I replicate."** Re-emitting an author's
   manifest reveals which sites a device is willing to serve, which leaks
-  reading/caching interests to anyone within the 5-hop TTL radius. **TBD /
+  reading/caching interests to the neighborhoods it shares into. **TBD /
   open:** can a user propagate without making the set of manifests they replicate
-  observable under their own (device) identity? Options to weigh: flood only to
-  app peers (what shipped), anonymous/aggregate hints, or opt-in "I am a public re-server"
+  observable under their own (device) identity? Options to weigh: share only into
+  chosen neighborhoods (what shipped, the per-neighborhood **Share** switch),
+  anonymous/aggregate hints, or opt-in "I am a public re-server"
   mode. This trades propagation reach against metadata privacy and is unresolved.
   Note this is purely about *which already-signed manifests a holder chooses to
   replicate* — no holder-authored event is involved.
 - **Optimistic sharing vs. spam / chatter.** Eagerly fanning out *every* manifest
   you hold maximizes discovery but risks flooding the mesh with chatter — the fine
-  line. Levers to weigh: scope the eager flood to your **app peers / Library /
+  line. Levers to weigh: scope the eager flood to your **neighborhoods / Library /
   recently-touched** manifests rather than everything held; TTL + dedup seen-set;
   **probabilistic relay** on larger meshes; a **recent-N retention bound** on what
   you re-announce (bitchat caps sync to ~100 recent); rate-limiting; and possibly
@@ -328,7 +321,7 @@ and a cache is a first-class source.
   `NEG-MSG` round size may need different parameters over FIPS L2CAP than over
   bitchat's GATT links; **TBD / open** pending the two-device demo.
 - **nsite-scoped propagation (capability-gated).** A loaded nsite might want to
-  widen what gets gossiped — e.g. a kind-1 client nsite asking the propagator to
+  widen what gets propagated — e.g. a kind-1 client nsite asking the propagator to
   also reconcile/forward kind-1 notes. But nsites are **untrusted, sandboxed
   content**, so this can only ever be a **bounded, permissioned capability**, not
   an open door. The propagator's subscribed kinds/filters are the natural control

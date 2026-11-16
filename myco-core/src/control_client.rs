@@ -322,7 +322,7 @@ mod tests {
 
     /// The four `connectivity` values, against `can_send()` semantics. A peer
     /// that is `stale` is still routable; dropping it here is what would leave
-    /// a returning app peer waiting out a 180s dial backoff.
+    /// a returning peer looking gone for no reason.
     #[test]
     fn connectivity_maps_with_can_send_semantics() {
         assert!(is_connected("connected"));

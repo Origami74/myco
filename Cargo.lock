@@ -2477,7 +2477,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "zstd",
  "zune-jpeg",
 ]
 

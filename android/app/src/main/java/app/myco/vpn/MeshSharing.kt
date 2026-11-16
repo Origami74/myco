@@ -7,8 +7,8 @@ import app.myco.MainActivity
  * Whether Myco wants the VPN, and why.
  *
  * Myco's own mesh traffic never needs it: the core runs its own TCP/IP stack
- * on the node's mesh address (`myco-core`'s `mesh_net`), so the relay, Blossom
- * and neighborhood links reach peers with no VPN slot taken. The VPN ([MycoVpnService])
+ * on the node's mesh address (`myco-core`'s `mesh_net`), so neighborhood links
+ * reach peers with no VPN slot taken. The VPN ([MycoVpnService])
  * is only for **other apps** — "Allow other apps to use mesh" — and for the
  * exit proxy, which carries other apps' traffic by definition.
  */

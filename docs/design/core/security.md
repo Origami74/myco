@@ -71,7 +71,7 @@ signed the event**, because peers routinely hand us events authored by third
 parties they have never met.
 
 Manifests are the sharp case. An nsite manifest is authored by its publisher and
-the peer relaying it is only a courier, so without verification any app peer
+the peer relaying it is only a courier, so without verification any linked peer
 could hand us a forged manifest for anyone's nsite and we would stage and
 activate it as that publisher's site. Content-addressing does not save us: blob
 hashes are checked against the manifest, and the manifest is the forged part.
@@ -160,9 +160,10 @@ What this means:
 - **A link confers the neighborhoods it carries.** A linked peer may read and
   write the neighborhoods both sides agreed to on that link, through the
   scoped relay. Nothing else.
-- **An app peer gets Myco's own basics.** A linked device in a neighborhood
-  sharing an extension with us may read your mesh relay and Blossom, offer you apps and
-  updates, and send you files.
+- **Apps and updates ride the same neighborhoods.** They travel as
+  extensions ([extensions.md](../nap-neighbor/extensions.md)): a peer gets
+  only the manifests and files this device shares into a neighborhood it
+  carries on that link.
 - **Not conferred by a link:** reading your end-to-end payloads to others,
   forging or altering content, learning your identity from a passive BLE scan,
   reaching arbitrary localhost services on your phone (§3.1).
@@ -184,41 +185,30 @@ mitigation is to expose *only* its own ports over the mesh — the VpnService/TU
 routes only `fd00::/8` and answers `*.fips` DNS; it does **not**
 capture `0.0.0.0/0`, and the WebView never resolves `.fips`.
 
-Three ports are exposed:
+One port is exposed:
 
 | Port | Service | Who may reach it |
 | --- | --- | --- |
-| `4870` | Relay (the mesh proxy's NIP-01 socket) | App peers only |
-| `24243` | Blossom blob store | App peers only |
 | `4873` | Link service, `/nh/{pk}/…` | `setup`: anyone holding a valid invitation. Everything else: a linked peer, by NIP-98 with its link key |
+
+The relay on `4870` listens on loopback only, for the in-app WebView. The
+Blossom store has no port.
 
 **Open question:** confirm that no other localhost service on the phone is
 inadvertently reachable via FSP port-multiplexing, and whether the app should
 enforce an explicit port allowlist on the inbound mesh side.
 
-### 3.2 The app peer gate
+### 3.2 Relay and Blossom are not on the mesh
 
-The content ports have **no exceptions**. Link setup terminates on `:4873`, so
-nothing about bootstrapping needs a hole in the relay.
+Myco's own relay and Blossom are not reachable from other phones, so there
+is no gate to get wrong:
 
-- **Admission is one predicate:** is this mesh address an app peer — a linked
-  device, by the device npub in its offer's `.fips` URL, in a neighborhood
-  sharing an extension with us (`AppPeerGate`)? The same question answers for relay and
-  Blossom alike.
-- **It is checked at accept, not per frame.** Anyone else is refused
-  **before** the WebSocket upgrade, with a plain `403`. A stranger costs a TCP
-  accept and one small response rather than an upgrade and a round of frames,
-  which matters on a BLE link.
-- **Revocation closes live connections.** The app peer set is consulted live,
-  so ending a link, leaving a neighborhood or turning its extensions off drops the
-  connections a peer already holds rather than only blocking the next
-  request.
-
-Each app peer also carries per-peer flags (relay read/write and their
-multihop clamps, Blossom read on, **Blossom write off**). They are not editable
-today; every app peer gets the defaults. Uploads are therefore not accepted
-from peers: nothing in normal operation pushes blobs, so accepting bytes onto
-the disk stays opt-in.
+- The relay listens on `127.0.0.1:4870` only. Napplets reach it in-process.
+- The Blossom store is not served on any port.
+- Nothing a peer sends lands in them directly. Neighborhood events and blobs
+  go to their own scoped store, through the link service (§3.3).
+- Peers cannot upload blobs: the link service only reads blobs, and only from
+  a neighborhood's scope.
 
 ### 3.3 The link service
 
@@ -237,10 +227,11 @@ link key for that link.
 
 ### 3.4 What a linked peer can still learn
 
-- **An app peer** can issue a broad `REQ` on your mesh relay and **enumerate
-  your manifest set**: which sites you hold, installed, or cached for others.
-  That is metadata, not a content leak — manifests are author-signed and
-  public by design (see [propagation.md](../nsite/propagation.md)).
+- **A linked peer** sees the app manifests you share into a neighborhood
+  (the update extensions), so it learns which apps you have installed. That
+  is metadata, not a content leak — manifests are author-signed and public by
+  design (see [propagation.md](../nsite/propagation.md)). Turning **Share**
+  off for an extension stops it.
 - **A linked peer** sees what you publish into the neighborhoods you share
   with them, and what others pass on. Neighborhoods are **not private**: the
   join sheet says so. Anyone in a neighborhood can pass posts on, even
@@ -339,9 +330,8 @@ security shape is:
   screen because it is real: `relay`, `outbox` and `neighbor` let it publish
   *as you*, to your relays or into the neighborhoods it was granted, with no
   per-event prompt.
-  `resource` lets it fetch content by hash — and, because fetched blobs are
-  kept and served, makes you a holder of what it looked at (the open privacy
-  question in the runtime design, §7.11).
+  `resource` lets it fetch content by hash; a fetched blob is kept here, but
+  not served to other phones (the runtime design, §7.11).
 - **Napplet-supplied addresses are validated.** A relay URL a napplet names
   must be `ws`/`wss` and may not point at loopback or a private network; a
   `.fips` URL is refused. People nearby are reached through `neighborhood://`
@@ -353,20 +343,20 @@ security shape is:
 | Threat | What an attacker gains | Mitigation |
 | ------ | ---------------------- | ---------- |
 | **Malicious / forging relay or peer** | Tries to serve forged content | **Cannot forge.** Signatures + SHA-256 verified locally (§1); bad artifacts are rejected. |
-| **Withholding / availability attack** | Refuses to serve, serves stale, hides a newer event | Pull-from-many: query all reachable relays, keep newest valid event; manifests flood widely (announce-wide) while large blobs are pulled on demand. Best-effort, no freshness guarantee (§1). |
-| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only app peers reach the content ports at all, and **blob upload is off for every peer** (§3.2), so a peer cannot push bytes onto your disk. Neighborhood events land in their own scoped store, only from links carrying that neighborhood. Junk that fails verification is never stored (§1). What a peer pushes, and what it uploads, lands in the **shell cache**, which evicts to its budget (500 MB of events, 1.5 GB of blobs by default; [architecture.md](./architecture.md), "Kept and cached"). What this phone **keeps** — its own publishes, installed and opened apps, private messages addressed through it — is still unbounded until the user clears it. |
+| **Withholding / availability attack** | Refuses to serve, serves stale, hides a newer event | Pull-from-many: query all reachable relays, keep newest valid event; manifests are shared into neighborhoods while large blobs are pulled on demand. Best-effort, no freshness guarantee (§1). |
+| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | No peer reaches the relay or Blossom at all, and **peers cannot upload blobs** (§3.2), so a peer cannot push bytes onto your disk. Neighborhood events land in their own scoped store, only from links carrying that neighborhood. Junk that fails verification is never stored (§1). What only passes through lands in the **shell cache**, which evicts to its budget (500 MB of events, 1.5 GB of blobs by default; [architecture.md](./architecture.md), "Kept and cached"). What this phone **keeps** — its own publishes, installed and opened apps, private messages addressed through it — is still unbounded until the user clears it. |
 | **Identity / link spoofing** | Pretends to be a linked peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
 | **Stolen or relayed invitation** | Joins a link meant for someone else | The secret is single use and expires in 15 minutes; the setup proof binds both link keys and the URL, so a relayed answer is useless elsewhere (§4). A stolen, unused invitation still works: it is a bearer secret, so hand it over in person. Out-of-band verification is an open proposal. |
 | **DoS on the link service** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-address pacing (2 requests/s, bursts of 20, then 429) and an 8 KiB body cap; setup costs one HMAC check, and every other route a Schnorr check before anything is stored (§3.3). |
-| **Stranger writing to your event store** | Gets data into a store you may not own | Link setup never touches the event store. Anyone but an app peer is refused before the WebSocket upgrade (§3.2); the scoped relay admits only a link carrying the neighborhood named. |
-| **Revoked peer keeps reading** | A peer whose link ended keeps streaming | The app peer set is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
+| **Stranger writing to your event store** | Gets data into a store you may not own | Link setup never touches the event store. The relay is loopback only (§3.2); the scoped relay admits only a link carrying the neighborhood named. |
+| **Revoked peer keeps reading** | A peer whose link ended keeps streaming | Every link service request is NIP-98-signed by a link this device still holds, and a scoped relay connection lasts at most 20 s per exchange, so an ended link stops reading at once (§3.3). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static, no capability API; per-nsite origin isolation; WebView never resolves `.fips` (§5.1). |
 | **Malicious napplet** | Untrusted program asks for more than it should, or tries to go around the seam | Opaque-origin iframe; every capability mediated and checked per call against the user's grants; no key material in the iframe; refused calls are logged (§5.2). |
 | **A napplet publishing as you** | A granted `relay`/`outbox`/`neighbor` napplet posts without asking | By design and said in words at install; revocable per capability, effective on the next call; how far a neighborhood post travels is the neighborhood's reach, set by the user. |
 | **Napplet-named relay as SSRF** | A napplet points the shell at a private host | Relay URLs validated: `ws`/`wss` only, no loopback or private ranges; `.fips` refused (§5.2). |
 | **Malicious Myco update** | Gets a phone to keep, serve or install an APK that isn't the release | The release APK is accepted only as exactly the bytes a publisher-signed file event names (size and SHA-256), from any source; the file event must be named by the newest publisher-signed announcement and name the release key. Android re-checks package, a higher `versionCode` and the signing key before its own install prompt, and refuses another key regardless ([software-updates.md](./software-updates.md), "Carrying the APK"). |
-| **Update withholding or stalling** | An app peer refuses the update, drips it, or serves junk, so others don't update | Only peers that hold it are asked, one at a time from a rotating start; each download has a size-based time budget and the carry a 15-minute deadline; a peer that fails is skipped for hours; the carry never holds the update check. A peer can delay an update, never forge it; any other holder or (online) the CDN still serves it. |
+| **Update withholding or stalling** | A linked peer refuses the update, drips it, or serves junk, so others don't update | Links are asked one at a time; each download has a size-based time budget and the carry a 15-minute deadline; the carry never holds the update check. A peer can delay an update, never forge it; any other link or (online) the CDN still serves it. |
 | **Propagation-privacy leak** | Observers learn what you host / re-serve | See below — partial mitigation only (open). |
 | **Metadata / traffic analysis** | A forwarding peer sees who-talks-to-whom | FIPS routes on `node_addr`, payload is end-to-end encrypted; FIPS rejects onion routing, so traffic-graph metadata is visible to forwarders by design ([../../reference/fips/docs/design/fips-mesh-operation.md](../../../reference/fips/docs/design/fips-mesh-operation.md)). |
 
@@ -376,27 +366,18 @@ The offline-propagation design makes your device a **source** for sites it has
 cached, including sites you merely browsed and then re-serve to others. That is
 the point of the mesh, but it has a privacy cost:
 
-- A peer that queries your relay/Blossom can learn **which sites you hold** —
-  i.e. infer what you have browsed or chosen to cache. Hosting a site is
-  observable.
-- Since the shell cache, the same holds for **notes your apps read**: every
-  answer a napplet fetched from a public relay is cached and served to app
-  peers through the same gate, so a broad `REQ` enumerates what you looked at
-  recently (within the cache budget). Private-message kinds are never taken
-  from a query answer. A setting not to serve the cache to app peers is an
-  open follow-up.
+- A linked peer sees **which apps you share** into a neighborhood it
+  carries — i.e. what you have installed. Hosting an app is observable to
+  your links. Your relay, Blossom and shell cache are not reachable from
+  other phones, so what your apps read is not.
 - Re-serving signed content does not implicate you as its author (signatures
   attribute it to the original author, not the re-server), but *possession* is
   still a signal.
 
-This is an open area. Candidate directions (all TBD / open): a distinction
-between *pinned/propagated* sites (Library sites whose manifests you intend to flood
-onward) and *transient cache* whose manifests you do not re-emit to peers; a
-setting to disable re-serving entirely; not re-flooding manifests for content you
-only transiently fetched. v1 should at minimum make "which manifests you are
-replicating as a source" visible and controllable in the UI rather than implicit.
-**Open question:** default propagation posture — replicate manifests for
-everything cached, or only Library-pinned sites?
+Only what this device actively shares travels: an update it installed, in
+neighborhoods where it shares that extension. Transient cache is never
+re-emitted. The control is the per-neighborhood **Share** switch
+([extensions.md](../nap-neighbor/extensions.md)).
 
 ### Expiring events are on disk
 
@@ -441,7 +422,6 @@ is saved, so a crash cannot leave a message the sweep never hears of.
 - **Open:** explicit inbound port allowlist on the FSP-multiplexed mesh surface
   on Android (§3).
 - **Open:** optional out-of-band link verification (§4).
-- **Open:** propagation-privacy controls and default manifest-replication posture (§6).
 - **Open:** whether to re-surface the FIPS peer ACL as a "block peer" control
   (§3).
 

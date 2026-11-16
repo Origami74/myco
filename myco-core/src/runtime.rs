@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
@@ -154,6 +154,11 @@ pub(crate) fn aware_udp_slots(reported: Option<u8>) -> u8 {
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const PEER_REFRESH: Duration = Duration::from_secs(1);
 
+/// How often Library sites that are not ready are looked for again, through
+/// the neighborhoods and the internet.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const LIBRARY_RETRY_EVERY: Duration = Duration::from_secs(30);
+
 /// Consecutive failed `show_peers` queries before the peer feed is reported as
 /// broken in [`AppState::error`].
 ///
@@ -305,15 +310,10 @@ pub struct AppRuntime {
     /// NAP-INTENT default handlers, from settings — shared with the catalog
     /// so a default the user sets routes the very next invoke.
     intent_defaults: crate::intent::IntentDefaults,
-    /// Latest dev-menu peer speedtest result; written by the spawned run task and
-    /// read back into `state()`. Shared so the async task can update it in place.
-    speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
-    /// Last peer snapshot the 8s tick pulled off the control socket.
+    /// Last peer snapshot the peer tick pulled off the control socket.
     ///
     /// `state()` runs on the FFI thread holding the reducer mutex and must
-    /// never block, so it reads this cache rather than querying. That is a real
-    /// change from the lock-free `peer_views()` read it replaces: the Dev tab's
-    /// peer rows are now up to 8s stale.
+    /// never block, so it reads this cache rather than querying.
     peer_cache: Arc<std::sync::Mutex<Vec<PeerView>>>,
     /// Whether the peer feed is working, so an unbound control socket surfaces
     /// as an error instead of an empty room. See
@@ -372,8 +372,6 @@ impl AppRuntime {
                     "http://{npub}.fips:{}",
                     crate::auth_service::AUTH_PORT
                 )],
-                relay_url: format!("ws://{npub}.fips:4870"),
-                blossom_url: format!("http://{npub}.fips:24243"),
             }
         };
         // Myco's own sockets reach the mesh through a userspace stack on the
@@ -427,8 +425,8 @@ impl AppRuntime {
             });
         }
 
-        // The device keypair (same nsec the node uses) signs Myco's own mesh
-        // traffic: file-transfer messages and the like.
+        // The device keypair (same nsec the node uses) signs uploads to a
+        // custom Blossom server.
         if let Ok(nsec) = identity_store::load_or_generate(Path::new(data_dir)) {
             content.set_device_keys(&nsec);
         }
@@ -495,11 +493,6 @@ impl AppRuntime {
             crate::public_nodes::PublicNodeSettings::load(Path::new(data_dir)),
         ));
 
-        // Serve the relay + Blossom over the mesh so app peers can pull this
-        // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
-        // Bound IPV6_V6ONLY (the mesh is IPv6-only) so `[::]:port` doesn't collide
-        // with another app squatting on `127.0.0.1:port`; a port already in use
-        // surfaces as a warning. Android-only (the host has no TUN). ports.md.
         #[allow(unused_mut)]
         let mut mesh_warning = String::new();
         // Filled by the content layer below (Android only, where the servers
@@ -511,59 +504,21 @@ impl AppRuntime {
         {
             use std::net::SocketAddr;
             let _guard = rt.enter(); // runtime context for TcpListener::from_std
-                                     // The mesh Blossom serves *our own* blobs to peers, so it needs the
-                                     // embedded store. With a custom server configured there is nothing
-                                     // local to serve — peers reach that server by its own URL, not
-                                     // through us — so the listener is simply not bound.
-                                     // Read through the blob cache too, so an app peer can pull what
-                                     // this phone fetched but did not keep.
-                                     // Written as cache too: a peer's upload is passing through, and
-                                     // is bounded by the cache budget like a peer's pushed events.
-            let blobs = content.blobs_local().map(|_| content.cache_blobs());
 
-            // One shared relay hub backs both the mesh socket and a loopback socket,
-            // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
-            // live subscription on localhost (shared store + live bus + hook).
-            // The hook (`MeshGossiper`) acts on what app peers push: file
-            // messages and nsite/napplet manifest updates.
-            let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
-                Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
-            // Restrict mesh access to app peers — linked devices in
-            // sharing an extension with us. Loopback (the in-app WebView) always
-            // bypasses the gate.
-            let gate: Arc<dyn crate::mesh_relay::PeerGate> =
-                Arc::new(crate::content::AppPeerGate::new(content.clone()));
+            // The relay hub the in-app WebView and napplets share (shared store
+            // + live bus). Other phones never reach it: what they carry
+            // arrives through neighborhood links instead.
             let hub = crate::mesh_relay::RelayHub::with_cache(
                 content.pinned_relay(),
                 content.cache_relay(),
-                Some(gossiper),
-                Some(gate),
             );
-            // Kept, not only handed to the two servers: a napplet publishing
+            // Kept, not only handed to the server: a napplet publishing
             // through a capability has no socket to arrive on, and it must
-            // still reach this device's subscriptions and the mesh.
+            // still reach this device's subscriptions.
             *relay_hub.lock().unwrap() = Some(hub.clone());
 
-            // Where peers reach the relay: the mesh stack, or a kernel socket
-            // with no stack (see `mesh_net::peer_listeners`).
-            let (listeners, unreachable) = crate::mesh_net::peer_listeners(4870);
-            for listener in listeners {
-                let hub = hub.clone();
-                rt.spawn(async move {
-                    if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
-                        tracing::error!(error = %e, "mesh relay server exited");
-                    }
-                });
-            }
-            if let Some(e) = unreachable {
-                add_warning(
-                    &mut mesh_warning,
-                    format!("relay port 4870 unavailable (another app using it?): {e}"),
-                );
-            }
-            // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4870`
-            // / `ws://127.0.0.1:4870`; the mesh socket is v6only, so serve loopback
-            // explicitly. Connections here are classified as `Origin::Local`.
+            // Loopback only: the in-app nsite WebView talks to
+            // `ws://localhost:4870` / `ws://127.0.0.1:4870`.
             match crate::mesh_relay::bind("127.0.0.1:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
@@ -588,17 +543,11 @@ impl AppRuntime {
                     );
                 }
             }
-            // The auth plane: the one port open to peers we have never met,
-            // carrying the link handshake. The relay and Blossom gates below
-            // admit only app peers, so without it nobody new could link.
+            // The auth plane: the one port open to other phones, carrying the
+            // link handshake and then each link's relay and blobs.
             // Neighborhood links: check on each peer so "here now" is true.
             rt.spawn(crate::neighbor::service::keep_in_touch(
                 link_service.links.clone(),
-            ));
-            rt.spawn(crate::neighbor::apps::keep_current(
-                link_service.links.clone(),
-                link_service.neighbors.clone(),
-                content.clone(),
             ));
             let port = crate::auth_service::AUTH_PORT;
             let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
@@ -620,62 +569,8 @@ impl AppRuntime {
                     ),
                 );
             }
-            match blobs.clone() {
-                None => {
-                    tracing::info!("blossom: not serving, a custom blob store is configured");
-                }
-                Some(blobs) => {
-                    // Same app-peer gate for blobs: a mesh source must be a
-                    // current app peer (loopback bypasses). Reads are granted
-                    // to every app peer; uploads are not, so the two are
-                    // answered from different flags on the peer's permissions.
-                    let content_for_blob = content.clone();
-                    let access: myco_blossom::server::AccessFn = Arc::new(move |ip, op| match op {
-                        myco_blossom::server::BlobOp::Read => content_for_blob.may_read_blobs(ip),
-                        myco_blossom::server::BlobOp::Write => {
-                            content_for_blob.may_upload_blobs(ip)
-                        }
-                    });
-                    // The embedded store's zstd variants (the release APK) go to
-                    // a peer that asks for them; see `release_apk`.
-                    let precompressed = content.blobs_local().map(|store| store.zstd_dir());
-                    let (listeners, unreachable) = crate::mesh_net::peer_listeners(24243);
-                    for listener in listeners {
-                        let (blobs, access, precompressed) =
-                            (blobs.clone(), access.clone(), precompressed.clone());
-                        rt.spawn(async move {
-                            if let Err(e) = myco_blossom::server::serve_on_guarded(
-                                blobs,
-                                listener,
-                                access,
-                                precompressed,
-                            )
-                            .await
-                            {
-                                tracing::error!(error = %e, "mesh blossom server exited");
-                            }
-                        });
-                    }
-                    if let Some(e) = unreachable {
-                        add_warning(
-                            &mut mesh_warning,
-                            format!("blossom port 24243 unavailable: {e}"),
-                        );
-                    }
-                }
-            }
-
-            // Keepwarm: proactively hold a live relay connection to every app
-            // peer (respawn a dropped one promptly, not lazily on the next send)
-            // and resubscribe on each peer's reconnect edge. This is what restores an
-            // app peer relay link *mutually and fast* after a mid-chain node flaps —
-            // independent of chat traffic and of where the peer sits in the mesh.
-            //
-            // The tick also feeds the node's connected-peer view into the content
-            // layer and drives not-ready-site retries. state() does the same at
-            // 1Hz for foreground snappiness, but its poll pauses when the app is
-            // backgrounded — this loop is what keeps peer-driven relay sync alive
-            // then.
+            // The node's control socket: peer state, and platform-discovered
+            // peers pushed in.
             let control = crate::control_client::ControlClient::new(
                 crate::control_client::socket_path(data_dir),
             );
@@ -689,8 +584,8 @@ impl AppRuntime {
 
             // Public internet mesh nodes: reads their adverts off Nostr and
             // dials the chosen ones over the internet lane, when the user has
-            // opted in and the internet is there. Its own cadence, apart from
-            // the keepwarm tick below, because most of what it does is wait.
+            // opted in and the internet is there. Its own cadence, because
+            // most of what it does is wait.
             rt.spawn(public_nodes.clone().run(
                 control.clone(),
                 content.clone(),
@@ -700,11 +595,8 @@ impl AppRuntime {
 
             // Peer state, every second. fips's control socket has no push, so
             // this is a poll — but `show_peers` is answered from a published
-            // snapshot, off the node's rx loop, so it is cheap. It used to ride
-            // the 8 s keepwarm tick, and a peer took up to 8 s to appear in or
-            // vanish from the UI after fips already knew.
+            // snapshot, off the node's rx loop, so it is cheap.
             {
-                let content = content.clone();
                 let peer_cache = peer_cache.clone();
                 let peer_feed = peer_feed.clone();
                 let node_live = node_live.clone();
@@ -712,7 +604,6 @@ impl AppRuntime {
                 rt.spawn(async move {
                     let mut tick = tokio::time::interval(PEER_REFRESH);
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    let mut known: Vec<String> = Vec::new();
                     loop {
                         tick.tick().await;
                         // Nothing binds the socket until the node's rx loop is
@@ -723,32 +614,10 @@ impl AppRuntime {
                         }
                         match control.show_peers().await {
                             Ok(peers) => {
-                                let connected: Vec<String> = peers
-                                    .iter()
-                                    .filter(|p| p.connected && !p.npub.is_empty())
-                                    .map(|p| p.npub.clone())
-                                    .collect();
                                 *peer_cache.lock().unwrap() = peers;
-                                {
-                                    let mut health = peer_feed.lock().unwrap();
-                                    health.consecutive_failures = 0;
-                                    health.last_error.clear();
-                                }
-                                let changed = connected.len() != known.len()
-                                    || connected.iter().any(|n| !known.contains(n));
-                                content.set_connected_peers(connected.clone());
-                                known = connected;
-                                // Who is directly linked changed, so routes to
-                                // app peers — most of them reached through
-                                // a direct peer, not as one — may have changed
-                                // too. Forget every dial backoff and dial the
-                                // app peers now, rather than at the next keepwarm
-                                // tick (8 s) behind a backoff armed while the
-                                // route was missing (up to 180 s).
-                                if changed {
-                                    content.peer_relays().reset_all_backoff();
-                                    content.keepwarm_tick();
-                                }
+                                let mut health = peer_feed.lock().unwrap();
+                                health.consecutive_failures = 0;
+                                health.last_error.clear();
                             }
                             Err(e) => {
                                 // The last snapshot is deliberately kept:
@@ -771,23 +640,24 @@ impl AppRuntime {
                 });
             }
 
-            // Keepwarm and library retries, on their own slower cadence.
+            // Library sites not ready yet, retried on their own slower
+            // cadence: a neighbor coming into reach, or the internet coming
+            // back, finishes them.
             {
                 let content = content.clone();
                 let node_live = node_live.clone();
                 rt.spawn(async move {
-                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
+                    let mut tick = tokio::time::interval(LIBRARY_RETRY_EVERY);
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
-                        if node_live.load(Ordering::Relaxed) && !content.app_peer_npubs().is_empty()
-                        {
-                            for addr in content.retriable_library_addrs() {
-                                let content = content.clone();
-                                tokio::spawn(async move { content.open_site(addr, None).await });
-                            }
+                        if !node_live.load(Ordering::Relaxed) {
+                            continue;
                         }
-                        content.keepwarm_tick();
+                        for addr in content.retriable_library_addrs() {
+                            let content = content.clone();
+                            tokio::spawn(async move { content.open_site(addr).await });
+                        }
                     }
                 });
             }
@@ -824,7 +694,6 @@ impl AppRuntime {
             stopping: Arc::new(AtomicBool::new(false)),
             start_pending: false,
             content: Some(content),
-            speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             peer_cache,
             peer_feed,
             // Load once here; a missing file is an empty history, and an
@@ -1047,7 +916,6 @@ impl AppRuntime {
             stopping: Arc::new(AtomicBool::new(false)),
             start_pending: false,
             content: None,
-            speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             peer_cache: Arc::new(std::sync::Mutex::new(Vec::new())),
             peer_feed: Arc::new(std::sync::Mutex::new(PeerFeedHealth::default())),
             // No valid data dir on this path, so there is nowhere to persist to.
@@ -1064,9 +932,10 @@ impl AppRuntime {
             NativeAppAction::Tick => self.rev += 1,
             NativeAppAction::StartNode => {
                 self.start_node();
-                // The neighborhoods open with the node: app peers come from
-                // them, and nothing else opens them until a napplet asks.
-                self.refresh_app_peers();
+                // The neighborhoods open with the node: updates and apps
+                // arrive through them, and nothing else opens them until a
+                // napplet asks.
+                let _ = self.neighbors();
                 self.rev += 1;
             }
             NativeAppAction::StopNode => {
@@ -1100,8 +969,8 @@ impl AppRuntime {
                 self.wifi_aware_enabled = enabled;
                 self.rev += 1;
             }
-            NativeAppAction::OpenNsite { link, holder } => {
-                self.open_nsite(&link, holder);
+            NativeAppAction::OpenNsite { link } => {
+                self.open_nsite(&link);
                 self.rev += 1;
             }
             NativeAppAction::ImportNsite { dir } => {
@@ -1123,8 +992,8 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::FetchNapplet { pointer, holder } => {
-                self.fetch_napplet(&pointer, holder);
+            NativeAppAction::FetchNapplet { pointer } => {
+                self.fetch_napplet(&pointer);
                 self.rev += 1;
             }
             NativeAppAction::AcceptNappletUpdate { pointer, granted } => {
@@ -1381,10 +1250,6 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::SpeedtestPeer { npub } => {
-                self.start_speedtest(npub);
-                self.rev += 1;
-            }
             NativeAppAction::CreateNeighborhood { name, auto_accept } => {
                 if let Some(n) = self.neighbors() {
                     if !name.trim().is_empty() {
@@ -1429,7 +1294,6 @@ impl AppRuntime {
             }
             NativeAppAction::EndLink { link_id } => {
                 self.end_link(link_id);
-                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::SetNeighborhoodPolicy {
@@ -1457,7 +1321,6 @@ impl AppRuntime {
             }
             NativeAppAction::LeaveNeighborhood { neighborhood } => {
                 self.leave_neighborhood(&neighborhood);
-                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::DropFromLink {
@@ -1465,7 +1328,6 @@ impl AppRuntime {
                 neighborhood,
             } => {
                 self.drop_from_link(link_id, neighborhood);
-                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::SetNeighborhoodExtension {
@@ -1480,7 +1342,6 @@ impl AppRuntime {
                 ) {
                     n.set_extension(id, &extension, share, enabled);
                 }
-                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
@@ -1492,58 +1353,6 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::ShareFile {
-                path,
-                name,
-                mime,
-                peer_npub,
-            } => {
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move {
-                        if let Err(e) = content.start_file_share(path, name, mime, peer_npub).await
-                        {
-                            tracing::warn!(error = %e, "file share: offer failed");
-                        }
-                    });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::AcceptFileTransfer { transfer_id } => {
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move {
-                        if let Err(e) = content.respond_file_transfer(transfer_id, true).await {
-                            tracing::warn!(error = %e, "file share: accept failed");
-                        }
-                    });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::DeclineFileTransfer { transfer_id } => {
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move {
-                        if let Err(e) = content.respond_file_transfer(transfer_id, false).await {
-                            tracing::warn!(error = %e, "file share: decline failed");
-                        }
-                    });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::CancelFileTransfer { transfer_id } => {
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move {
-                        if let Err(e) = content.cancel_file_transfer(transfer_id).await {
-                            tracing::warn!(error = %e, "file share: cancel failed");
-                        }
-                    });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::ForgetFileTransfer { transfer_id } => {
-                if let Some(content) = &self.content {
-                    content.forget_file_transfer(&transfer_id);
-                }
-                self.rev += 1;
-            }
         }
     }
 
@@ -1551,19 +1360,6 @@ impl AppRuntime {
 
     /// The device's neighborhoods, building the napplet host (which owns
     /// them) on first use.
-    /// Recompute the app peers from the links and neighborhoods now, rather
-    /// than at the next tick of [`crate::neighbor::apps::keep_current`].
-    fn refresh_app_peers(&mut self) {
-        let (Some(n), Some(svc), Some(content)) = (
-            self.neighbors(),
-            self.link_service.clone(),
-            self.content.clone(),
-        ) else {
-            return;
-        };
-        crate::neighbor::apps::refresh(&n, &svc.links, &content);
-    }
-
     fn neighbors(&mut self) -> Option<Arc<crate::neighbor::Neighbors>> {
         if self.neighbors.is_none() {
             let _ = self.napplet_context();
@@ -1794,90 +1590,9 @@ impl AppRuntime {
         });
     }
 
-    /// Spawn a peer speedtest (spawn-not-block; the result is observed via the
-    /// `speedtest` field on the next `state()`). A ~1 MiB Blossom round-trip — big
-    /// enough to dominate connection setup, small enough not to bloat the peer's
-    /// store. Ignored if a run is already in flight.
-    fn start_speedtest(&mut self, npub: String) {
-        // Adaptive payload: start small and DOUBLE each run until one takes long
-        // enough (>= TARGET) to be a meaningful measurement past connection
-        // setup — the last run's result is the reported one. A slow link (BLE,
-        // ~tens of KB/s) exceeds TARGET on the first 256 KiB run and stops
-        // there; a fast link (Wi-Fi Aware) climbs to a few/tens of MiB. Capped
-        // at MAX_BYTES (the Blossom upload limit).
-        const START_BYTES: usize = 262_144; // 256 KiB
-        const MAX_BYTES: usize = 64 * 1024 * 1024; // 64 MiB (Blossom body cap)
-        const TARGET: Duration = Duration::from_secs(5);
-        let Some(rt) = self.rt.as_ref() else { return };
-        {
-            let mut s = self.speedtest.lock().unwrap();
-            if s.running {
-                return;
-            }
-            s.running = true;
-            s.peer_npub = npub.clone();
-            s.error.clear();
-        }
-        let slot = self.speedtest.clone();
-        rt.spawn(async move {
-            tracing::info!(peer = %npub, "speedtest: starting");
-            let mut any_ok = false;
-            let mut last_err: Option<String> = None;
-            let mut size = START_BYTES;
-            loop {
-                let started = Instant::now();
-                let result =
-                    crate::ip_source::speedtest_peer(&npub, size, Duration::from_secs(120)).await;
-                let elapsed = started.elapsed();
-                match result {
-                    Ok((up, down)) => {
-                        any_ok = true;
-                        tracing::info!(
-                            peer = %npub, size, up_mbps = up, down_mbps = down,
-                            elapsed_ms = elapsed.as_millis() as u64, "speedtest: run ok"
-                        );
-                        {
-                            let mut s = slot.lock().unwrap();
-                            s.up_mbps = up;
-                            s.down_mbps = down;
-                            s.bytes = size as u64;
-                            // Bump per run so the UI shows the size climbing.
-                            s.generation += 1;
-                        }
-                        // Long enough to be meaningful, or hit the cap → done.
-                        // Else the link is fast; double and measure again.
-                        if elapsed >= TARGET || size >= MAX_BYTES {
-                            break;
-                        }
-                        size = (size * 2).min(MAX_BYTES);
-                    }
-                    Err(e) => {
-                        tracing::warn!(peer = %npub, size, error = format!("{e:#}"), "speedtest: run failed");
-                        last_err = Some(e.to_string());
-                        break;
-                    }
-                }
-            }
-            let mut s = slot.lock().unwrap();
-            s.running = false;
-            s.generation += 1;
-            match last_err {
-                // A failed larger run after a smaller success keeps the good
-                // result; only surface an error if nothing succeeded.
-                Some(err) if !any_ok => {
-                    s.up_mbps = 0.0;
-                    s.down_mbps = 0.0;
-                    s.error = err;
-                }
-                _ => s.error.clear(),
-            }
-        });
-    }
-
     /// Spawn a sync-to-readiness for a pasted link / shared site (spawn-not-block;
-    /// readiness is observed via `siteStatus` on `Tick`). `holder` is the mesh
-    /// peer to pull from first, if this came from a share QR.
-    fn open_nsite(&mut self, link: &str, holder: Option<String>) {
+    /// readiness is observed via `siteStatus` on `Tick`).
+    fn open_nsite(&mut self, link: &str) {
         let Some(addr) = nsite_deck::parse_link(link) else {
             self.error = format!("unrecognized nsite link: {link}");
             return;
@@ -1887,7 +1602,7 @@ impl AppRuntime {
         };
         // Asked for by the user: a site they removed earlier may come back.
         content.unforget_site(&addr);
-        rt.spawn(content.open_site(addr, holder));
+        rt.spawn(content.open_site(addr));
     }
 
     /// Spawn a dev side-load of a bundle directory.
@@ -2057,14 +1772,13 @@ impl AppRuntime {
     /// Spawn-not-block, like every other sync path: the FFI returns immediately
     /// and the result lands in state. What the napplet `requires` is what the
     /// review screen then asks about.
-    fn fetch_napplet(&mut self, pointer: &str, holder: Option<String>) {
+    fn fetch_napplet(&mut self, pointer: &str) {
         tracing::info!("fetching napplet {pointer}");
 
         // Every failure below ends up in front of the user. Returning quietly
         // would leave the Add sheet looking like it did nothing, which is
         // indistinguishable from a tap that never registered — and is exactly
         // how a broken fetch hides.
-        let holder_for_retry = holder.clone();
         let fail = |review: &Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
                     pointer: &str,
                     message: String| {
@@ -2087,7 +1801,6 @@ impl AppRuntime {
                 unsupported: Vec::new(),
                 icon: None,
                 error: message,
-                holder: holder_for_retry.clone(),
                 intent_token: String::new(),
                 manifest: None,
             });
@@ -2126,8 +1839,7 @@ impl AppRuntime {
         // until it finishes reads as nothing having happened at all.
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
-        let peer_relays = content.peer_relays();
-        let reachable = content.reachable_npubs();
+        let neighborhoods = content.extension_source(crate::neighbor::extensions::NAPPLET_UPDATES);
         let store = content.relay();
         // Read before the spawn, as the update check does: offline-only is a
         // setting, and a fetch that starts under it does not get to consult
@@ -2173,20 +1885,12 @@ impl AppRuntime {
             icon: None,
             grants: Vec::new(),
             error: String::new(),
-            holder: holder.clone(),
             intent_token: String::new(),
             manifest: None,
         });
 
         rt.spawn(async move {
-            let sources = napplet_sources(
-                &addr,
-                holder.as_deref(),
-                &reachable,
-                peer_relays,
-                store,
-                offline_only,
-            );
+            let sources = napplet_sources(&addr, neighborhoods, store, offline_only);
             let mut found = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
                 "Offline-only is on and nobody from your neighborhoods is nearby"
             } else {
@@ -2224,8 +1928,7 @@ impl AppRuntime {
                         crate::napplet::review_standing(&content, &addr, &found.requires, &event)
                             .await;
                     // The manifest only, verified by `fetch_manifest`: the
-                    // next look at this napplet, and an app peer asking,
-                    // find it here. Its bytes still wait for the user's yes,
+                    // next look at this napplet finds it here. Its bytes still wait for the user's yes,
                     // and keeping it installs nothing — the Library is.
                     content.keep_seen([&event]);
                     let grants = crate::napplet::effective_grants(&found.requires);
@@ -2253,7 +1956,6 @@ impl AppRuntime {
                         icon: icon.and(found.icon),
                         grants,
                         error: String::new(),
-                        holder: holder.clone(),
                         intent_token: String::new(),
                         manifest: Some(event),
                     }
@@ -2281,7 +1983,6 @@ impl AppRuntime {
                         icon: None,
                         grants: Vec::new(),
                         error: e.to_string(),
-                        holder: holder.clone(),
                         intent_token: String::new(),
                         manifest: None,
                     }
@@ -2417,21 +2118,13 @@ impl AppRuntime {
         {
             review.installing = true;
         }
-        let peer_relays = content.peer_relays();
-        let reachable = content.reachable_npubs();
+        let neighborhoods = content.extension_source(crate::neighbor::extensions::NAPPLET_UPDATES);
         let store = content.relay();
         let offline_only = content.is_offline_only();
         let review = self.napplet_review.clone();
 
         rt.spawn(async move {
-            let sources = napplet_sources(
-                &addr,
-                reviewed.holder.as_deref(),
-                &reachable,
-                peer_relays,
-                store,
-                offline_only,
-            );
+            let sources = napplet_sources(&addr, neighborhoods, store, offline_only);
             let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
             for source in &sources {
                 ingested = host.ingest_event(manifest.clone(), source.as_ref()).await;
@@ -2480,22 +2173,17 @@ impl AppRuntime {
         } else {
             self.napplet_context().map(|(host, _)| host)
         };
-        // Napplet authors publish to public relays and the sharer is not
-        // recorded, so offline-only has nowhere to ask: counted as checked,
-        // none updated. The nsite half asks app peers' mesh relays only.
+        // Napplet authors publish to public relays, so offline-only has
+        // nowhere to ask: counted as checked, none updated. Neighbors share
+        // their updates through `napplet-updates` on their own; pinning one
+        // found here shares it the same way.
         let offline_only = content.is_offline_only();
-        let forwarder = content.clone();
         let napplet_check = async move {
             let host = host?;
             if offline_only {
                 return Some((0, napplets.len()));
             }
             let (updated, checked) = crate::napplet::refresh_all(&host, &napplets).await;
-            // We hold the new bytes now: pass each update on to app peers, as
-            // an nsite update found here is.
-            for manifest in &updated {
-                forwarder.forward_updated_manifest(manifest);
-            }
             Some((updated.len(), checked))
         };
         rt.spawn(content.check_updates_with(in_flight, napplet_check));
@@ -2594,10 +2282,17 @@ impl AppRuntime {
     ) {
         use crate::neighbor::extensions::{MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
         neighbors.set_kept_blobs(content.blobs());
-        content.set_release_source(Arc::new(crate::neighbor::updates::ExtensionSource {
-            neighbors: Arc::downgrade(neighbors),
-            extension: MYCO_RELEASE,
-        }));
+        // Where each extension's apps are looked for: opening a site,
+        // installing a napplet, carrying the release APK.
+        for extension in [MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES] {
+            content.set_extension_source(
+                extension,
+                Arc::new(crate::neighbor::updates::ExtensionSource {
+                    neighbors: Arc::downgrade(neighbors),
+                    extension,
+                }),
+            );
+        }
 
         // A release: the file events with the APK, then the announcement.
         let mut releases = content.release_updates();
@@ -2694,19 +2389,12 @@ impl AppRuntime {
                     tracing::info!(event = %id, activated, "nsite update from a neighborhood");
                     return;
                 }
-                // No hops: once pinned, this device shares it onward itself.
-                let inbound = crate::mesh_relay::Inbound {
-                    origin: crate::mesh_relay::Origin::Mesh,
-                    event_ttl: Some(0),
-                    sender: None,
-                };
+                // Once pinned, this device shares it onward itself.
                 let mut sources = vec![source];
                 sources.extend(
                     content.fallback_sources(Some(myco_napplet_runtime::nap::resource::MAX_BYTES)),
                 );
-                let outcome = content
-                    .handle_napplet_manifest(manifest, &inbound, &sources, |_, _| {})
-                    .await;
+                let outcome = content.handle_napplet_manifest(manifest, &sources).await;
                 tracing::info!(event = %id, ?outcome, "napplet update from a neighborhood");
             });
         }));
@@ -3196,19 +2884,17 @@ impl AppRuntime {
             .collect();
         let ble_adverts = self.ble_adverts();
 
-        // content.rs snapshot accessors `state()` already calls unconditionally
-        // (RESEARCH.md Pitfall 5) — fetched once here and reused for both the
-        // peers merge below and the AppState fields further down, so the merge
-        // adds no new lock acquisitions.
-        let app_peers = self
-            .content
+        // The names linked peers gave in their invitations, by device npub.
+        let link_names: std::collections::HashMap<String, String> = self
+            .link_service
             .as_ref()
-            .map(|c| c.app_peers_snapshot())
-            .unwrap_or_default();
-        let reachable_npubs = self
-            .content
-            .as_ref()
-            .map(|c| c.reachable_npubs())
+            .map(|svc| {
+                svc.links
+                    .all()
+                    .into_iter()
+                    .filter_map(|l| Some((l.device_npub()?, l.name.clone()?)))
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Lane-origin overrides (npub → observed lane, e.g. "aware" vs the
@@ -3248,40 +2934,12 @@ impl AppRuntime {
             &peer_views,
             &ble_peers,
             &ble_adverts,
-            &app_peers,
-            &reachable_npubs,
+            &link_names,
             &lane_by_npub,
             &crate::advert_names::snapshot(),
             &ble_attempts,
             now_ms(),
         );
-
-        // Feed the connected-peer npubs to the content layer so `open_site` can
-        // pull from currently-reachable app peers (and skip offline ones).
-        if let Some(content) = self.content.as_ref() {
-            let connected: Vec<String> = ble_peers
-                .iter()
-                .filter(|p| p.connected && !p.npub.is_empty())
-                .map(|p| p.npub.clone())
-                .collect();
-            content.set_connected_peers(connected);
-
-            if let Some(rt) = self.rt.as_ref() {
-                // Retry not-ready downloads whenever there are app peers.
-                // open_site(_, None) tries every member — hop count is FIPS's
-                // problem, and an unreachable one costs a bounded dial then backs
-                // off — and `retriable_library_addrs` skips sites already syncing,
-                // so this re-tries about once per attempt-duration (not every
-                // poll), and keeps trying as a flaky session settles instead of
-                // firing once on the connect edge and going quiet.
-                if !content.app_peer_npubs().is_empty() {
-                    for addr in content.retriable_library_addrs() {
-                        let content = content.clone();
-                        rt.spawn(async move { content.open_site(addr, None).await });
-                    }
-                }
-            }
-        }
 
         AppState {
             rev: self.rev,
@@ -3365,8 +3023,6 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.cache_view())
                 .unwrap_or_else(CacheView::empty),
-            app_peers,
-            reachable_npubs,
             offline_only: self
                 .content
                 .as_ref()
@@ -3401,13 +3057,7 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.update_check_snapshot())
                 .unwrap_or_default(),
-            speedtest: self.speedtest.lock().unwrap().clone(),
             neighborhoods: self.neighborhoods_view(),
-            file_transfers: self
-                .content
-                .as_ref()
-                .map(|c| c.file_transfers_snapshot())
-                .unwrap_or_default(),
             peers,
         }
     }
@@ -3682,7 +3332,7 @@ fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
             continue;
         };
         content.add_to_library(&addr, None, crate::content::now_secs());
-        rt.spawn(content.clone().open_site(addr, None));
+        rt.spawn(content.clone().open_site(addr));
     }
     if let Err(e) = std::fs::write(&marker, b"1\n") {
         tracing::warn!(error = %e, "could not write default-seed marker");
@@ -3996,7 +3646,6 @@ fn update_review(
         icon: opened.icon.clone(),
         grants,
         error: String::new(),
-        holder: None,
         intent_token: String::new(),
         manifest: None,
     }
@@ -4028,16 +3677,9 @@ fn answered_update(
     }
 }
 
-/// How long a phone may send nothing — no response, no next chunk — before
-/// a napplet's bytes are asked of the next phone in reach instead. A phone
-/// still on the link sends something well inside this; one that walked out
-/// of range sends nothing, and waiting out the HTTP client's 60 s for it
-/// leaves the user staring at a progress ring.
-const NAPPLET_MESH_STALL: Duration = Duration::from_secs(5);
-
 /// NAP-INTENT's [`crate::intent::HintResolver`] over the same sources, and
-/// the same offline-only rule, the install review fetches from: the hint's
-/// relays, the user's, the phones nearby.
+/// the same offline-only rule, the install review fetches from: the
+/// neighborhoods, the hint's relays, the user's.
 struct HintSources {
     content: Arc<crate::content::Content>,
 }
@@ -4055,9 +3697,8 @@ impl crate::intent::HintResolver for HintSources {
         };
         let sources = napplet_sources(
             &addr,
-            None,
-            &self.content.reachable_npubs(),
-            self.content.peer_relays(),
+            self.content
+                .extension_source(crate::neighbor::extensions::NAPPLET_UPDATES),
             self.content.relay(),
             self.content.is_offline_only(),
         );
@@ -4077,88 +3718,31 @@ impl crate::intent::HintResolver for HintSources {
     }
 }
 
-/// Who [`napplet_sources`] asks for a napplet.
-#[derive(Debug, PartialEq)]
-struct NappletAsk {
-    /// The phones asked over the mesh, all at once: the sharer first, if the
-    /// pointer named one, then the other app peers in reach.
-    mesh: Vec<String>,
-    /// The public relays, after the mesh.
-    public: bool,
-}
-
-/// The plan behind [`napplet_sources`]: the sharer and every other app
-/// peer in reach (`reachable`), then — unless offline-only is on — the
-/// public relays. The mesh is not the internet, so offline-only leaves it in.
-fn napplet_ask(holder: Option<&str>, reachable: &[String], offline_only: bool) -> NappletAsk {
-    let mut mesh: Vec<String> = holder.map(str::to_string).into_iter().collect();
-    for npub in reachable {
-        if !mesh.contains(npub) {
-            mesh.push(npub.clone());
-        }
-    }
-    NappletAsk {
-        mesh,
-        public: !offline_only,
-    }
-}
-
-/// Where to look for a napplet, in the order worth trying. The mesh first:
-/// the peer who handed it over (they demonstrably have it, and a napplet
-/// shared by a tap should not need the internet) and the app peers in
-/// reach (`reachable`, from [`Content::reachable_npubs`]) — a bare `naddr`
-/// from a link names no sharer, and a phone in the room may still hold it.
-/// They are asked at once, first good answer wins, so a sharer who has
-/// walked off does not hold up a phone that is still here; the bytes then
-/// come from that one phone (see [`crate::ip_source::FirstOf`]). Only
-/// app peers: no one else's relay or Blossom lets this phone pull.
-/// Last the pointer's own relay hints, the author's NIP-65 relays and the
-/// defaults — unless offline-only is on, when the mesh is the only source,
-/// as it is for every other acquisition path.
+/// Where to look for a napplet, in the order worth trying: the
+/// neighborhoods where this device gets `napplet-updates` (`neighborhoods`,
+/// from [`Content::extension_source`]) — a phone in reach may hold it, and a
+/// napplet shared by a tap should not need the internet — then the
+/// pointer's own relay hints, the author's NIP-65 relays and the defaults,
+/// unless offline-only is on, when the neighborhoods are the only source,
+/// as they are for every other acquisition path.
 fn napplet_sources(
     addr: &crate::napplet::NappletAddr,
-    holder: Option<&str>,
-    reachable: &[String],
-    peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
+    neighborhoods: Option<Arc<dyn nsite_deck::seams::PeerSource>>,
     store: Arc<dyn nsite_deck::seams::RelayBackend>,
     offline_only: bool,
-) -> Vec<Box<dyn nsite_deck::seams::PeerSource>> {
-    let ask = napplet_ask(holder, reachable, offline_only);
-    let mut sources: Vec<Box<dyn nsite_deck::seams::PeerSource>> = Vec::new();
-    let mesh: Vec<Box<dyn nsite_deck::seams::PeerSource>> = ask
-        .mesh
-        .iter()
-        .filter_map(
-            |npub| match crate::ip_source::mesh_source_for(peer_relays.clone(), npub) {
-                Ok(mesh) => Some(Box::new(
-                    mesh.with_kind(addr.kind())
-                        .with_stall_timeout(NAPPLET_MESH_STALL),
-                ) as Box<_>),
-                Err(e) => {
-                    tracing::warn!("cannot ask {npub}: {e}");
-                    None
-                }
-            },
-        )
-        .collect();
-    if !mesh.is_empty() {
-        sources.push(Box::new(crate::ip_source::FirstOf::new(
-            mesh,
-            addr.author,
-            addr.d_tag.clone(),
-            addr.kind(),
-        )));
-    }
-    if ask.public {
+) -> Vec<Arc<dyn nsite_deck::seams::PeerSource>> {
+    let mut sources: Vec<Arc<dyn nsite_deck::seams::PeerSource>> =
+        neighborhoods.into_iter().collect();
+    if offline_only {
+        tracing::info!("offline-only: a napplet is asked of the neighborhoods only");
+    } else {
         // A short grace: the newest version usually comes from the first
         // relay to answer, and the user is watching "Looking for this app".
         // The update check keeps the longer default.
-        sources.push(Box::new(
+        sources.push(Arc::new(
             addr.public_source(store)
                 .with_first_answer_grace(Duration::from_millis(250)),
         ));
-    } else {
-        tracing::info!("offline-only: a napplet is asked of the mesh only");
     }
     sources
 }
@@ -4307,6 +3891,7 @@ fn add_warning(warnings: &mut String, warning: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("myco-test-{}-{}", std::process::id(), tag))
@@ -4794,7 +4379,6 @@ mod tests {
             unsupported: Vec::new(),
             icon: None,
             error: String::new(),
-            holder: None,
             intent_token: String::new(),
             manifest: None,
         };
@@ -5586,7 +5170,6 @@ mod tests {
         let next = format!("{npub}:other");
         rt.dispatch(NativeAppAction::FetchNapplet {
             pointer: next.clone(),
-            holder: None,
         });
         let current = rt.napplet_review.lock().unwrap().clone().unwrap();
         assert_eq!(current.pointer, next);
@@ -5599,7 +5182,7 @@ mod tests {
 
     /// Reviewing a napplet keeps its manifest here — the manifest only: its
     /// bytes are not fetched and nothing is installed until the user says
-    /// yes. Driven through the real review fetch, from the sharer's relay.
+    /// yes. Driven through the real review fetch, from the neighborhoods.
     #[test]
     fn a_reviewed_napplet_keeps_its_manifest_and_nothing_else() {
         use myco_napplet_runtime::testing::NappletBuilder;
@@ -5609,22 +5192,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
-        // Offline only: the sharer is the one source, no public relays.
+        // Offline only: the neighborhoods are the one source, no public relays.
         rt.dispatch(NativeAppAction::SetOfflineOnly { enabled: true });
         let content = rt.content.clone().unwrap();
 
         let napplet = NappletBuilder::new().d_tag(Some("game")).build();
-        let sharer = nostr::Keys::generate().public_key().to_bech32().unwrap();
         let mocks = tokio::runtime::Runtime::new().unwrap();
-        let url = mocks.block_on(crate::content::library_kind_tests::mesh_peer_holding(vec![
-            napplet.manifest.clone(),
-        ]));
-        content.peer_relays().redirect(&sharer, &url);
+        content.set_extension_source(
+            crate::neighbor::extensions::NAPPLET_UPDATES,
+            Arc::new(Holding(vec![napplet.manifest.clone()])),
+        );
 
         let pointer = format!("{}:game", napplet.author.to_bech32().unwrap());
         rt.dispatch(NativeAppAction::FetchNapplet {
             pointer: pointer.clone(),
-            holder: Some(sharer),
         });
         let mut review = None;
         for _ in 0..250 {
@@ -5721,7 +5302,6 @@ mod tests {
             icon: None,
             grants: Vec::new(),
             error: String::new(),
-            holder: None,
             intent_token: String::new(),
             manifest: None,
         }
@@ -5761,64 +5341,58 @@ mod tests {
         assert!(!current.loading);
     }
 
-    /// A bare `naddr` names no sharer: the app peers in reach are
-    /// asked, then the public relays.
-    #[test]
-    fn a_napplet_with_no_sharer_is_asked_of_the_peers_in_reach() {
-        let ask = napplet_ask(None, &["npub1peer".to_string()], false);
-        assert_eq!(
-            ask,
-            NappletAsk {
-                mesh: vec!["npub1peer".to_string()],
-                public: true,
-            }
-        );
+    /// A source holding fixed manifests and no blobs: what the neighborhoods
+    /// look like to the code under test.
+    struct Holding(Vec<nostr::Event>);
+
+    #[async_trait::async_trait]
+    impl nsite_deck::seams::PeerSource for Holding {
+        async fn fetch_manifest(
+            &self,
+            author: &nostr::PublicKey,
+            d_tag: Option<&str>,
+        ) -> anyhow::Result<Option<nostr::Event>> {
+            Ok(self
+                .0
+                .iter()
+                .find(|e| e.pubkey == *author && e.tags.identifier() == d_tag)
+                .cloned())
+        }
+
+        async fn fetch_blob(
+            &self,
+            _sha256_hex: &str,
+            _servers: &[String],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
     }
 
-    /// Offline-only keeps the internet out, not the phones in the room.
+    /// The neighborhoods are asked first, then the public relays; offline-only
+    /// keeps the internet out, not the neighborhoods.
     #[test]
-    fn offline_only_still_asks_the_peers_in_reach() {
-        let ask = napplet_ask(None, &["npub1peer".to_string()], true);
-        assert_eq!(ask.mesh, vec!["npub1peer".to_string()]);
-        assert!(!ask.public);
-    }
-
-    /// The sharer is asked alongside the phones in reach — not ahead of
-    /// them, where a sharer who walked off would hold them up — and once.
-    #[test]
-    fn the_sharer_is_asked_with_the_peers_in_reach_and_once() {
-        let reachable = ["npub1other".to_string(), "npub1sharer".to_string()];
-        let ask = napplet_ask(Some("npub1sharer"), &reachable, false);
-        assert_eq!(
-            ask.mesh,
-            vec!["npub1sharer".to_string(), "npub1other".to_string()]
-        );
-    }
-
-    /// With offline-only on and no sharer, a peer in reach is still a
-    /// source: the review does not stop at "nobody nearby" without asking.
-    #[test]
-    fn offline_only_with_a_peer_in_reach_has_somewhere_to_ask() {
-        use nostr::nips::nip19::ToBech32;
+    fn a_napplet_is_asked_of_the_neighborhoods_then_the_internet() {
         let keys = nostr::Keys::generate();
         let addr = crate::napplet::NappletAddr {
             author: keys.public_key(),
             d_tag: Some("doodleduo".to_string()),
             relays: Vec::new(),
         };
-        let peer = nostr::Keys::generate().public_key().to_bech32().unwrap();
-        let sources = |reachable: &[String]| {
+        let neighborhoods = || -> Option<Arc<dyn nsite_deck::seams::PeerSource>> {
+            Some(Arc::new(Holding(Vec::new())))
+        };
+        let count = |n: Option<Arc<dyn nsite_deck::seams::PeerSource>>, offline: bool| {
             napplet_sources(
                 &addr,
-                None,
-                reachable,
-                Arc::new(crate::peer_relay::PeerRelayPool::new()),
+                n,
                 Arc::new(nsite_deck::testing::MemRelay::new()),
-                true,
+                offline,
             )
             .len()
         };
-        assert_eq!(sources(&[]), 0);
-        assert_eq!(sources(&[peer]), 1);
+        assert_eq!(count(None, true), 0);
+        assert_eq!(count(neighborhoods(), true), 1);
+        assert_eq!(count(None, false), 1);
+        assert_eq!(count(neighborhoods(), false), 2);
     }
 }

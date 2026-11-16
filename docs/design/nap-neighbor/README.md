@@ -14,9 +14,8 @@ transport-independent Nostr protocol. It is not a NIP yet.
 | --- | --- | --- |
 | [links.md](links.md) | Invitations, setup proof, link keys, offers, NIP-98, the link service on `:4873` | `myco-core/src/neighbor/{link,service}.rs` |
 | [data-plane.md](data-plane.md) | Scoped store and blobs, the scoped relay, publish and subscribe, hops, dedup | `myco-core/src/neighbor/{data,wire}.rs` |
-| [extensions.md](extensions.md) | What a device shares proactively: napplet updates, nsite updates, the Myco release | `myco-core/src/neighbor/extensions.rs` |
+| [extensions.md](extensions.md) | What a device shares proactively: napplet updates, nsite updates, the Myco release; how a missing app is fetched | `myco-core/src/neighbor/{extensions,updates}.rs` |
 | [policy.md](policy.md) | Per-neighborhood settings: reach presets, blob push hops, extensions | `myco-core/src/neighbor/store.rs` |
-| [app-peers.md](app-peers.md) | Myco's own basics over neighborhoods, the `:4870` / `:24243` gate | `myco-core/src/neighbor/apps.rs` |
 | [napplet-api.md](napplet-api.md) | What NAP-NEIGHBOR exposes, `neighborhood://` addresses, how other NAPs carry them | `myco-napplet-runtime/src/nap/neighbor/`, `myco-core/src/neighbor/host.rs` |
 | [ui.md](ui.md) | Neighbors tab, neighborhood page, invite and join | `myco-core/src/neighbor/view.rs`, `android/…/app/myco/neighbor/` |
 
@@ -29,7 +28,7 @@ transport-independent Nostr protocol. It is not a NIP yet.
 | **Link key** | A key generated for one link. Not the FIPS device key, not the user's social key. |
 | **Invitation** | A one-time `myco://link/…` payload: QR, share link or NFC tap. |
 | **Offer** | A signed event (kind 37516) listing the endpoints one side serves on a link. |
-| **App peer** | A linked device sharing an extension with us ([extensions.md](extensions.md)). Myco fetches apps and updates from app peers. |
+| **Extension** | Something a device shares proactively in a neighborhood: app, site and Myco updates ([extensions.md](extensions.md)). Each has its own Get and Share switch. |
 
 ## What a neighborhood is
 
@@ -86,10 +85,14 @@ radio range. It is not built.
   outbox mesh lanes. Neighborhoods carry that traffic now.
 - NAP-MESH (the `mesh` domain) and the **App reach** setting. NAP-NEIGHBOR
   replaces them.
+- Myco's relay and Blossom open to linked devices, manifest forwarding
+  over them, and sending files between phones. Apps and updates travel as
+  extensions ([extensions.md](extensions.md)). Sending files is to return
+  as a napplet on NAP-FS and NAP-NEIGHBOR.
 
 ## See also
 
 - [../core/concepts.md](../core/concepts.md) — glossary.
 - [../core/security.md](../core/security.md) — what a link authorizes.
-- [../../reference/ports.md](../../reference/ports.md) — `:4873`, `:4870`, `:24243`.
+- [../../reference/ports.md](../../reference/ports.md) — `:4873`, the only port open to other phones.
 - [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md) — the napplet host.

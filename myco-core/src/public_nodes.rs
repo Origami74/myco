@@ -3,10 +3,10 @@
 //! When the phone is online it can also peer with public FIPS nodes over the
 //! internet, so neighbors who are not in the same room still reach each
 //! other through the mesh. A public node is an **ordinary mesh peer**: fips
-//! routes through it, nothing more. It is not an app peer and the app peer
-//! gate does not change — it can carry our packets, it cannot read our relay,
-//! our Blossom or the contents of anything (every mesh session is end to end
-//! Noise above it).
+//! routes through it, nothing more. It is not linked to us — it can carry our
+//! packets, it cannot read our relay, our Blossom or the contents of anything
+//! (the relay is loopback only, links are their own service, and every mesh
+//! session is end to end Noise above it).
 //!
 //! # Where the list comes from
 //!
@@ -43,7 +43,7 @@
 //! links are left to fips's own liveness rather than torn down.
 //!
 //! A public node never replaces a radio path: it is a different peer from
-//! any app peer, so an app peer reachable over BLE, Aware or the LAN keeps
+//! any neighbor, so a neighbor reachable over BLE, Aware or the LAN keeps
 //! that direct link, and the internet lane's socket is a backup-role
 //! transport on a multi-path core.
 //!
@@ -694,18 +694,10 @@ impl PublicNodes {
     /// Decide what this tick does. Pure over the held state, the clock and
     /// the gate; records the dials it plans so the next tick sees them.
     ///
-    /// `connected` is the npubs fips reports connected; `app_peers` this
-    /// device's app peers, which are never disconnected from here even if one of
-    /// them happens to run a public node. Only links this module dialled are
-    /// ever disconnected: a peer that also advertises publicly but reached us
-    /// another way (a LAN daemon, a radio) is not ours to drop.
-    pub fn plan(
-        &self,
-        now_ms: u64,
-        gate: Gate,
-        connected: &HashSet<String>,
-        app_peers: &HashSet<String>,
-    ) -> TickPlan {
+    /// `connected` is the npubs fips reports connected. Only links this module
+    /// dialled are ever disconnected: a peer that also advertises publicly but
+    /// reached us another way (a LAN daemon, a radio) is not ours to drop.
+    pub fn plan(&self, now_ms: u64, gate: Gate, connected: &HashSet<String>) -> TickPlan {
         let mut inner = self.lock();
         let inner = &mut *inner;
         let now_secs = now_ms / 1000;
@@ -740,7 +732,6 @@ impl PublicNodes {
             plan.disconnect = public_connected
                 .iter()
                 .filter(|n| inner.dials.contains_key(n.as_str()))
-                .filter(|n| !app_peers.contains(n.as_str()))
                 .filter(|n| !enabled || !inner.settings.is_selected(n))
                 .map(|n| (*n).clone())
                 .collect();
@@ -963,9 +954,7 @@ impl PublicNodes {
                 .filter(|p| p.connected && !p.npub.is_empty())
                 .map(|p| p.npub.clone())
                 .collect();
-            let app_peers: HashSet<String> = content.app_peer_npubs().into_iter().collect();
-
-            let plan = self.plan(now_ms(), gate, &connected, &app_peers);
+            let plan = self.plan(now_ms(), gate, &connected);
             if plan.fetch {
                 self.fetch_adverts().await;
                 // A fresh read changes what can be dialled: go round again at
@@ -1524,7 +1513,7 @@ mod tests {
     fn it_dials_the_recommended_nodes_up_to_the_target() {
         let (_d, nodes, picked) = dir_with(4);
         let none = HashSet::new();
-        let plan = nodes.plan(NOW * 1000, open_gate(), &none, &none);
+        let plan = nodes.plan(NOW * 1000, open_gate(), &none);
         let dialled: Vec<&String> = plan.connect.iter().map(|(n, _)| n).collect();
         assert_eq!(
             dialled,
@@ -1534,14 +1523,14 @@ mod tests {
         assert_eq!(plan.connect[0].1, "203.0.113.1:2121");
 
         // In flight: the next tick dials nothing more.
-        let again = nodes.plan(NOW * 1000 + 15_000, open_gate(), &none, &none);
+        let again = nodes.plan(NOW * 1000 + 15_000, open_gate(), &none);
         assert!(again.connect.is_empty());
 
         // One came up and one did not: after the in-flight window the missing
         // one is retried once, and counted as a failure...
         let up: HashSet<String> = [picked[0].clone()].into();
         let t1 = NOW * 1000 + 31_000;
-        let later = nodes.plan(t1, open_gate(), &up, &none);
+        let later = nodes.plan(t1, open_gate(), &up);
         assert_eq!(later.connect.len(), 1);
         assert_eq!(later.connect[0].0, picked[1]);
         assert_eq!(nodes.lock().dials[&picked[1]].failures, 1);
@@ -1549,7 +1538,7 @@ mod tests {
 
         // ...then backs off, and the gap goes to the next candidate.
         let t2 = t1 + 31_000;
-        let next = nodes.plan(t2, open_gate(), &up, &none);
+        let next = nodes.plan(t2, open_gate(), &up);
         assert_eq!(next.connect.len(), 1);
         assert_eq!(next.connect[0].0, picked[2]);
     }
@@ -1557,7 +1546,6 @@ mod tests {
     #[test]
     fn mesh_only_and_a_tripped_breaker_never_dial() {
         let (_d, nodes, picked) = dir_with(3);
-        let none = HashSet::new();
         let up: HashSet<String> = [picked[0].clone()].into();
         dialled(&nodes, &picked[0]);
 
@@ -1565,7 +1553,7 @@ mod tests {
             offline_only: true,
             ..open_gate()
         };
-        let plan = nodes.plan(NOW * 1000, offline, &up, &none);
+        let plan = nodes.plan(NOW * 1000, offline, &up);
         assert!(plan.connect.is_empty() && !plan.fetch);
         assert_eq!(
             plan.disconnect,
@@ -1578,7 +1566,7 @@ mod tests {
             internet_down: true,
             ..open_gate()
         };
-        let plan = nodes.plan(NOW * 1000, down, &up, &none);
+        let plan = nodes.plan(NOW * 1000, down, &up);
         assert_eq!(
             plan,
             TickPlan::default(),
@@ -1591,16 +1579,15 @@ mod tests {
     }
 
     #[test]
-    fn switching_off_drops_public_links_but_never_an_app_peer() {
+    fn switching_off_drops_the_public_links_it_dialled() {
         let (_d, nodes, picked) = dir_with(3);
         nodes.lock().settings.enabled = false;
         for npub in &picked {
             dialled(&nodes, npub);
         }
         let up: HashSet<String> = picked.iter().cloned().collect();
-        let app_peers: HashSet<String> = [picked[1].clone()].into();
-        let plan = nodes.plan(NOW * 1000, open_gate(), &up, &app_peers);
-        let mut want = vec![picked[0].clone(), picked[2].clone()];
+        let plan = nodes.plan(NOW * 1000, open_gate(), &up);
+        let mut want = picked.clone();
         want.sort();
         assert_eq!(plan.disconnect, want);
         assert!(plan.connect.is_empty());
@@ -1612,7 +1599,7 @@ mod tests {
         nodes.lock().settings.set_selected(&picked[0], false);
         dialled(&nodes, &picked[0]);
         let up: HashSet<String> = [picked[0].clone()].into();
-        let plan = nodes.plan(NOW * 1000, open_gate(), &up, &HashSet::new());
+        let plan = nodes.plan(NOW * 1000, open_gate(), &up);
         assert_eq!(plan.disconnect, vec![picked[0].clone()]);
         let dialled: Vec<&String> = plan.connect.iter().map(|(n, _)| n).collect();
         assert_eq!(dialled, vec![&picked[1], &picked[2]]);
@@ -1624,11 +1611,11 @@ mod tests {
         nodes.lock().settings.enabled = false;
         let none = HashSet::new();
         assert_eq!(
-            nodes.plan(NOW * 1000 + 3_600_000, open_gate(), &none, &none),
+            nodes.plan(NOW * 1000 + 3_600_000, open_gate(), &none),
             TickPlan::default()
         );
         nodes.request_refresh();
-        let plan = nodes.plan(NOW * 1000, open_gate(), &none, &none);
+        let plan = nodes.plan(NOW * 1000, open_gate(), &none);
         assert!(plan.fetch && plan.connect.is_empty());
     }
 
@@ -1639,27 +1626,26 @@ mod tests {
     fn only_links_it_dialled_are_ever_dropped() {
         let (_d, nodes, picked) = dir_with(3);
         let up: HashSet<String> = picked.iter().cloned().collect();
-        let none = HashSet::new();
 
         nodes.lock().settings.enabled = false;
         assert!(nodes
-            .plan(NOW * 1000, open_gate(), &up, &none)
+            .plan(NOW * 1000, open_gate(), &up)
             .disconnect
             .is_empty());
 
         nodes.lock().settings.enabled = true;
         nodes.lock().settings.set_selected(&picked[0], false);
         assert!(nodes
-            .plan(NOW * 1000, open_gate(), &up, &none)
+            .plan(NOW * 1000, open_gate(), &up)
             .disconnect
             .is_empty());
 
         dialled(&nodes, &picked[0]);
-        let plan = nodes.plan(NOW * 1000, open_gate(), &up, &none);
+        let plan = nodes.plan(NOW * 1000, open_gate(), &up);
         assert_eq!(plan.disconnect, vec![picked[0].clone()]);
         nodes.forget_dial(&picked[0]);
         assert!(nodes
-            .plan(NOW * 1000, open_gate(), &up, &none)
+            .plan(NOW * 1000, open_gate(), &up)
             .disconnect
             .is_empty());
     }
@@ -1710,14 +1696,14 @@ mod tests {
         nodes.set_foreground(false);
         let none = HashSet::new();
         let t0 = NOW * 1000;
-        assert_eq!(nodes.plan(t0, open_gate(), &none, &none).connect.len(), 1);
+        assert_eq!(nodes.plan(t0, open_gate(), &none).connect.len(), 1);
         assert!(nodes
-            .plan(t0 + 60_000, open_gate(), &none, &none)
+            .plan(t0 + 60_000, open_gate(), &none)
             .connect
             .is_empty());
         assert_eq!(
             nodes
-                .plan(t0 + DIAL_BACKOFF_BACKGROUND_MS, open_gate(), &none, &none)
+                .plan(t0 + DIAL_BACKOFF_BACKGROUND_MS, open_gate(), &none)
                 .connect
                 .len(),
             1

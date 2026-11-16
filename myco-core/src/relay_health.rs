@@ -43,10 +43,9 @@
 //!   never a round's shared cutoff. 30 s, doubling, up to 5 min: a slow
 //!   relay is more often slow for a moment than gone.
 //! - **A success clears the entry.** Mesh successes (`.fips`, FIPS
-//!   `fd00::/8`, an app peer's Blossom) do not count as "the phone is
-//!   online": the mesh works with no internet at all.
-//! - **Never on it:** app peers' relays and Blossom (the peer pool
-//!   never consults it, and a mesh address reaching a shared helper is
+//!   `fd00::/8`, a linked peer) do not count as "the phone is online": the
+//!   mesh works with no internet at all.
+//! - **Never on it:** mesh addresses (one reaching a shared helper is
 //!   exempt), and the custom relay or Blossom set in Storage (their
 //!   clients, `remote_backend` and `remote_blobs`, never consult it).
 //! - **Logged once** per skip period, when the relay is put on the list.
@@ -761,16 +760,16 @@ pub(crate) mod tests {
         assert!(listed(&h, R, t0 + Duration::from_secs(30)));
     }
 
-    /// Only an internet success says the phone is online: an app peer's
-    /// relay or Blossom answering over the mesh does not.
+    /// Only an internet success says the phone is online: a linked peer
+    /// answering over the mesh does not.
     #[test]
     fn a_mesh_success_is_not_the_internet_working() {
         let h = RelayHealth::default();
         let t0 = Instant::now();
         for mesh in [
             "ws://npub1abc.fips:4870",
-            "http://npub1abc.fips:24243",
-            "http://[fd00::1234]:24243",
+            "http://npub1abc.fips:4873",
+            "http://[fd00::1234]:4873",
         ] {
             h.succeeded_at(mesh, t0);
         }
@@ -867,8 +866,8 @@ pub(crate) mod tests {
         let t0 = Instant::now();
         for url in [
             "ws://npub1abc.fips:4870",
-            "http://npub1abc.fips:24243",
-            "http://[fd00::1234]:24243",
+            "http://npub1abc.fips:4873",
+            "http://[fd00::1234]:4873",
         ] {
             assert!(!h.failed_at(url, Failure::Refused("HTTP 5xx"), t0));
             assert!(!listed(&h, url, t0));

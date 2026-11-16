@@ -451,11 +451,11 @@ is patchier than BLE's:
   Bluetooth"; credible Aware-specific benchmarks don't exist in the
   literature. Anything from ~20 Mbps (old Wi-Fi Direct handsets) to
   hundreds (modern PHYs) is plausible — two to three orders of magnitude
-  above the ~22 KB/s BLE baseline anywhere in that range. The
-  `speedtest_peer` harness is the vehicle: measure, don't quote. (And as
-  with USB, measured goodput is shaped above the link by the TUN MTU (1280)
-  and the MSS clamp — expect the speedtest to reflect mesh-packet overheads,
-  not raw NDP capacity; raising the TUN MTU for fast lanes is out of scope
+  above the ~22 KB/s BLE baseline anywhere in that range. Measure,
+  don't quote; the Dev peer speed test that used to do this is removed, so
+  a new harness is needed. (And as with USB, measured goodput is shaped
+  above the link by the TUN MTU (1280) and the MSS clamp — expect a
+  measurement to reflect mesh-packet overheads, not raw NDP capacity; raising the TUN MTU for fast lanes is out of scope
   here.)
 - **Open NDP behavior across chipsets.** The API permits unsecured data
   paths; whether every OEM stack honors them equally is untested. If some
@@ -547,5 +547,5 @@ which radio raised the link is a detail the bytes never learn.
   how to arbitrate when `getAvailableAwareResources()` says one.
   **TBD / open.**
 - **Device matrix and measured throughput.** Which Aware-capable pairs to
-  test, and what `speedtest_peer` actually reports over an NDP.
+  test, and what throughput a measurement actually shows over an NDP.
   **TBD / open.**

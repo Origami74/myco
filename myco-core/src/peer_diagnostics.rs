@@ -1,4 +1,4 @@
-//! Pure merge of the peer/advert/app peer snapshots into one ordered,
+//! Pure merge of the peer/advert snapshots and the links' names into one ordered,
 //! npub-or-address-keyed `peers` array (D-19, DIAG-01/03/04/06).
 //!
 //! No I/O, no locks, no [`crate::runtime::AppRuntime`] dependency — everything
@@ -9,8 +9,8 @@
 //! Merge order follows RESEARCH.md's Pitfall 4: npub-first grouping silently
 //! loses the "seen but not yet resolved" rows D-09 requires. The base
 //! identity set is built from the radio-side peer views first (npub may be
-//! empty), adverts are unioned in second, and only then is app peer
-//! data left-joined by npub onto the rows that have one.
+//! empty), adverts are unioned in second, and only then are the links'
+//! names left-joined by npub onto the rows that have one.
 
 use std::collections::HashMap;
 
@@ -18,18 +18,15 @@ use crate::control_client::PeerView;
 
 use crate::ble_diag::{BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
 
-use crate::content::AppPeer;
 use crate::state::{BleAdvert, BlePeer, PeerAttemptView, PeerDiagnosticView, PeerPathView};
 
 /// D-11 ordering weight for a row's `state` — lower sorts first.
 fn peer_state_rank(state: &str) -> u8 {
     match state {
         "connected" => 0,
-        "reachable-via-relay" => 1,
-        "seen-unidentified" => 2,
-        "app-peer-offline" => 3,
+        "seen-unidentified" => 1,
         // "unreachable" and any state string this module never emits.
-        _ => 4,
+        _ => 2,
     }
 }
 
@@ -50,7 +47,7 @@ fn order_transports(mut transports: Vec<String>) -> Vec<String> {
 
 /// Truncate a peer-supplied string to at most `max_chars` characters, on a
 /// UTF-8 char boundary, before it crosses the FFI (T-01-02: an oversized
-/// app peer/display name must not reach a fixed-width Dev-tab row).
+/// link/display name must not reach a fixed-width Dev-tab row).
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => s[..byte_idx].to_string(),
@@ -58,20 +55,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Shortened display fallback for a hex/npub string, matching the Kotlin
-/// `short()` helper's `take(10)…takeLast(4)` convention above 18 characters.
-fn short(s: &str) -> String {
-    let len = s.chars().count();
-    if len > 18 {
-        let head: String = s.chars().take(10).collect();
-        let tail: String = s.chars().skip(len - 4).collect();
-        format!("{head}…{tail}")
-    } else {
-        s.to_string()
-    }
-}
-
-/// Merge every peer/advert/app peer snapshot into one ordered,
+/// Merge every peer/advert snapshot into one ordered,
 /// npub-or-address-keyed `peers` array. See the module doc for merge order.
 ///
 /// `lane_by_npub` is a lane-origin override (npub → observed lane, e.g.
@@ -92,7 +76,10 @@ fn short(s: &str) -> String {
 /// name. Joining on the node address rather than the BLE address is what lets a
 /// peer discovered over BLE but *carried* over the LAN lane still show the name
 /// it chose. The value is unauthenticated (see [`crate::advert_names`]) and is
-/// therefore only ever surfaced as a fallback below the app peer names.
+/// therefore only ever surfaced as a fallback below the link names.
+///
+/// `link_names` is the name each linked peer gave in its neighborhood
+/// invitation, keyed by device npub.
 ///
 /// `ble_attempts` is the per-peer BLE connect-attempt log, keyed by BLE
 /// address. It supplies three things: the role/discovery/outcome history joined
@@ -102,14 +89,13 @@ fn short(s: &str) -> String {
 /// build, where there is no radio.
 ///
 /// `now_ms` is reserved for future staleness-based state work and unused
-/// today (state is derived purely from connectivity and app-peer facts, per D-10).
+/// today (state is derived purely from connectivity, per D-10).
 #[allow(clippy::too_many_arguments)]
 pub fn merge_peers(
     peer_views: &[PeerView],
     ble_peers: &[BlePeer],
     ble_adverts: &[BleAdvert],
-    app_peers: &[AppPeer],
-    reachable_npubs: &[String],
+    link_names: &HashMap<String, String>,
     lane_by_npub: &HashMap<String, String>,
     advert_names: &HashMap<String, String>,
     ble_attempts: &[BlePeerAttempts],
@@ -223,7 +209,7 @@ pub fn merge_peers(
             name,
             // Only "connected" is decided here (the one state a row can
             // already know for certain); every other state is assigned in
-            // step 5 once app peer/reachability data has been joined.
+            // step 5 once the link names have been joined.
             state: if bp.connected {
                 "connected".to_string()
             } else {
@@ -238,7 +224,7 @@ pub fn merge_peers(
             srtt_ms,
             rssi: bp.rssi,
             psm: bp.psm,
-            app_peer: false,
+            link_name: String::new(),
             role: String::new(),
             discovery_ms: 0,
             send_drops: 0,
@@ -292,7 +278,7 @@ pub fn merge_peers(
                 srtt_ms: None,
                 rssi: Some(adv.rssi),
                 psm: adv.psm,
-                app_peer: false,
+                link_name: String::new(),
                 role: String::new(),
                 discovery_ms: 0,
                 send_drops: 0,
@@ -301,74 +287,26 @@ pub fn merge_peers(
         }
     }
 
-    // Step 3: union in every app peer, so one with no radio contact yet
-    // still has a row.
-    let mut known_npubs: std::collections::HashSet<String> = rows
-        .iter()
-        .filter(|r| !r.npub.is_empty())
-        .map(|r| r.npub.clone())
-        .collect();
-    let mut extra_npubs: Vec<String> = Vec::new();
-    for npub in app_peers.iter().map(|c| &c.npub) {
-        if known_npubs.insert(npub.clone()) {
-            extra_npubs.push(npub.clone());
-        }
-    }
-    for npub in extra_npubs {
-        rows.push(PeerDiagnosticView {
-            key: npub.clone(),
-            npub,
-            node_addr_hex: String::new(),
-            ble_addr: String::new(),
-            name: String::new(),
-            state: String::new(),
-            transport: String::new(),
-            also_reachable_via: Vec::new(),
-            paths: Vec::new(),
-            last_seen_ms: 0,
-            authenticated_at_ms: 0,
-            advertised_name: String::new(),
-            srtt_ms: None,
-            rssi: None,
-            psm: 0,
-            app_peer: false,
-            role: String::new(),
-            discovery_ms: 0,
-            send_drops: 0,
-            attempts: Vec::new(),
-        });
-    }
-
-    // Step 4: left-join the app peer's name onto rows that have an npub.
+    // Step 4: left-join the link name onto rows that have an npub.
     for row in rows.iter_mut() {
         if row.npub.is_empty() {
             continue;
         }
-        if let Some(c) = app_peers.iter().find(|c| c.npub == row.npub) {
-            row.app_peer = true;
+        if let Some(name) = link_names.get(&row.npub).filter(|n| !n.is_empty()) {
+            row.link_name = truncate_chars(name, 64);
             if row.name.is_empty() {
-                row.name = if c.name.is_empty() {
-                    short(&row.npub)
-                } else {
-                    truncate_chars(&c.name, 64)
-                };
+                row.name = row.link_name.clone();
             }
         }
         row.also_reachable_via = order_transports(std::mem::take(&mut row.also_reachable_via));
     }
 
-    // Step 5: assign the final state last (D-10's five-state vocabulary).
-    let reachable: std::collections::HashSet<&str> =
-        reachable_npubs.iter().map(|s| s.as_str()).collect();
+    // Step 5: assign the final state last.
     for row in rows.iter_mut() {
         row.state = if row.state == "connected" {
             "connected".to_string()
-        } else if !row.npub.is_empty() && reachable.contains(row.npub.as_str()) {
-            "reachable-via-relay".to_string()
         } else if row.npub.is_empty() {
             "seen-unidentified".to_string()
-        } else if row.app_peer {
-            "app-peer-offline".to_string()
         } else {
             "unreachable".to_string()
         };
@@ -489,14 +427,6 @@ mod tests {
         }
     }
 
-    fn app_peer(npub: &str, name: &str) -> AppPeer {
-        AppPeer {
-            perms: Default::default(),
-            npub: npub.to_string(),
-            name: name.to_string(),
-        }
-    }
-
     /// An inbound BLE peer — one we never dialled, so the attempt log knows
     /// nothing about it — must still be attributed its own adverts. Its link
     /// address is what supplies that, and without it the RSSI goes missing on
@@ -520,8 +450,7 @@ mod tests {
             &[view, ip],
             &peers,
             &adverts,
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             // Deliberately empty: this is the no-dial-history case.
@@ -557,8 +486,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &names,
             &[],
@@ -580,20 +508,22 @@ mod tests {
     }
 
     /// The ping the status panel shows is the peer's MMP SRTT, carried through
-    /// untouched. A row with no `PeerView` behind it (an app peer who is
-    /// merely app-peer-offline) carries `None` rather than inheriting anyone's.
+    /// untouched. A row with no `PeerView` behind it carries `None` rather
+    /// than inheriting anyone's.
     #[test]
     fn srtt_rides_the_peer_view_onto_the_row() {
         let mut view = pv("a1", "npub1connected", true, 1_000, "udp");
         view.srtt_ms = Some(37.5);
-        let peers = vec![bp("a1", "npub1connected", true)];
-        let members = vec![app_peer("npub2offline", "Offline Friend")];
+        let peers = vec![
+            bp("a1", "npub1connected", true),
+            bp("a2", "npub2offline", false),
+        ];
+        let names = HashMap::new();
         let out = merge_peers(
             &[view],
             &peers,
             &[],
-            &members,
-            &[],
+            &names,
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -604,16 +534,21 @@ mod tests {
     }
 
     #[test]
-    fn connected_sorts_before_app_peer_offline_regardless_of_last_heard() {
-        let views = vec![pv("a1", "npub1connected", true, 1_000, "udp")];
-        let peers = vec![bp("a1", "npub1connected", true)];
-        let members = vec![app_peer("npub2offline", "Offline Friend")];
+    fn connected_sorts_before_unreachable_regardless_of_last_heard() {
+        let views = vec![
+            pv("a1", "npub1connected", true, 1_000, "udp"),
+            pv("a2", "npub2offline", false, 9_000, ""),
+        ];
+        let peers = vec![
+            bp("a1", "npub1connected", true),
+            bp("a2", "npub2offline", false),
+        ];
+        let names = HashMap::new();
         let out = merge_peers(
             &views,
             &peers,
             &[],
-            &members,
-            &[],
+            &names,
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -623,7 +558,7 @@ mod tests {
         assert_eq!(out[0].npub, "npub1connected");
         assert_eq!(out[0].state, "connected");
         assert_eq!(out[1].npub, "npub2offline");
-        assert_eq!(out[1].state, "app-peer-offline");
+        assert_eq!(out[1].state, "unreachable");
     }
 
     #[test]
@@ -637,8 +572,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -659,8 +593,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -693,14 +626,13 @@ mod tests {
             bp("a1", "npub-a", true),
             bp("a2", "npub-b", false),
         ];
-        let members = vec![app_peer("npub-b", "Offline Friend")];
+        let names = HashMap::from([("npub-b".to_string(), "Friend".to_string())]);
 
         let out_a = merge_peers(
             &views_a,
             &peers_a,
             &[],
-            &members,
-            &[],
+            &names,
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -710,8 +642,7 @@ mod tests {
             &views_b,
             &peers_b,
             &[],
-            &members,
-            &[],
+            &names,
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -733,8 +664,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -756,8 +686,7 @@ mod tests {
             &[],
             &[],
             std::slice::from_ref(&advert),
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -788,8 +717,7 @@ mod tests {
             &[],
             &[],
             &adverts,
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -805,85 +733,21 @@ mod tests {
     }
 
     #[test]
-    fn app_peer_only_npub_with_no_radio_is_app_peer_offline() {
-        let members = vec![app_peer("npub-offline", "Friend")];
-        let out = merge_peers(
-            &[],
-            &[],
-            &[],
-            &members,
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            0,
-        );
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].state, "app-peer-offline");
-        assert!(out[0].app_peer);
-    }
-
-    #[test]
-    fn app_peer_npub_in_reachable_npubs_is_reachable_via_relay() {
-        let members = vec![app_peer("npub-relay", "Friend")];
-        let reachable = vec!["npub-relay".to_string()];
-        let out = merge_peers(
-            &[],
-            &[],
-            &[],
-            &members,
-            &reachable,
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            0,
-        );
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].state, "reachable-via-relay");
-    }
-
-    #[test]
-    fn empty_app_peer_name_falls_back_to_shortened_npub() {
-        let members = vec![app_peer(
-            "npub1verylongidentifierthatexceedseighteenchars",
-            "",
-        )];
-        let out = merge_peers(
-            &[],
-            &[],
-            &[],
-            &members,
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            0,
-        );
-        assert_eq!(out.len(), 1);
-        assert!(!out[0].name.is_empty(), "must never render an empty name");
-        assert!(
-            out[0].name.contains('…'),
-            "must fall back to the shortened npub"
-        );
-    }
-
-    #[test]
     fn long_name_is_truncated_to_64_chars() {
         let long_name = "x".repeat(200);
-        let members = vec![app_peer("npub-longname", &long_name)];
+        let names = HashMap::from([("npub-longname".to_string(), long_name.clone())]);
         let out = merge_peers(
+            &[pv("a1", "npub-longname", true, 1_000, "udp")],
+            &[bp("a1", "npub-longname", true)],
             &[],
-            &[],
-            &[],
-            &members,
-            &[],
+            &names,
             &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
         );
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].name.chars().count(), 64);
+        assert_eq!(out[0].link_name.chars().count(), 64);
     }
 
     #[test]
@@ -892,8 +756,7 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -944,8 +807,7 @@ mod tests {
             &[view],
             &[bp("a1", "npub-mp", true)],
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -977,8 +839,7 @@ mod tests {
             &[view],
             &[bp("a1", "npub-probing", true)],
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1003,8 +864,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -1032,8 +892,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1059,8 +918,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1083,8 +941,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1121,8 +978,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &recorded,
@@ -1157,8 +1013,7 @@ mod tests {
             &views,
             &peers,
             &[],
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -1203,8 +1058,7 @@ mod tests {
             &views,
             &peers,
             &adverts,
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &recorded,
@@ -1235,8 +1089,7 @@ mod tests {
             &views,
             &peers,
             &adverts,
-            &[],
-            &[],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &[],

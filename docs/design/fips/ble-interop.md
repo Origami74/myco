@@ -335,9 +335,9 @@ above the transport, in the nsite/relay store-and-re-serve layer:
   → an efficient "what events do you have that I don't" exchange; Myco implements
   this as **negentropy / NIP-77** (events only — blobs stay pull-by-sha256). See
   [propagation.md §5](../nsite/propagation.md).
-- **TTL-bounded flood with probabilistic relay** → the manifest-flood
-  propagation TTL (3 hops, `EVENT_TTL`; author-signed manifests flood via
-  relay-mesh fanout, blobs stay pull-only).
+- **TTL-bounded flood with probabilistic relay** → a neighborhood's
+  publish hops: shared updates travel that many links, blobs stay
+  pull-only ([nap-neighbor/policy.md](../nap-neighbor/policy.md)).
 
 These belong to the offline-propagation design
 ([diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg)),

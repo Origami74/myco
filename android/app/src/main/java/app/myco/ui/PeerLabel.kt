@@ -7,7 +7,8 @@ import app.myco.share.DeviceName
  * The name a peer has actually told us, or null when they have told us nothing.
  *
  * A device's chosen name reaches us only through a neighborhood invitation:
- * the app peer entry carries the name they gave when the link was made.
+ * the peer's diagnostics row carries it as `linkName`, the name they gave when
+ * the link was made.
  *
  * Below that sits the name an older build broadcasts for itself in its BLE scan
  * response. It is deliberately last: it is an unauthenticated plaintext
@@ -22,9 +23,9 @@ import app.myco.share.DeviceName
  */
 fun peerNameOrNull(state: AppState, npub: String): String? {
     if (npub.isEmpty()) return null
-    val told = state.appPeers.firstOrNull { it.npub == npub }?.name
-    told?.trim()?.ifBlank { null }?.let { return it }
-    return state.peers.firstOrNull { it.npub == npub }?.advertisedName?.trim()?.ifBlank { null }
+    val row = state.peers.firstOrNull { it.npub == npub } ?: return null
+    return row.linkName.trim().ifBlank { null }
+        ?: row.advertisedName.trim().ifBlank { null }
 }
 
 /**

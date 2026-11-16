@@ -59,8 +59,6 @@ async fn device() -> Device {
         links,
         neighbors: Arc::default(),
         bases: vec![base],
-        relay_url: String::new(),
-        blossom_url: String::new(),
     };
     let _ = svc.neighbors.set(neighbors.clone());
     let app = routes(svc.clone());
@@ -424,4 +422,56 @@ async fn an_nsite_update_travels_under_nsite_updates() {
         .expect("Bob was told")
         .unwrap();
     assert_eq!(got, (NSITE_UPDATES, manifest.id));
+}
+
+/// An app this phone doesn't have yet is found in the neighborhoods that
+/// carry its kind: the manifest asked of the links, then its file.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_not_here_is_found_through_the_neighborhoods() {
+    use super::extensions::NSITE_UPDATES;
+    use nsite_deck::PeerSource as _;
+    let (alice, bob, _, _) = linked_club().await;
+    let id = alice.neighbors.records()[0].id;
+    bob.neighbors.set_extension(id, NSITE_UPDATES, false, true);
+
+    // Alice holds a site in the Club; Bob has never heard of it.
+    let kept = Arc::new(nsite_deck::testing::MemBlobs::new());
+    let file = b"<h1>blog</h1>".to_vec();
+    let sha = nsite_deck::BlobStore::put(&*kept, &file).await.unwrap();
+    alice.neighbors.set_kept_blobs(kept);
+    let author = Keys::generate();
+    let manifest = EventBuilder::new(Kind::from(nsite_deck::KIND_NAMED), "")
+        .tags([nostr::Tag::identifier("blog")])
+        .sign_with_keys(&author)
+        .unwrap();
+    alice
+        .neighbors
+        .scoped
+        .share_kept(id, std::slice::from_ref(&sha))
+        .unwrap();
+    alice
+        .neighbors
+        .scoped
+        .add_shared(id, manifest.clone())
+        .await
+        .unwrap();
+
+    let source = super::updates::ExtensionSource {
+        neighbors: Arc::downgrade(&bob.neighbors),
+        extension: NSITE_UPDATES,
+    };
+    let found = source
+        .fetch_manifest(&author.public_key(), Some("blog"))
+        .await
+        .unwrap();
+    assert_eq!(found.map(|e| e.id), Some(manifest.id));
+    assert_eq!(source.fetch_blob(&sha, &[]).await.unwrap(), Some(file));
+
+    // A neighborhood Bob doesn't get nsites from is not asked.
+    bob.neighbors.set_extension(id, NSITE_UPDATES, false, false);
+    assert!(source
+        .fetch_manifest(&author.public_key(), Some("blog"))
+        .await
+        .unwrap()
+        .is_none());
 }

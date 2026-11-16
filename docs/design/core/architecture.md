@@ -22,9 +22,10 @@ The structure of **Myco** on one phone: four layers, seven Rust crates in one
 │                                                                      │
 │  1 Apps        nsite-deck (gateway, sync)  myco-napplet-runtime      │
 │                                            (resolve, sandbox, NAPs)  │
-│  2 Neighbors   neighbor/: links, link service, scoped data, app peers│
-│  3 Relay/Blob  myco-relay · myco-blossom · mesh_relay (proxy, hub)   │
-│                gossip (manifests) · peer_relay (pool) · outbox lanes │
+│  2 Neighbors   neighbor/: links, link service, scoped data,          │
+│                extensions (app, site and Myco updates)               │
+│  3 Relay/Blob  myco-relay · myco-blossom · myco-cache · tiered       │
+│                mesh_relay (loopback hub) · relay_pool (internet)     │
 │  4 FIPS        the fips node · lanes: BLE bridge, Aware/LAN UDP,     │
 │                TCP · mesh stack (fips-host) · TUN bridge · .fips DNS │
 │                · control socket                                      │
@@ -91,29 +92,25 @@ data plane. `auth_service.rs` serves the link service on `:4873`, under
 ending a link, and the scoped relay that carries neighborhood traffic.
 Design: [nap-neighbor/](../nap-neighbor/README.md), [security.md](./security.md).
 
-**App peers** are linked devices sharing an extension with us
-(`neighbor/apps.rs`, `Content::set_app_peers`). The **app peer gate**
-(`AppPeerGate`, a `PeerGate`) is consulted by the relay proxy and the Blossom
-server on every mesh connection; loopback bypasses it.
+Apps and updates travel here as **extensions** (`neighbor/extensions.rs`,
+`neighbor/updates.rs`): `napplet-updates`, `nsite-updates` and
+`myco-release`, each with a Get and a Share switch per neighborhood. Design:
+[nap-neighbor/extensions.md](../nap-neighbor/extensions.md).
 
-This layer also decides *where content comes from*: the holder named in a share,
-then any reachable app peer, then the internet — and, for napplets, which
+This layer also decides *where content comes from*: the local store, then the
+neighborhoods that get the matching extension (`ExtensionSource`), then the
+internet unless offline-only — and, for napplets, which
 relays an author's events are read from (NIP-65 lists over the local and
 internet lanes).
 
 ### 3 — Relay and Blossom
 
 `mesh_relay.rs` is a NIP-01 proxy in front of whatever `RelayBackend` is in
-use. It owns the mesh behaviour the store must not know about: the `MESH`
-envelope with its hop budget, the seen-set that makes forwarding terminate, the
-live bus that wakes this phone's subscriptions, and the gate. The same `RelayHub` serves two sockets — loopback
-`127.0.0.1:4870` for WebViews and `[::]:4870` for the mesh — so a WebView and a
-app peer see one relay. `gossip.rs` acts only on Myco's own traffic between
-app peers: file-control messages, and nsite and napplet manifests, forwarded
-so updates spread. Other events are not gossiped; neighborhoods carry them.
-`peer_relay.rs` keeps one pooled WebSocket per app peer at
-`ws://<npub>.fips:4870`. Blossom is served on `[::]:24243` behind the same
-gate. Design: [../nsite/nsite-updates.md](../nsite/nsite-updates.md) §4,
+use, with the live bus that wakes this phone's subscriptions. Its `RelayHub`
+listens on loopback only, `127.0.0.1:4870`, for the WebView; napplets reach the
+same hub in-process. The Blossom store is used in-process and served on no
+port. Neither is reachable from other phones: neighborhood traffic has its own
+scoped store behind the link service. Design:
 [../nsite/nsite-layer.md](../nsite/nsite-layer.md).
 
 #### Kept and cached
@@ -125,7 +122,7 @@ Two places hold events and blobs:
   pass (`keep_seen.rs`), private messages that pass through, and whatever was
   there before the cache existed.
 - **Cached** — `myco-cache`. Everything else that passes through: query
-  answers, pulled backlog, what mesh peers push, blobs a napplet fetched.
+  answers, pulled backlog, blobs a napplet fetched.
 
 The cache has a budget (Settings › Storage; 500 MB of events and 1.5 GB of
 blobs by default). For events the budget is an estimate of database size, not
@@ -133,8 +130,8 @@ JSON: `nostr-lmdb` indexes cost several times the event itself, most of it
 per single-letter tag (`myco-cache/src/events.rs`, `disk_cost`). It evicts by
 segmented LRU: a new entry starts on probation and goes first, while an entry
 used a second time is protected, so a one-off scroll through a long feed
-cannot flush what the user keeps opening. Serving a napplet, an app peer or
-the gateway counts as use; being re-seen does not.
+cannot flush what the user keeps opening. Serving a napplet or the gateway
+counts as use; being re-seen does not.
 
 Private messages (NIP-04 DMs, NIP-17 seals, NIP-59 gift wraps) are never
 cached: passing through, they are kept, as every event was before the cache,
@@ -148,9 +145,8 @@ along with the cache.
 Readers do not choose. `tiered.rs` reads both, merged by id and newest per
 replaceable slot, and fixes where a write goes: the **kept** view (what the
 hub, the gateway and the content layer use) drops the cache's copy of
-anything it keeps, and the **cache** view (pulls, mesh pushes, napplet blob
-fetches) sends `keep_seen`'s kinds to the relay and the rest to the cache.
-App peers read both through the same gate. A deletion (kind 5) passing
+anything it keeps, and the **cache** view (pulls and napplet blob fetches) sends `keep_seen`'s kinds to the relay and the rest to the cache.
+A deletion (kind 5) passing
 through is applied to the local relay too, where the events it names may be
 kept.
 
@@ -183,9 +179,6 @@ a commit):
   NIP-01 JSON. They are converted in that one module; every event is parsed
   into a `nostr::Event` and signature-checked there.
 
-The mesh peer pool (`peer_relay.rs`) is separate: it speaks Myco's `MESH`
-envelope over `.fips` addresses.
-
 ### 4 — FIPS
 
 `myco-core` embeds a fips `Node` on a Tokio multi-thread runtime
@@ -204,8 +197,8 @@ keeps the others as standbys.
 
 The IPv6 side is the node's app-owned TUN: two packet channels, no system
 device. Myco's own sockets terminate those packets in process, on a userspace
-TCP/IP stack (`fips-host`'s `netstack`, through `mesh_net.rs`). The relay,
-Blossom and link service servers listen on it, and peer dials go out on it, so Myco
+TCP/IP stack (`fips-host`'s `netstack`, through `mesh_net.rs`). The link
+service listens on it, and peer dials go out on it, so Myco
 needs no `VpnService`. See [../fips/mesh-stack.md](../fips/mesh-stack.md).
 
 A `VpnService` TUN routing `fd00::/8` runs only when the user lets other apps on

@@ -4,7 +4,7 @@ import app.myco.core.NativeCore
 
 /**
  * Rust owns relay queries, publisher authentication and announcement validation.
- * With a core [handle] it also asks app peers; [online] allows Zapstore.
+ * With a core [handle] it also asks neighborhoods; [online] allows Zapstore.
  */
 internal object ZapstoreRelease {
     fun fetch(handle: Long, online: Boolean): String = NativeCore.fetchSoftwareRelease(handle, online)

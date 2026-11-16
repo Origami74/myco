@@ -43,9 +43,6 @@ pub struct LinkService {
     /// This device's bases, e.g. `http://<npub>.fips:4873`. The first is the
     /// one invitations name first.
     pub bases: Vec<String>,
-    /// This device's own endpoints, offered on every link.
-    pub relay_url: String,
-    pub blossom_url: String,
 }
 
 impl LinkService {
@@ -76,13 +73,6 @@ impl LinkService {
             write: true,
             own: false,
         }));
-        services.push(Service {
-            kind: "blossom".into(),
-            url: self.blossom_url.clone(),
-            read: true,
-            write: false,
-            own: false,
-        });
         OfferContent { services }
     }
 
@@ -513,8 +503,6 @@ mod tests {
             links: Arc::new(Links::open(&d)),
             neighbors: Arc::default(),
             bases: vec![BASE.into()],
-            relay_url: "ws://alice.fips:4870".into(),
-            blossom_url: "http://alice.fips:24243".into(),
         }
     }
 
@@ -576,7 +564,7 @@ mod tests {
         let bob = linked(&svc, &home).await;
         assert!(bob.neighborhoods.contains(&home.id));
         let kinds: Vec<_> = bob.services().into_iter().map(|s| s.kind).collect();
-        assert_eq!(kinds, ["link", "relay", "blossom"]);
+        assert_eq!(kinds, ["link", "relay"]);
         let relay = bob
             .services()
             .into_iter()

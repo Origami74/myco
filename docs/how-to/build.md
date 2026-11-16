@@ -242,7 +242,7 @@ adb -s <serial> shell am force-stop app.myco
 ```
 
 The value is a `tracing` `EnvFilter` directive, so it can target one crate or
-module, e.g. `info,fips=debug,myco_core::peer_relay=debug` (92 bytes max).
+module, e.g. `info,fips=debug,myco_core::neighbor=debug` (92 bytes max).
 Clear it with `setprop debug.myco.log ""`. The property does not survive a
 reboot.
 

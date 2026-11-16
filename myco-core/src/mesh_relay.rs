@@ -1,28 +1,24 @@
-//! The **mesh relay proxy**: the NIP-01 WebSocket front door serving the in-app
-//! WebView at `ws://localhost:4870` and mesh peers at `ws://[fd00::self]:4870`,
-//! with a relay store behind it.
+//! The **local relay**: the NIP-01 WebSocket front door serving the in-app
+//! WebView at `ws://localhost:4870` (loopback only — other phones never reach
+//! it), with a relay store behind it.
 //!
 //! This is the only Myco-specific code on the content path. It keeps **live
 //! subscriptions** (a `REQ` stays open; newly-stored events that match are pushed
-//! as they arrive), which is what makes nearby chat feel live, and it drives two
-//! mesh hooks: a [`Gossiper`] for what Myco acts on (file messages, app
-//! manifest forwarding) and a [`PeerGate`] for access, each keyed off the connection's [`Origin`] (loopback =
-//! the local WebView, else a mesh peer).
+//! as they arrive), and a napplet's subscriptions are fed from the same live bus
+//! ([`RelayHub::live_events`]), so an nsite and a napplet see the same events by
+//! the same route.
 //!
 //! It lives here rather than in `myco-relay` so the store behind it stays a plain
 //! NIP-01 relay with no Myco concepts in it, and can be swapped for any other
-//! relay later. This is step P1 of `reference/thinning-custom-relay.md`. A proxy
-//! built with no gossiper and no gate behaves as an ordinary NIP-01 relay, which
-//! is what the tests use.
+//! relay later. See `reference/thinning-custom-relay.md`.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
-use axum::response::{IntoResponse, Response};
+use axum::extract::State;
+use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -35,106 +31,30 @@ use myco_relay::matches_filter;
 #[cfg(test)]
 use myco_relay::RelayStore;
 
-/// Where an event reached this relay from: the local WebView (a loopback socket)
-/// or a mesh peer (a `.fips` socket).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin {
-    /// A loopback connection — the in-app nsite client publishing.
-    Local,
-    /// A mesh peer's relay pushing over `.fips`.
-    Mesh,
-}
-
-/// Context for a newly-accepted event handed to the [`Gossiper`].
-#[derive(Clone, Copy, Debug)]
-pub struct Inbound {
-    /// Where the event arrived from (loopback WebView vs a mesh peer).
-    pub origin: Origin,
-    /// The hop budget that rode in the `MESH` envelope. `None` for a local
-    /// publish — the gossiper stamps the originate default. The event itself is
-    /// canonical NIP-01, so there is nothing to strip before storing.
-    pub event_ttl: Option<u8>,
-    /// The mesh peer's address the event came from, for split-horizon (never
-    /// forward back to the sender). `None` for a local publish.
-    pub sender: Option<IpAddr>,
-}
-
-/// The hub's hook for accepted events. The proxy calls this for every event it
-/// sees for the **first time** — its own seen-set is the loop guard, not the
-/// store's dedup, so an id the store has since forgotten is still not handled
-/// again (D2). The implementor (`myco-core`'s `MeshGossiper`) acts on file
-/// messages and forwards app manifests to app peers, using the [`Inbound`]
-/// context; other events go no further. The relay never fans out on its own.
-#[async_trait]
-pub trait Gossiper: Send + Sync {
-    async fn on_event(&self, event: Event, inbound: Inbound);
-}
-
-/// Access policy for **mesh** connections: only app peers reach the content
-/// plane at all, and what an admitted peer may do comes from its own
-/// permission record. Loopback (the in-app WebView) bypasses this entirely.
-///
-/// There are no exceptions: neighborhood links are set up on their own service
-/// (`crate::auth_service`), so nothing else gets a socket. The implementor
-/// (`myco-core`'s `AppPeerGate`) backs this with the app peers; a hub with no
-/// gate is open (the local/test default).
-pub trait PeerGate: Send + Sync {
-    /// May the mesh peer at `ip` open a connection at all?
-    ///
-    /// Checked **before the WebSocket upgrade**, so a peer that is not an app peer is refused
-    /// at the door rather than handed a socket and then told "no" per frame. That
-    /// is cheaper over BLE — a stranger no longer costs an upgrade and a round of
-    /// frames — and it means the content plane has one admission rule with no
-    /// exceptions (`reference/thinning-custom-relay.md`, D6).
-    ///
-    /// Membership only. What an admitted peer may then do is [`may_read`] and
-    /// [`may_publish`], from its own permission record.
-    ///
-    /// [`may_read`]: Self::may_read
-    /// [`may_publish`]: Self::may_publish
-    fn may_connect(&self, ip: IpAddr) -> bool;
-
-    /// May the mesh peer at `ip` open a `REQ` (read events from us)?
-    fn may_read(&self, ip: IpAddr) -> bool;
-    /// May the mesh peer at `ip` publish an `EVENT` of `kind`? Allowed per the
-    /// peer's write grant.
-    fn may_publish(&self, ip: IpAddr, kind: u16) -> bool;
-
-    /// May events pushed by `ip` travel on through us? The hub checks it so a
-    /// napplet's rebroadcast cannot carry on what the peer's grant stopped here.
-    fn may_forward(&self, _ip: IpAddr) -> bool {
-        true
-    }
-}
-
 /// How soon the same event may be passed on again through the same door (a
 /// napplet's relay rebroadcast). A rebroadcast needs no signature, so
 /// nothing else paces a napplet that loops on one.
 pub(crate) const PASS_ON_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long a non-expiring event's id is remembered as seen. A push wave lives
-/// for seconds, so this only has to outlast retries and a slow multi-hop path.
+/// How long a non-expiring event's id is remembered as seen. Only has to
+/// outlast a copy arriving by a second path (a publish and a pull of it).
 const SEEN_RETENTION_SECS: u64 = 30 * 60;
 /// Floor for an event that carries a NIP-40 expiry in the past or very near
-/// future — remember it briefly regardless, so a wave in flight still terminates.
+/// future — remember it briefly regardless.
 const SEEN_FLOOR_SECS: u64 = 60;
 /// Cap on remembered ids. At ~40 bytes an entry this is a few hundred KB worst
 /// case, and chat (the high-rate kind) expires itself out well before the cap.
 const SEEN_CAPACITY: usize = 4096;
 
-/// The ids this proxy has already handled, and therefore will not fan out again.
+/// The ids this hub has already delivered live, so a copy arriving by a
+/// second path is stored but not delivered twice.
 ///
-/// This is the mesh loop-guard, and it deliberately does **not** live in the
-/// store. Storage answers "do I hold this?", which is a different question: an
-/// id GC'd at NIP-40 expiry looks new again on the next pull, and a
-/// store-triggered fan-out would start a fresh wave for an old message every
-/// time someone new comes into range. Novelty is a property of this node's
-/// history, so this node keeps it. See `reference/thinning-custom-relay.md` (D2).
+/// Deliberately **not** the store's dedup: storage answers "do I hold this?",
+/// and an id GC'd at NIP-40 expiry looks new again on the next pull.
 #[derive(Default)]
 struct SeenSet {
     inner: Mutex<SeenInner>,
 }
-
 #[derive(Default)]
 struct SeenInner {
     /// id -> the second after which the id may be forgotten.
@@ -144,20 +64,12 @@ struct SeenInner {
 }
 
 impl SeenSet {
-    /// Whether `id` is remembered.
-    fn contains(&self, id: &[u8; 32]) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        inner.gc(crate::content::now_secs());
-        inner.until.contains_key(id)
-    }
-
     /// Record an id, returning `true` if this is the **first** time we have seen
-    /// it — the caller's signal to fan out.
+    /// it — the caller's signal to deliver it live.
     fn insert(&self, event: &Event) -> bool {
         let now = crate::content::now_secs();
-        // Remember an expiring event until it expires everywhere; a manifest (no
-        // expiry) for a fixed window. Either way at least the floor, so an event
-        // that arrives already stale cannot be re-forwarded on every hop.
+        // Remember an expiring event until it expires; anything else for a
+        // fixed window. Either way at least the floor.
         let until = myco_relay::expiration(event)
             .unwrap_or(now + SEEN_RETENTION_SECS)
             .max(now + SEEN_FLOOR_SECS);
@@ -202,63 +114,40 @@ impl SeenInner {
     }
 }
 
-/// Shared per-relay state: the store, a broadcast bus that fans newly-stored
-/// events to all live subscriptions on this device, and the optional [`Gossiper`] hook.
+/// Shared per-relay state: the store, and a broadcast bus that fans
+/// newly-stored events to all live subscriptions on this device.
 ///
-/// One hub can back **several listeners** (e.g. the mesh `[::]:4870` socket and a
-/// loopback `127.0.0.1:4870` socket for the WebView) via [`serve_on_hub`], so the
-/// live bus, store, and hook are shared across them — a peer's event pushed on
-/// the mesh socket reaches a WebView subscription on the loopback socket.
+/// One hub can back several listeners via [`serve_on_hub`], so the live bus
+/// and store are shared across them, and napplets publish into the same hub
+/// in-process.
 pub struct RelayHub {
     /// Whatever is answering NIP-01 behind us: the embedded store by default,
     /// or a relay the user pointed us at. The proxy never needs to know which.
     store: Arc<dyn RelayBackend>,
     /// Where events that are only passing through are written: pulled
-    /// backlog and what mesh peers push. The shell cache in production
-    /// (`Content::cache_relay`); `store` itself unless one is given.
+    /// backlog. The shell cache in production (`Content::cache_relay`);
+    /// `store` itself unless one is given.
     transient: Arc<dyn RelayBackend>,
     live: broadcast::Sender<Event>,
-    gossip: Option<Arc<dyn Gossiper>>,
-    /// Mesh access policy. `None` = open (local/test default); `Some` restricts
-    /// mesh peers to app peers. Loopback always bypasses it.
-    gate: Option<Arc<dyn PeerGate>>,
-    /// Ids already handled here, so a copy arriving by a second path is stored
-    /// but not re-flooded. Shared across every listener on this hub.
+    /// Ids already delivered live here. Shared across every listener on this
+    /// hub.
     seen: SeenSet,
-    /// Ids pushed to us by peers whose events travel no further through us
-    /// (no multihop write grant). A napplet cannot pass these on.
-    stops_here: SeenSet,
     /// When each event was last passed on, per door, for [`PASS_ON_COOLDOWN`].
     passed_on: Mutex<HashMap<([u8; 32], &'static str), std::time::Instant>>,
 }
 
 impl RelayHub {
-    /// Build a shared hub. Pass `None` for `gossip` to run with no hook. No
-    /// access gate — every connection is served (the local/test default).
-    pub fn new(store: Arc<dyn RelayBackend>, gossip: Option<Arc<dyn Gossiper>>) -> Arc<Self> {
-        Self::with_gate(store, gossip, None)
-    }
-
-    /// Build a hub that restricts **mesh** access to app peers via `gate`
-    /// (loopback is always allowed). Pass `None` for `gate` to stay open.
-    pub fn with_gate(
-        store: Arc<dyn RelayBackend>,
-        gossip: Option<Arc<dyn Gossiper>>,
-        gate: Option<Arc<dyn PeerGate>>,
-    ) -> Arc<Self> {
+    /// Build a shared hub over one store.
+    #[cfg(test)]
+    pub fn new(store: Arc<dyn RelayBackend>) -> Arc<Self> {
         let transient = store.clone();
-        Self::with_cache(store, transient, gossip, gate)
+        Self::with_cache(store, transient)
     }
 
-    /// As [`RelayHub::with_gate`], writing passing events to `transient`
-    /// rather than `store`: what this device publishes is kept, what it pulls
-    /// or a peer pushes is cached.
-    pub fn with_cache(
-        store: Arc<dyn RelayBackend>,
-        transient: Arc<dyn RelayBackend>,
-        gossip: Option<Arc<dyn Gossiper>>,
-        gate: Option<Arc<dyn PeerGate>>,
-    ) -> Arc<Self> {
+    /// As [`RelayHub::new`], writing passing events to `transient` rather
+    /// than `store`: what this device publishes is kept, what it pulls is
+    /// cached.
+    pub fn with_cache(store: Arc<dyn RelayBackend>, transient: Arc<dyn RelayBackend>) -> Arc<Self> {
         // Buffer enough that a brief subscriber stall doesn't drop chat; an
         // over-capacity lag is surfaced as `Lagged` and skipped, not blocked.
         let (live, _) = broadcast::channel(512);
@@ -266,10 +155,7 @@ impl RelayHub {
             store,
             transient,
             live,
-            gossip,
-            gate,
             seen: SeenSet::default(),
-            stops_here: SeenSet::default(),
             passed_on: Mutex::new(HashMap::new()),
         })
     }
@@ -286,50 +172,11 @@ impl RelayHub {
         self.live.subscribe()
     }
 
-    /// Accept an event this device originated — a napplet's publish — exactly
-    /// as the socket path would: dedupe, store, wake live subscriptions, and
-    /// hand it to the hook as a local event.
-    ///
-    /// Returns whether this was the first sighting. A repeat is stored (idempotent)
-    /// and goes no further.
-    pub async fn accept_local(self: &Arc<Self>, event: Event) -> anyhow::Result<bool> {
-        // Novelty first and independent of the store, exactly as the socket
-        // path does it — see the `EVENT` handler.
-        let first_sighting = self.seen.insert(&event);
-        self.store.publish(event.clone()).await?;
-        if !first_sighting {
-            return Ok(false);
-        }
-
-        // This device's own subscriptions, including the WebView's.
-        let _ = self.live.send(event.clone());
-
-        if let Some(gossip) = self.gossip.clone() {
-            let inbound = Inbound {
-                origin: Origin::Local,
-                event_ttl: None,
-                sender: None,
-            };
-            // Spawned, so a slow or unreachable peer never holds up the
-            // napplet that published.
-            tokio::spawn(async move { gossip.on_event(event, inbound).await });
-        }
-        Ok(true)
-    }
-
     /// Whether a napplet may pass `event` on through `door` now, recording it
-    /// if so. Refused when the event came from a peer whose events stop here,
-    /// or when it went out through the same door under [`PASS_ON_COOLDOWN`]
-    /// ago.
-    ///
-    /// Only pushed events are marked: backlog pulled from a peer carries no
-    /// sender here, so a pulled event from a peer without multihop can still
-    /// be passed on (see NAP-LOCAL, Security Considerations).
+    /// if so. Refused when it went out through the same door under
+    /// [`PASS_ON_COOLDOWN`] ago.
     pub(crate) fn claim_pass_on(&self, event: &Event, door: &'static str) -> anyhow::Result<()> {
         let id = event.id.to_bytes();
-        if self.stops_here.contains(&id) {
-            anyhow::bail!("it came from a phone whose events go no further");
-        }
         let now = std::time::Instant::now();
         let mut passed = self.passed_on.lock().unwrap();
         passed.retain(|_, at| now.duration_since(*at) < PASS_ON_COOLDOWN);
@@ -340,23 +187,20 @@ impl RelayHub {
         Ok(())
     }
 
-    /// Accept an event without forwarding it: dedupe, store, and wake live
-    /// subscriptions — nothing to the hook.
+    /// Accept an event this device published: dedupe, store (kept), and wake
+    /// live subscriptions.
     ///
-    /// A napplet's `relay.publish` is bound for relays, not the mesh
-    /// (NAP-RELAY), and still has to reach this
-    /// phone's own subscriptions. It is this device's own event, so it is
-    /// kept; backlog pulled from elsewhere goes through
-    /// [`RelayHub::accept_pulled`] instead.
+    /// A napplet's `relay.publish` is bound for relays (NAP-RELAY), and still
+    /// has to reach this phone's own subscriptions. Backlog pulled from
+    /// elsewhere goes through [`RelayHub::accept_pulled`] instead.
     ///
     /// Returns whether this was the first sighting.
     pub async fn accept_unforwarded(&self, event: Event) -> anyhow::Result<bool> {
         self.accept_into(&self.store, event).await
     }
 
-    /// As [`RelayHub::accept_unforwarded`], for backlog *pulled* from a peer
-    /// or another relay: written to the cache, not kept. A pull answer is not a
-    /// push and carries no budget.
+    /// As [`RelayHub::accept_unforwarded`], for backlog *pulled* from another
+    /// relay: written to the cache, not kept.
     pub async fn accept_pulled(&self, event: Event) -> anyhow::Result<bool> {
         self.accept_into(&self.transient, event).await
     }
@@ -375,16 +219,9 @@ impl RelayHub {
     }
 }
 
-/// Serve the relay on `addr` until the future is dropped/aborted (no hook).
-pub async fn serve(store: Arc<dyn RelayBackend>, addr: SocketAddr) -> anyhow::Result<()> {
-    serve_on(store, bind(addr)?).await
-}
-
-/// Bind a listener for the relay. For an IPv6 address this is **`IPV6_V6ONLY`**,
-/// so `[::]:port` does not collide with another app squatting on
-/// `127.0.0.1:port` — the mesh is IPv6-only. Returns the bind error so the caller
-/// can warn the user (e.g. the port is already in use). Must be called within a
-/// Tokio runtime.
+/// Bind a listener for the relay. For an IPv6 address this is **`IPV6_V6ONLY`**.
+/// Returns the bind error so the caller can warn the user (e.g. the port is
+/// already in use). Must be called within a Tokio runtime.
 pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
     let domain = if addr.is_ipv6() {
         socket2::Domain::IPV6
@@ -402,105 +239,34 @@ pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
     Ok(tokio::net::TcpListener::from_std(socket.into())?)
 }
 
-/// Serve on an already-bound listener with no hook (the local/test path).
+/// Serve on an already-bound listener (the test path).
+#[cfg(test)]
 pub async fn serve_on(
     store: Arc<dyn RelayBackend>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
-    serve_on_with(store, listener, None).await
-}
-
-/// Serve on an already-bound listener, fanning newly-accepted events to `gossip`
-/// (the mesh propagator). The runtime uses this so chat events reach peers.
-pub async fn serve_on_with(
-    store: Arc<dyn RelayBackend>,
-    listener: tokio::net::TcpListener,
-    gossip: Option<Arc<dyn Gossiper>>,
-) -> anyhow::Result<()> {
-    serve_on_hub(RelayHub::new(store, gossip), listener).await
+    serve_on_hub(RelayHub::new(store), listener).await
 }
 
 /// Serve a pre-built (shared) [`RelayHub`] on `listener`. Spawn this once per
-/// listener that should share the same store + live bus + gossiper. Any
-/// listener that names its peers by socket address will do: a kernel socket,
-/// or the mesh stack's (see [`crate::mesh_net`]).
+/// listener that should share the same store + live bus.
 pub async fn serve_on_hub<L>(hub: Arc<RelayHub>, listener: L) -> anyhow::Result<()>
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    let app = Router::new()
-        .route("/", get(root))
-        .layer(axum::middleware::from_fn_with_state(hub.clone(), admit))
-        .with_state(hub);
-    // Connect-info gives each socket's peer address, so the handler can tell a
-    // loopback (WebView) connection from a mesh peer. `tap_io` is what lets
-    // axum read it off any listener, not only its own `TcpListener`.
-    axum::serve(
-        axum::serve::ListenerExt::tap_io(listener, |_: &mut L::Io| {}),
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    let app = Router::new().route("/", get(root)).with_state(hub);
+    axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
 
-/// `/` is the WS endpoint; the peer address classifies the [`Origin`] and is the
-/// split-horizon sender id for mesh fan-out.
-async fn root(
-    ws: WebSocketUpgrade,
-    State(hub): State<Arc<RelayHub>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> Response {
-    let peer = addr.ip();
-    ws.on_upgrade(move |socket| handle_ws(socket, hub, peer))
-}
-
-/// Admission, applied as a layer so it runs **before** the WebSocket upgrade is
-/// even parsed: a mesh peer that is not an app peer gets a plain 403 and no socket.
-///
-/// A stranger costs us a TCP accept and one small response, rather than an
-/// upgrade plus a round of frames it was never allowed to send — which matters
-/// on a BLE link. Loopback (the in-app WebView) always bypasses.
-async fn admit(
-    State(hub): State<Arc<RelayHub>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
-    let peer = addr.ip();
-    if !peer.is_loopback() {
-        if let Some(gate) = &hub.gate {
-            if !gate.may_connect(peer) {
-                tracing::debug!(peer = %peer, "relay: refused a connection from a non-app peer");
-                return (
-                    axum::http::StatusCode::FORBIDDEN,
-                    "restricted: app peers only",
-                )
-                    .into_response();
-            }
-        }
-    }
-    next.run(req).await
-}
-
-/// Has this connection's peer lost access since it was admitted?
-///
-/// Admission is checked once, at the upgrade, so without re-checking here a
-/// subscription opened while admitted would keep streaming after the peer
-/// left the neighborhood or had Apps turned off. Revocation has to reach connections that already
-/// exist, not just the next one (`reference/thinning-custom-relay.md`, D6).
-/// Loopback is the in-app WebView and is never gated.
-fn revoked(hub: &RelayHub, origin: Origin, peer_ip: IpAddr) -> bool {
-    origin == Origin::Mesh && hub.gate.as_ref().is_some_and(|g| !g.may_connect(peer_ip))
+/// `/` is the WS endpoint.
+async fn root(ws: WebSocketUpgrade, State(hub): State<Arc<RelayHub>>) -> Response {
+    ws.on_upgrade(move |socket| handle_ws(socket, hub))
 }
 
 /// One client connection: serve `REQ` backlog + keep the subscription live, accept
-/// `EVENT`s (store → fan to local subs → hand to the hook), honour `CLOSE`.
-async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
-    let origin = if peer_ip.is_loopback() {
-        Origin::Local
-    } else {
-        Origin::Mesh
-    };
+/// `EVENT`s (store → fan to live subs), honour `CLOSE`.
+async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut live = hub.live.subscribe();
     // Active subscriptions on this connection: sub_id -> its filters.
@@ -511,19 +277,13 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
             incoming = ws_rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        for reply in handle_client_frame(text.as_str(), &hub, origin, peer_ip, &mut subs).await {
+                        for reply in handle_client_frame(text.as_str(), &hub, &mut subs).await {
                             if ws_tx.send(Message::text(reply)).await.is_err() {
                                 break 'conn;
                             }
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        // Answer the peer-relay pool's keepalive so it can tell a
-                        // live connection from a silent half-open one (its liveness
-                        // check is a ping that must draw a frame back within its
-                        // interval). tungstenite may also auto-pong, but replying
-                        // explicitly guarantees the pong is flushed on an otherwise
-                        // idle subscription.
                         if ws_tx.send(Message::Pong(payload)).await.is_err() {
                             break 'conn;
                         }
@@ -536,15 +296,6 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
             event = live.recv() => {
                 match event {
                     Ok(ev) => {
-                        // Re-check membership before feeding an open subscription.
-                        // Admission happens once, at the upgrade, so without this a
-                        // subscription opened while admitted would keep streaming
-                        // after the peer was removed — revocation has to reach
-                        // connections that already exist, not just the next one.
-                        if revoked(&hub, origin, peer_ip) {
-                            tracing::info!(peer = %peer_ip, "relay: dropping a revoked peer's connection");
-                            break 'conn;
-                        }
                         for (sub_id, filters) in subs.iter() {
                             if filters.iter().any(|f| matches_filter(&ev, f)) {
                                 let frame = serde_json::json!(["EVENT", sub_id, ev]).to_string();
@@ -568,34 +319,11 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
 async fn handle_client_frame(
     text: &str,
     hub: &Arc<RelayHub>,
-    origin: Origin,
-    peer_ip: IpAddr,
     subs: &mut HashMap<String, Vec<Filter>>,
 ) -> Vec<String> {
-    let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
     };
-
-    // Unwrap a MESH envelope, if this is one: mesh state travels beside the NIP-01
-    // message, never inside it, and what comes out is passed on untouched. A plain
-    // frame is equally valid here and carries no metadata — store it, do not
-    // forward it. See `reference/thinning-custom-relay.md` (D1).
-    let (meta, value) = match crate::mesh_wire::unwrap(&frame) {
-        // Boundary 1: the in-app client is an ordinary Nostr client and has no
-        // business speaking our framing. Refusing it here is what stops an nsite
-        // reaching the mesh planes through a hand-built frame.
-        Some(_) if origin == Origin::Local => {
-            tracing::debug!("relay: refusing a MESH frame from a local client");
-            return vec![serde_json::json!([
-                "NOTICE",
-                "MESH framing is mesh-only; this relay speaks plain NIP-01 here"
-            ])
-            .to_string()];
-        }
-        Some((meta, inner)) => (meta, inner),
-        None => (crate::mesh_wire::MeshMeta::default(), frame),
-    };
-
     let Some(array) = value.as_array() else {
         return Vec::new();
     };
@@ -606,25 +334,8 @@ async fn handle_client_frame(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            // Mesh access gate: only app peers may read from us. Anyone else
-            // gets a CLOSED (no backlog, no live subscription registered).
-            if origin == Origin::Mesh {
-                if let Some(gate) = &hub.gate {
-                    if !gate.may_read(peer_ip) {
-                        return vec![serde_json::json!([
-                            "CLOSED",
-                            sub_id,
-                            "restricted: app peers only"
-                        ])
-                        .to_string()];
-                    }
-                }
-            }
-            // A REQ is answered from this device's own store and live
-            // subscription only — it is never passed on to other peers. Any
-            // `MESH` envelope around it (an older build's pull metadata) is
-            // ignored. Filters are parsed by the `nostr` crate, so the whole
-            // NIP-01 filter surface works rather than a hand-rolled subset.
+            // Filters are parsed by the `nostr` crate, so the whole NIP-01
+            // filter surface works rather than a hand-rolled subset.
             let filters: Vec<Filter> = array
                 .iter()
                 .skip(2)
@@ -650,81 +361,23 @@ async fn handle_client_frame(
             let Some(event_value) = array.get(1) else {
                 return Vec::new();
             };
-            // The hop budget rides the envelope, so the event itself is canonical
-            // NIP-01 and there is nothing to strip before storing it.
-            let event_ttl = (origin == Origin::Mesh).then_some(meta.ttl);
             let Ok(event) = serde_json::from_value::<Event>(event_value.clone()) else {
                 return Vec::new();
             };
             let id = event.id.to_hex();
-            // Only an app peer reaches this at all (admission refused the rest
-            // before the upgrade), so this is the peer's write grant.
-            if origin == Origin::Mesh {
-                if let Some(gate) = &hub.gate {
-                    if !gate.may_publish(peer_ip, event.kind.as_u16()) {
-                        return vec![serde_json::json!([
-                            "OK",
-                            id,
-                            false,
-                            "restricted: app peers only"
-                        ])
-                        .to_string()];
-                    }
-                }
-            }
             if event.verify().is_err() {
                 return vec![
                     serde_json::json!(["OK", id, false, "invalid: bad signature"]).to_string(),
                 ];
             }
-            // Novelty is the proxy's own call, made *before* storing and
-            // independent of what the store does with the event. Storing is
-            // idempotent, so it happens either way; only a first sighting fans
-            // out. See `reference/thinning-custom-relay.md` (D2).
-            let first_sighting = hub.seen.insert(&event);
-            if origin == Origin::Mesh && hub.gate.as_ref().is_some_and(|g| !g.may_forward(peer_ip))
-            {
-                hub.stops_here.insert(&event);
-            }
-            // An in-app client's publish is this device's own and is kept; what
-            // a mesh peer pushes is passing through, and is cached.
-            let target = match origin {
-                Origin::Mesh => &hub.transient,
-                _ => &hub.store,
-            };
-            if let Err(e) = target.publish(event.clone()).await {
-                return vec![
-                    serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()
-                ];
-            }
-            if first_sighting {
-                // The receiving half of the same blind spot: an event that
-                // arrived and one that never did are indistinguishable without
-                // this, and that is the first thing to establish when something
-                // published on one phone does not appear on another.
-                if origin == Origin::Mesh {
-                    tracing::info!(
-                        event = %event.id,
-                        kind = %event.kind.as_u16(),
-                        from = %peer_ip,
-                        "accepted a mesh event"
-                    );
-                }
-                // Fan to this device's live subscriptions (incl. the WebView).
-                let _ = hub.live.send(event.clone());
-                // Hand it to the hook off the socket path (non-blocking).
-                if let Some(gossip) = hub.gossip.clone() {
-                    let inbound = Inbound {
-                        origin,
-                        event_ttl,
-                        sender: (origin == Origin::Mesh).then_some(peer_ip),
-                    };
-                    tokio::spawn(async move { gossip.on_event(event, inbound).await });
-                }
-                vec![serde_json::json!(["OK", id, true, ""]).to_string()]
-            } else {
+            // An in-app client's publish is this device's own and is kept.
+            match hub.accept_unforwarded(event).await {
+                Ok(true) => vec![serde_json::json!(["OK", id, true, ""]).to_string()],
                 // Duplicate: still an accepted outcome per NIP-01.
-                vec![serde_json::json!(["OK", id, true, "duplicate:"]).to_string()]
+                Ok(false) => vec![serde_json::json!(["OK", id, true, "duplicate:"]).to_string()],
+                Err(e) => {
+                    vec![serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()]
+                }
             }
         }
         Some("CLOSE") => {
@@ -881,127 +534,27 @@ mod tests {
         );
     }
 
-    /// A local publish rides the same route as any local event: the gossiper
-    /// sees a local origin at the default budget, and the live bus sees the
-    /// event once.
+    /// A napplet cannot pass on the same event through the same door twice
+    /// in a row.
     #[tokio::test]
-    async fn a_local_publish_reaches_the_gossiper_once() {
-        use std::sync::Mutex;
-
-        struct Capture(Mutex<Vec<Inbound>>);
-        #[async_trait]
-        impl Gossiper for Capture {
-            async fn on_event(&self, _event: Event, inbound: Inbound) {
-                self.0.lock().unwrap().push(inbound);
-            }
-        }
-
-        let store = Arc::new(RelayStore::in_memory());
-        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
-        let hub = RelayHub::new(store.clone(), Some(capture.clone()));
-        let mut live = hub.live_events();
-
+    async fn pass_on_has_a_cooldown() {
+        let hub = RelayHub::new(Arc::new(nsite_deck::testing::MemRelay::new()));
         let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "to the gossiper");
-        assert!(hub.accept_local(msg.clone()).await.unwrap());
-        assert_eq!(live.recv().await.unwrap().id, msg.id);
-
-        let seen = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(first) = capture.0.lock().unwrap().first().cloned() {
-                    return first;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(seen.origin, Origin::Local);
-        assert_eq!(seen.event_ttl, None);
-
-        // A repeat is stored, not re-flooded.
-        assert!(!hub.accept_local(msg).await.unwrap());
-        assert_eq!(capture.0.lock().unwrap().len(), 1);
-
-        // The plain path still originates at the default: no budget named.
-        let other = chat_event(&keys, "mesh", "default reach");
-        assert!(hub.accept_local(other).await.unwrap());
-        let seen = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(second) = capture.0.lock().unwrap().get(1).cloned() {
-                    return second;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(seen.event_ttl, None);
-    }
-
-    /// A napplet cannot pass on an event from a peer whose events stop here,
-    /// nor the same event through the same door twice in a row.
-    #[tokio::test]
-    async fn pass_on_respects_the_peer_grant_and_a_cooldown() {
-        struct NoMultihop;
-        impl PeerGate for NoMultihop {
-            fn may_connect(&self, _ip: IpAddr) -> bool {
-                true
-            }
-            fn may_read(&self, _ip: IpAddr) -> bool {
-                true
-            }
-            fn may_publish(&self, _ip: IpAddr, _kind: u16) -> bool {
-                true
-            }
-            fn may_forward(&self, _ip: IpAddr) -> bool {
-                false
-            }
-        }
-
-        let hub = RelayHub::with_gate(
-            Arc::new(nsite_deck::testing::MemRelay::new()),
-            None,
-            Some(Arc::new(NoMultihop)),
-        );
-        let keys = Keys::generate();
-        let theirs = chat_event(&keys, "mesh", "from a peer without multihop");
-        let frame = serde_json::json!(["EVENT", theirs]).to_string();
-        let peer: IpAddr = "fd00::7".parse().unwrap();
-        let mut subs = HashMap::new();
-        handle_client_frame(&frame, &hub, Origin::Mesh, peer, &mut subs).await;
-        assert!(
-            hub.claim_pass_on(&theirs, "relays").is_err(),
-            "a napplet carried on what the peer's grant stopped"
-        );
-
         let local = chat_event(&keys, "mesh", "fine to pass on");
         hub.claim_pass_on(&local, "relays").unwrap();
         assert!(hub.claim_pass_on(&local, "relays").is_err());
     }
 
-    /// Backlog pulled from a peer wakes this device's live subscriptions —
-    /// which is how a napplet's subscription hears it — and is never
-    /// handed to the gossiper: a pull answer is not a push frame.
+    /// Backlog pulled from elsewhere wakes this device's live subscriptions —
+    /// which is how a napplet's subscription hears it — once.
     #[tokio::test]
-    async fn a_pulled_event_is_delivered_live_and_forwarded_nowhere() {
-        use std::sync::Mutex;
-
-        struct Count(Mutex<usize>);
-        #[async_trait]
-        impl Gossiper for Count {
-            async fn on_event(&self, _event: Event, _inbound: Inbound) {
-                *self.0.lock().unwrap() += 1;
-            }
-        }
-
+    async fn a_pulled_event_is_delivered_live_once() {
         let store = Arc::new(RelayStore::in_memory());
-        let count = Arc::new(Count(Mutex::new(0)));
-        let hub = RelayHub::new(store.clone(), Some(count.clone()));
+        let hub = RelayHub::new(store.clone());
         let mut live = hub.live_events();
 
         let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "from a peer's backlog");
+        let msg = chat_event(&keys, "mesh", "from a relay's backlog");
         assert!(hub.accept_unforwarded(msg.clone()).await.unwrap());
         assert_eq!(live.recv().await.unwrap().id, msg.id);
         assert_eq!(store.count(), 1);
@@ -1014,13 +567,6 @@ mod tests {
                 .is_err(),
             "a duplicate pull was delivered twice"
         );
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            *count.0.lock().unwrap(),
-            0,
-            "a pulled event reached the gossiper"
-        );
     }
 
     /// With a cache behind the hub, what is pulled lands in the cache and what
@@ -1029,7 +575,7 @@ mod tests {
     async fn pulls_are_cached_and_own_events_kept() {
         let kept = Arc::new(RelayStore::in_memory());
         let cache = Arc::new(RelayStore::in_memory());
-        let hub = RelayHub::with_cache(kept.clone(), cache.clone(), None, None);
+        let hub = RelayHub::with_cache(kept.clone(), cache.clone());
         let mut live = hub.live_events();
 
         let keys = Keys::generate();
@@ -1046,436 +592,5 @@ mod tests {
             ids(cache.query(&[Filter::new()]).await.unwrap()),
             [pulled.id]
         );
-    }
-
-    /// The gossiper is invoked for an accepted event, tagged with its origin.
-    #[tokio::test]
-    async fn gossiper_invoked_on_local_event() {
-        use std::sync::Mutex;
-
-        struct Capture(Mutex<Vec<(String, Inbound)>>);
-        #[async_trait]
-        impl Gossiper for Capture {
-            async fn on_event(&self, event: Event, inbound: Inbound) {
-                self.0.lock().unwrap().push((event.id.to_hex(), inbound));
-            }
-        }
-
-        let store = Arc::new(RelayStore::in_memory());
-        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on_with(store, listener, Some(capture.clone())));
-
-        let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "gossip me");
-        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
-            .await
-            .unwrap();
-        ws.send(WsMessage::Text(
-            serde_json::json!(["EVENT", msg]).to_string(),
-        ))
-        .await
-        .unwrap();
-        // Await the OK so the store+spawn have run.
-        let _ = ws.next().await;
-
-        // Give the spawned gossip task a moment.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let seen = capture.0.lock().unwrap().clone();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0, msg.id.to_hex());
-        // 127.0.0.1 is loopback → Local origin, no sender (originator stamps TTL).
-        assert_eq!(seen[0].1.origin, Origin::Local);
-        assert_eq!(seen[0].1.sender, None);
-    }
-
-    /// An event the store no longer holds must still not be re-flooded.
-    ///
-    /// This is the failure the seen-set exists to prevent. When novelty came from
-    /// the store, an id GC'd at NIP-40 expiry — or any backend that forgot it —
-    /// read as new on the next pull, so a fresh wave went out for an old message
-    /// every time someone came into range. Novelty belongs to this node's
-    /// history, not to what storage currently holds
-    /// (`reference/thinning-custom-relay.md` D2).
-    #[tokio::test]
-    async fn a_forgotten_event_is_not_re_flooded() {
-        use std::sync::Mutex;
-
-        struct Count(Mutex<usize>);
-        #[async_trait]
-        impl Gossiper for Count {
-            async fn on_event(&self, _event: Event, _inbound: Inbound) {
-                *self.0.lock().unwrap() += 1;
-            }
-        }
-
-        let store = Arc::new(RelayStore::in_memory());
-        let count = Arc::new(Count(Mutex::new(0)));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on_with(store.clone(), listener, Some(count.clone())));
-
-        let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "old news");
-        let frame = serde_json::json!(["EVENT", msg]).to_string();
-
-        let publish = |frame: String| async move {
-            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
-                .await
-                .unwrap();
-            ws.send(WsMessage::Text(frame)).await.unwrap();
-            let _ = ws.next().await; // await the OK
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
-
-        publish(frame.clone()).await;
-        assert_eq!(*count.0.lock().unwrap(), 1, "first sighting fans out");
-
-        // Empty the store, standing in for expiry GC or a backend that forgot.
-        nsite_deck::seams::AdminBackend::wipe(store.as_ref())
-            .await
-            .unwrap();
-        assert_eq!(store.count(), 0);
-
-        publish(frame).await;
-        assert_eq!(
-            *count.0.lock().unwrap(),
-            1,
-            "the store forgot it, but we have not: no second wave"
-        );
-        assert_eq!(
-            store.count(),
-            1,
-            "still stored again — publishing is idempotent, only the fan-out is suppressed"
-        );
-    }
-
-    /// A wave crosses hops, decrements, and dies — and a hostile budget is clamped.
-    ///
-    /// Walks A→B→C by feeding each node the frame the previous one emitted, which
-    /// is the part that has to hold: the hop count has to survive the envelope, not
-    /// the event, and the event has to arrive canonical at every hop.
-    #[tokio::test]
-    async fn a_push_wave_decrements_and_terminates() {
-        use std::sync::Mutex;
-
-        struct Capture(Mutex<Vec<Option<u8>>>);
-        #[async_trait]
-        impl Gossiper for Capture {
-            async fn on_event(&self, _event: Event, inbound: Inbound) {
-                self.0.lock().unwrap().push(inbound.event_ttl);
-            }
-        }
-
-        // One node, fed a frame as if from a mesh peer; returns the ttl its
-        // gossiper saw, which is what decides how much further the wave goes.
-        async fn hop(frame: &str) -> Option<u8> {
-            let cap = Arc::new(Capture(Mutex::new(Vec::new())));
-            let hub = RelayHub::new(Arc::new(RelayStore::in_memory()), Some(cap.clone()));
-            let mut subs = HashMap::new();
-            let peer: IpAddr = "fd00::9".parse().unwrap();
-            handle_client_frame(frame, &hub, Origin::Mesh, peer, &mut subs).await;
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            let seen = cap.0.lock().unwrap().clone();
-            assert_eq!(seen.len(), 1, "the event was accepted exactly once");
-            seen[0]
-        }
-
-        let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "ripple");
-        let event = serde_json::to_value(&msg).unwrap();
-
-        // A originates at ttl 2; B sees 2 and forwards 1; C sees 1 and forwards 0.
-        let at_b = hop(&crate::mesh_wire::wrap(
-            &crate::mesh_wire::MeshMeta::push(2),
-            serde_json::json!(["EVENT", event.clone()]),
-        ))
-        .await;
-        assert_eq!(at_b, Some(2));
-
-        let at_c = hop(&crate::mesh_wire::wrap(
-            &crate::mesh_wire::MeshMeta::push(1),
-            serde_json::json!(["EVENT", event.clone()]),
-        ))
-        .await;
-        assert_eq!(at_c, Some(1));
-
-        // The last hop has nothing left to spend.
-        let at_d = hop(&crate::mesh_wire::wrap(
-            &crate::mesh_wire::MeshMeta::push(0),
-            serde_json::json!(["EVENT", event.clone()]),
-        ))
-        .await;
-        assert_eq!(at_d, Some(0), "stored, but the wave stops here");
-
-        // A plain frame from a peer carries no budget and is equally terminal.
-        let plain = hop(&serde_json::json!(["EVENT", event]).to_string()).await;
-        assert_eq!(plain, Some(0));
-    }
-
-    /// A peer on an older build may still wrap its `REQ` in a `MESH` envelope
-    /// carrying pull metadata (`ttl`, `qid`, `budgetMs`). It is answered from
-    /// this device's store, with the `EOSE` straight after, and goes no further.
-    #[tokio::test]
-    async fn an_enveloped_req_is_answered_locally() {
-        let keys = Keys::generate();
-        let held = chat_event(&keys, "mesh", "held here");
-        let store = Arc::new(nsite_deck::testing::MemRelay::new());
-        store.publish(held.clone()).await.unwrap();
-        let hub = RelayHub::new(store, None);
-
-        let query = serde_json::json!([
-            "MESH",
-            { "ttl": 2, "qid": "q-old", "budgetMs": 10_000 },
-            ["REQ", "s1", { "kinds": [held.kind.as_u16()] }]
-        ])
-        .to_string();
-        let mut subs = HashMap::new();
-        let out = handle_client_frame(
-            &query,
-            &hub,
-            Origin::Mesh,
-            "fd00::5".parse().unwrap(),
-            &mut subs,
-        )
-        .await;
-        assert_eq!(out.len(), 2, "the stored event, then EOSE: {out:?}");
-        assert!(out[0].contains(&held.id.to_hex()));
-        assert!(out[1].contains("EOSE"));
-        assert!(subs.contains_key("s1"), "the subscription stays live");
-    }
-
-    /// The two boundaries, asserted rather than left as a convention.
-    ///
-    /// Everything in this plan rests on two rules: the nsite link speaks plain
-    /// NIP-01, and so does the link to whatever relay sits behind us. If either
-    /// ever carries a `MESH` verb or a ttl key, the relay has stopped being
-    /// swappable and the design has quietly reversed itself. That is worth a test
-    /// rather than a comment (`reference/thinning-custom-relay.md`).
-    #[tokio::test]
-    async fn no_mesh_framing_crosses_the_client_or_backend_links() {
-        let store = Arc::new(RelayStore::in_memory());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on(store.clone(), listener));
-
-        let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "hello");
-
-        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
-            .await
-            .unwrap();
-        ws.send(WsMessage::Text(
-            serde_json::json!(["REQ", "s1", { "kinds": [9] }]).to_string(),
-        ))
-        .await
-        .unwrap();
-        ws.send(WsMessage::Text(
-            serde_json::json!(["EVENT", msg]).to_string(),
-        ))
-        .await
-        .unwrap();
-
-        // Collect everything the client link carries back, until both the OK
-        // and the live echo of the event are in. The OK is sent only after the
-        // store write, so the backend check below never races it. Waiting on a
-        // quiet gap instead let a loaded CI runner stop reading after EOSE and
-        // query the store before the event had landed.
-        let id = msg.id.to_hex();
-        let mut seen = Vec::new();
-        let (mut ok, mut echoed) = (false, false);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !(ok && echoed) {
-            let frame = tokio::time::timeout_at(deadline, ws.next())
-                .await
-                .unwrap_or_else(|_| panic!("no OK and echo within 10 s, got: {seen:?}"));
-            let Some(Ok(WsMessage::Text(txt))) = frame else {
-                panic!("the client link closed early, got: {seen:?}");
-            };
-            let txt = txt.to_string();
-            let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
-            ok |= v[0] == "OK" && v[1] == id.as_str();
-            echoed |= v[0] == "EVENT" && v[2]["id"] == id.as_str();
-            seen.push(txt);
-        }
-        for frame in &seen {
-            assert!(
-                !frame.contains(crate::mesh_wire::MESH)
-                    && !frame.contains("event-ttl")
-                    && !frame.contains("req-ttl"),
-                "boundary 1 must stay plain NIP-01, got: {frame}"
-            );
-        }
-
-        // The backend link: what actually landed in the store is a canonical
-        // event, with no mesh state smuggled into it.
-        let stored = store
-            .query(&[Filter::new().kind(Kind::from(9u16))])
-            .await
-            .unwrap();
-        assert_eq!(stored.len(), 1);
-        let json = serde_json::to_string(&stored[0]).unwrap();
-        assert!(
-            !json.contains("event-ttl") && !json.contains(crate::mesh_wire::MESH),
-            "boundary 2 must store a canonical NIP-01 event, got: {json}"
-        );
-        assert_eq!(stored[0].id, msg.id, "and it is the same event");
-    }
-
-    /// A peer that is not an app peer never gets a socket at all.
-    ///
-    /// Refusing per frame would still hand a stranger a WebSocket upgrade and a
-    /// round of frames, which over BLE is real cost for a connection that can
-    /// never do anything. Admission is a membership check before the upgrade, so
-    /// the handshake itself fails (`reference/thinning-custom-relay.md`, D6).
-    #[tokio::test]
-    async fn a_non_app_peer_is_refused_before_the_upgrade() {
-        struct NoOne;
-        impl PeerGate for NoOne {
-            fn may_connect(&self, _ip: IpAddr) -> bool {
-                false
-            }
-            fn may_read(&self, _ip: IpAddr) -> bool {
-                false
-            }
-            fn may_publish(&self, _ip: IpAddr, _kind: u16) -> bool {
-                false
-            }
-        }
-
-        use tower::ServiceExt;
-
-        let store = Arc::new(RelayStore::in_memory());
-        let hub = RelayHub::with_gate(store, None, Some(Arc::new(NoOne)));
-        let app = Router::new()
-            .route("/", get(root))
-            .layer(axum::middleware::from_fn_with_state(hub.clone(), admit))
-            .with_state(hub);
-
-        // A real socket here could only ever be loopback, which bypasses the gate
-        // by design, so drive the route with a synthetic mesh address instead.
-        let mesh_peer: SocketAddr = "[fd00::1]:9999".parse().unwrap();
-        let mut req = axum::http::Request::builder()
-            .uri("/")
-            .header("connection", "upgrade")
-            .header("upgrade", "websocket")
-            .header("sec-websocket-version", "13")
-            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(mesh_peer));
-
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::FORBIDDEN,
-            "a non-app peer must be refused at the door, not upgraded and then \
-             told no per frame"
-        );
-    }
-
-    /// Revocation reaches a connection that is already open.
-    ///
-    /// Admission is checked once, at the upgrade, so a peer that stops being an
-    /// app peer mid-session would otherwise keep receiving events on a `REQ` it
-    /// opened while still admitted. `axum`'s `WebSocket` cannot be built from a raw
-    /// socket, and a real socket here could only be loopback (which is exempt by
-    /// design), so this covers the decision the live-event branch makes rather
-    /// than the socket teardown around it
-    /// (`reference/thinning-custom-relay.md`, D6).
-    #[test]
-    fn a_revoked_peer_stops_being_fed() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct Revocable(Arc<AtomicBool>);
-        impl PeerGate for Revocable {
-            fn may_connect(&self, _ip: IpAddr) -> bool {
-                self.0.load(Ordering::Relaxed)
-            }
-            fn may_read(&self, _ip: IpAddr) -> bool {
-                true
-            }
-            fn may_publish(&self, _ip: IpAddr, _kind: u16) -> bool {
-                true
-            }
-        }
-
-        let admitted = Arc::new(AtomicBool::new(true));
-        let hub = RelayHub::with_gate(
-            Arc::new(RelayStore::in_memory()),
-            None,
-            Some(Arc::new(Revocable(admitted.clone()))),
-        );
-        let mesh_peer: IpAddr = "fd00::1".parse().unwrap();
-        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
-
-        assert!(
-            !revoked(&hub, Origin::Mesh, mesh_peer),
-            "an app peer is fed"
-        );
-
-        admitted.store(false, Ordering::Relaxed);
-        assert!(
-            revoked(&hub, Origin::Mesh, mesh_peer),
-            "losing access must close a connection that is already open"
-        );
-        assert!(
-            !revoked(&hub, Origin::Local, loopback),
-            "the in-app WebView is never gated"
-        );
-
-        // A hub with no gate is open, which is what the tests and local runs use.
-        let open = RelayHub::new(Arc::new(RelayStore::in_memory()), None);
-        assert!(!revoked(&open, Origin::Mesh, mesh_peer));
-    }
-
-    /// An nsite speaks plain NIP-01: its `REQ` is answered, and a hand-built
-    /// `MESH` frame is refused outright. Boundary 1 says the loopback socket
-    /// speaks plain NIP-01, so mesh framing has no meaning there
-    /// (`reference/thinning-custom-relay.md`, D1).
-    #[tokio::test]
-    async fn a_client_cannot_speak_mesh_framing() {
-        let addr = spawn_relay(Arc::new(RelayStore::in_memory())).await;
-
-        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
-            .await
-            .unwrap();
-
-        // The ordinary client path: a plain REQ, answered locally.
-        ws.send(WsMessage::Text(
-            serde_json::json!(["REQ", "s1", { "kinds": [9] }]).to_string(),
-        ))
-        .await
-        .unwrap();
-        let eose = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while let Some(Ok(WsMessage::Text(txt))) = ws.next().await {
-                let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
-                if v.get(0).and_then(|x| x.as_str()) == Some("EOSE") {
-                    return true;
-                }
-            }
-            false
-        })
-        .await;
-        assert_eq!(eose, Ok(true), "a plain REQ is answered from the store");
-
-        // Mesh framing does not belong on this socket.
-        ws.send(WsMessage::Text(crate::mesh_wire::wrap(
-            &crate::mesh_wire::MeshMeta::push(2),
-            serde_json::json!(["REQ", "s2", { "kinds": [9] }]),
-        )))
-        .await
-        .unwrap();
-        let notice = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-            .await
-            .expect("a prompt answer")
-            .expect("a frame")
-            .expect("text");
-        let WsMessage::Text(txt) = notice else {
-            panic!("expected a NOTICE")
-        };
-        let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
-        assert_eq!(v.get(0).and_then(|x| x.as_str()), Some("NOTICE"));
     }
 }

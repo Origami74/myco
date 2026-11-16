@@ -370,7 +370,7 @@ mod tests {
             "https://10.1.2.3/",
             "https://169.254.169.254/latest/meta-data",
             "https://[::1]:4870/",
-            "https://localhost:24243/",
+            "https://localhost:4873/",
             "https://user@b.example/",
             "https://npub1peer.fips/",
             "file:///etc/passwd",

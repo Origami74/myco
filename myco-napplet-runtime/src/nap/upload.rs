@@ -20,8 +20,8 @@
 //!   share that copy publicly.
 //! - **`blossom-local`**: this device's store only, asked for on purpose. No
 //!   signature, no internet, works with offline-only on; `complete` with a
-//!   `blossom:sha256:<hex>` URL, which NAP-RESOURCE resolves here and from
-//!   app peers. A rail of the shell's own, as the spec allows.
+//!   `blossom:sha256:<hex>` URL, which NAP-RESOURCE resolves here. A rail of
+//!   the shell's own, as the spec allows.
 //!
 //! Keeping without a signature is free for the napplet, so each may keep only
 //! [`LOCAL_BUDGET_BYTES`] that way a day ([`LocalUploads`]). An upload the user
@@ -689,7 +689,7 @@ mod tests {
     /// No server took it — offline-only, no internet, no server, every one
     /// refusing: `failed` with the spec's error string and no URL, since the
     /// napplet can't share a copy here publicly. That copy is kept anyway,
-    /// for a retry or an app peer.
+    /// for a retry.
     #[tokio::test]
     async fn an_upload_no_server_took_fails_but_is_kept_here() {
         let mut s = session(&["upload"]);

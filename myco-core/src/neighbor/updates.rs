@@ -146,21 +146,75 @@ impl nsite_deck::PeerSource for NeighborhoodSource {
     }
 }
 
-/// A [`nsite_deck::PeerSource`] over every neighborhood with `extension` on:
-/// each one's scope here, then its links, until one has the blob.
+/// A [`nsite_deck::PeerSource`] over every neighborhood where this device
+/// gets `extension`: each one's scope here, then its links, until one has
+/// it. How Myco finds an app that is not here yet (opening a Library site,
+/// a share link, installing a napplet) and the release APK, before the
+/// public internet.
 pub struct ExtensionSource {
     pub neighbors: std::sync::Weak<Neighbors>,
     pub extension: &'static str,
 }
 
+impl ExtensionSource {
+    /// The manifest slot `extension` carries for `author` and `d_tag`, as a
+    /// filter. `None` for the release, which has no slot to ask by.
+    fn slot_filter(&self, author: &PublicKey, d_tag: Option<&str>) -> Option<nostr::Filter> {
+        let kind = match (self.extension, d_tag) {
+            (NAPPLET_UPDATES, Some(_)) => myco_napplet_runtime::KIND_NAMED,
+            (NAPPLET_UPDATES, None) => myco_napplet_runtime::KIND_ROOT,
+            (NSITE_UPDATES, Some(_)) => nsite_deck::KIND_NAMED,
+            (NSITE_UPDATES, None) => nsite_deck::KIND_ROOT,
+            _ => return None,
+        };
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::from(kind))
+            .author(*author);
+        Some(match d_tag {
+            Some(d) => filter.identifier(d),
+            None => filter,
+        })
+    }
+}
+
 #[async_trait]
 impl nsite_deck::PeerSource for ExtensionSource {
+    /// The newest signed manifest for the slot: from each neighborhood's
+    /// scope here, else asked of the links carrying it.
     async fn fetch_manifest(
         &self,
-        _author: &PublicKey,
-        _d_tag: Option<&str>,
+        author: &PublicKey,
+        d_tag: Option<&str>,
     ) -> anyhow::Result<Option<Event>> {
-        Ok(None)
+        let Some(neighbors) = self.neighbors.upgrade() else {
+            return Ok(None);
+        };
+        let Some(filter) = self.slot_filter(author, d_tag) else {
+            return Ok(None);
+        };
+        let filters = [filter];
+        let mut newest: Option<Event> = None;
+        for record in neighbors.records() {
+            if !record.policy.gets(self.extension) {
+                continue;
+            }
+            let mut found = neighbors.link_backlog(record.id, &filters).await;
+            if found.is_empty() {
+                found = neighbors.ask_links(record.id, &filters).await;
+            }
+            for event in found {
+                if event.pubkey != *author || event.verify().is_err() {
+                    continue;
+                }
+                if newest
+                    .as_ref()
+                    .is_none_or(|n| n.created_at < event.created_at)
+                {
+                    newest = Some(event);
+                }
+            }
+        }
+        Ok(newest)
     }
 
     async fn fetch_blob(

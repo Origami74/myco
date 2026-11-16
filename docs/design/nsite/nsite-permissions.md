@@ -1,16 +1,15 @@
-# Permissions: per-peer grants and per-application capabilities
+# Permissions: what other phones and apps may do
 
-> Status: **§2 (per-peer permissions) is built** — the record is enforced on
-> both content ports for every app peer, always at its defaults, and no UI
-> exposes it. **§3–§6 (per-application capabilities for nsites) are superseded**, not
+> Status: **§2 (per-peer permissions) is removed** — no other phone reaches
+> the relay or Blossom, so there is nothing to grant per peer. **§3–§6
+> (per-application capabilities for nsites) are superseded**, not
 > built: the per-app permission model shipped for **napplets** instead —
 > install review, a grant per capability domain, checked on every call,
 > switchable on the app's sheet — in
 > [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md). An nsite
 > stays pure-static and gets nothing; the one thing an nsite can do today that
 > looks like a capability (publish to `ws://localhost:4870`) no longer reaches
-> anyone else: event gossip is gone, and only app manifests are forwarded
-> between app peers. §3–§6 are kept as the record of
+> anyone else: the relay is loopback only. §3–§6 are kept as the record of
 > why an `Origin`-keyed model was considered and where it would have bitten.
 
 An nsite is a static web app served from the local gateway
@@ -22,96 +21,44 @@ main thing this doc is trying to prevent.
 
 | Layer | Question it answers | Subject | Status |
 | --- | --- | --- | --- |
-| **Per-peer** (§2) | What may another *device* do to us? | An app peer, identified by its mesh address | Built |
+| **Per-peer** (§2) | What may another *device* do to us? | A linked peer, by its link key | Only the link service; see §2 |
 | **Per-application** (§3–§6) | What may an *app we run* do on our behalf? | An nsite, identified by its `siteKey` | Proposed |
 
-They are independent. A peer with full grants still cannot make our device publish
-a kind an app is not allowed to publish, and a fully-trusted app still cannot get
-data out of a peer that has revoked our reads.
+They are independent.
 
-> **Scope.** Enforcement is native, in the **mesh relay proxy**
-> ([`myco-core/src/mesh_relay.rs`](../../../myco-core/src/mesh_relay.rs)) and the
-> Blossom server. The WebView/nsite JS is untrusted, so a capability can never
-> live in JS — only be *requested* from there.
+> **Scope.** Enforcement is native. The WebView/nsite JS is untrusted, so a
+> capability can never live in JS — only be *requested* from there.
 
 ---
 
 ## 1. Where enforcement lives
 
-Both layers are enforced in the same place: the **mesh relay proxy**, the one
-piece of Myco-specific code on the content path. It terminates both sockets — the
-loopback socket the WebView talks to and the `.fips` socket peers talk to — so it
-is the only component that can see an `Origin` header *and* a peer's mesh address.
-The store behind it is a plain NIP-01 relay with no Myco concepts in it, and is
-meant to be swappable, so policy cannot live there.
-
-The blob plane is the same shape: `myco-blossom` is a generic BUD-01 store and
-takes an access function from `myco-core`, so it stays free of neighborhood knowledge.
-
-Links are set up nowhere on the content path: link setup has its own service on
-`:4873` ([nap-neighbor/links.md](../nap-neighbor/links.md#the-link-service-4873)).
+- **Other phones** reach only the link service on `:4873`
+  ([nap-neighbor/links.md](../nap-neighbor/links.md#the-link-service-4873)).
+  Every request after setup is NIP-98-signed by a link key, and answers come
+  only from the neighborhoods that link carries.
+- **Apps** reach the relay on loopback (`ws://localhost:4870`) and, for
+  napplets, the same hub in-process. Per-app checks belong in the **relay
+  proxy** ([`myco-core/src/mesh_relay.rs`](../../../myco-core/src/mesh_relay.rs)),
+  the one piece of Myco-specific code in front of the store. The store behind
+  it is a plain NIP-01 relay, meant to be swappable, so policy cannot live
+  there.
 
 ---
 
 ## 2. Per-peer permissions
 
-Who gets in is the **app peer** set: linked devices sharing an extension with us
-([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)), enforced by `AppPeerGate`.
-What an admitted peer may do is six flags (`PeerPerms` in `content.rs`). They are
-not persisted: every app peer gets the defaults, recomputed with the set.
+**Removed.** Earlier builds opened the relay and Blossom to linked devices
+and kept six per-peer flags (relay read/write and their multihop clamps,
+Blossom read/write). Neither store is reachable from another phone now, so
+the flags went with them.
 
-| Plane | Flag | Default | Meaning |
-| --- | --- | --- | --- |
-| Relay | `relayRead` | on | May open a `REQ` and receive our stored events |
-| Relay | `relayReadMultihop` | on | Their `REQ` may be forwarded to our other peers |
-| Relay | `relayWrite` | on | May publish events to us |
-| Relay | `relayWriteMultihop` | on | Events from them may be forwarded onward by us |
-| Blossom | `blossomRead` | on | May `GET` / `HEAD` blobs from us |
-| Blossom | `blossomWrite` | **off** | May `PUT /upload` to us |
+What a linked peer may do is set per neighborhood instead:
 
-Read every flag as a grant **we** make to **them**. "Multihop" means specifically
-whether *their* traffic travels further through *us* — not anything we send them.
-
-### 2.1 Two checks, not one
-
-- **At accept.** A peer that is not an app peer is refused **before the
-  WebSocket upgrade**, with a plain `403`. There are no exceptions on either
-  content port. A stranger costs a TCP accept and one small response rather than
-  an upgrade and a round of frames, which matters on a BLE link.
-- **Per message / per route.** An admitted peer's flags then apply: read against
-  `REQ`, write against `EVENT`, and on Blossom the read/write split falls out of
-  the HTTP method.
-
-The set and flags are consulted **live** on every request, so a link ending, a
-neighborhood left, or Apps turned off takes effect immediately. Revocation also drops
-connections that are already open, rather than only blocking the next one.
-
-### 2.2 The multihop flags are hop-budget clamps
-
-Neither multihop flag is a separate check. They are per-peer values for the hop
-budget a `MESH` envelope carries (`mesh_wire.rs`):
-
-- `relayWriteMultihop` off → an inbound manifest's budget is treated as **0**:
-  store it, never pass it on ([nsite-updates.md §4](./nsite-updates.md)).
-- `relayReadMultihop` off → an inbound `REQ`'s budget is clamped to **0**. Inert
-  today: no peer `REQ` is forwarded any more.
-
-### 2.3 Why Blossom write defaults off
-
-Uploads cost us disk, and nothing in normal operation needs them: propagation is
-pull-based, so peers fetch blobs from the holder rather than being handed them.
-Serde defaults are written so a missing field cannot silently grant it.
-
-The one casualty is the dev-menu peer speedtest, which works by `PUT`ting a
-payload to the target peer's Blossom. It is not exempted: it works only against a
-peer who has granted uploads, and the dev menu should say so plainly rather than
-report a generic failure.
-
-### 2.4 Not in the UI yet
-
-Every app peer gets the defaults. Per-neighborhood offers
-([nap-neighbor/links.md](../nap-neighbor/links.md#offers)) are where such knobs are
-likelier to live now.
+- **Posts reach** and **pass on** ([nap-neighbor/policy.md](../nap-neighbor/policy.md)).
+- **Get** and **Share** for each update extension
+  ([nap-neighbor/extensions.md](../nap-neighbor/extensions.md)).
+- Ending a link, or dropping a neighborhood from it.
 
 ---
 
@@ -122,8 +69,7 @@ site, `npub:dTag` for a named one — [nsite-layer.md §3.2](./nsite-layer.md)).
 Per-application permissions are a record stored **per-siteKey** on the device.
 
 The enforcement hook is the **WebSocket / HTTP `Origin`**. The nsite loads at
-`http://<host>.localhost` and talks to the localhost relay (`ws://localhost:4870`) and
-Blossom (`http://localhost:24243`); every request carries
+`http://<host>.localhost` and talks to the localhost relay (`ws://localhost:4870`); every request carries
 `Origin: http://<host>.localhost`. The proxy maps **`Origin → siteKey → permission
 record`** and applies it.
 
@@ -142,7 +88,7 @@ simply trusted. This is where it is added.
 | Capability | v1 default | Meaning | Enforced at |
 | --- | --- | --- | --- |
 | `gossip-kinds` | **all kinds** | which event kinds may be fanned out to the mesh | proxy fan-out path, keyed by `Origin` |
-| `event-hops` | **3** | max reach for this app's pushed events — a per-app version of `EVENT_TTL` | proxy fan-out path |
+| `event-hops` | **3** | max reach for this app's pushed events — a per-app version of the hop budget | proxy fan-out path |
 | `rate` | lenient (§5) | publish / subscribe rate caps | proxy ingress, per `Origin` |
 | `location` | *(future)* | geolocation, granted at a **chosen accuracy** (coarse → fine), e.g. for geohash rooms | WebView geolocation bridge (Kotlin) |
 | `blob-quota` | *(future)* | Blossom storage budget for app-authored blobs | Blossom `PUT` path |
@@ -187,7 +133,7 @@ Over-limit is **slow-down, not hard-fail** where possible (queue/delay rather
 than reject), so a chatty moment degrades gracefully instead of dropping messages.
 
 The link service on `:4873` follows the same lenient spirit with its own limits,
-since it is the only port a device that is not an app peer can reach
+since it is the only port another phone can reach
 ([nap-neighbor/links.md](../nap-neighbor/links.md#the-link-service-4873)).
 
 ---
@@ -205,9 +151,8 @@ prompt:
 3. **Enforce.** Same native points as §4 — only the *default* changes from allow
    to deny-until-granted for the sensitive subset.
 
-The same UI problem exists one layer down: per-peer flags (§2) also need a place
-to live, and the two lists are different enough ("this device" vs "this app") that
-they probably want separate screens.
+Per-peer choices (§2) already live on the neighborhood page, apart from any
+per-app list.
 
 ---
 
@@ -220,20 +165,17 @@ they probably want separate screens.
   **TBD / open.**
 - **Trust tiers** — should an app shared by a neighbor get a more generous record than a
   freshly-installed one? Ties into [security.md](../core/security.md). **TBD / open.**
-- **Surfacing per-peer flags** — which of the six are worth showing a user at all,
-  and what a sensible preset ("read-only peer", "no relaying") looks like.
-  **TBD / open.**
 
 ---
 
 ## See also
 
-- [./nsite-updates.md](./nsite-updates.md) — manifest forwarding, the one plane
-  the multihop clamp still bites on.
+- [./nsite-updates.md](./nsite-updates.md) — how updates travel through
+  neighborhoods.
 - [./nsite-layer.md](./nsite-layer.md) — the gateway, `siteKey` resolution, and
   the JS sandbox / capability open question (§7) this answers.
-- [nap-neighbor/](../nap-neighbor/README.md) — links and app peers, the set
-  these per-peer grants attach to.
+- [nap-neighbor/](../nap-neighbor/README.md) — links, neighborhoods and their
+  per-neighborhood settings.
 - [./security.md](../core/security.md) — the trust model both layers sit inside.
 - [../../reference/thinning-custom-relay.md](../../../reference/thinning-custom-relay.md) —
-  D10, where the per-peer flags were decided.
+  D10, where the (since removed) per-peer flags were decided.

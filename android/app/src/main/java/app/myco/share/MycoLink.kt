@@ -14,9 +14,10 @@ package app.myco.share
  * Invitations have their own carrier (the Invite sheet's QR, link or NFC tap), and a
  * shared app with its holder travels as `myco://share/…` in [NsiteShare].
  *
- * Losing the holder hint costs nothing: `Content::open_site` with `holder = None`
- * already tries every app peer in turn and then the public fallback, so a link with
- * no sharer attached still retrieves the app from whoever nearby happens to have it.
+ * Losing the holder hint costs nothing: opening an app falls through this phone's own
+ * copy, then the neighborhoods sharing that kind of app (the matching extension), then
+ * the public internet. No holder npub is contacted, so a link with no sharer attached
+ * retrieves the app exactly as one with a sharer would.
  *
  * Deliberately plain string parsing (no `android.net.Uri`), so it is a pure function
  * the JVM unit tests can exercise without an emulator.

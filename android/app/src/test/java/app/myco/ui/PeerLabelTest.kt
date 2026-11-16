@@ -1,6 +1,5 @@
 package app.myco.ui
 
-import app.myco.core.AppPeer
 import app.myco.core.AppState
 import app.myco.core.CacheStatus
 import app.myco.core.PeerDiagnostic
@@ -20,7 +19,6 @@ class PeerLabelTest {
     private val them = "npub1" + "%059x".format(1)
 
     private fun state(
-        appPeers: List<AppPeer> = emptyList(),
         peers: List<PeerDiagnostic> = emptyList(),
     ) = AppState(
         rev = 1,
@@ -45,12 +43,11 @@ class PeerLabelTest {
         sites = emptyList(),
         library = emptyList(),
         cache = CacheStatus(relayEvents = 0, blobCount = 0, usedBytes = 0),
-        appPeers = appPeers,
         offlineOnly = true,
         peers = peers,
     )
 
-    private fun advert(npub: String, advertisedName: String) = PeerDiagnostic(
+    private fun advert(npub: String, advertisedName: String, linkName: String = "") = PeerDiagnostic(
         key = npub,
         npub = npub,
         nodeAddrHex = "",
@@ -60,16 +57,15 @@ class PeerLabelTest {
         transport = "ble",
         lastSeenMs = 0,
         advertisedName = advertisedName,
+        linkName = linkName,
         rssi = null,
         psm = 0,
-        appPeer = false,
     )
 
     @Test
     fun `a name they told us wins over what they broadcast`() {
         val s = state(
-            appPeers = listOf(AppPeer(npub = them, name = "Redmi Note 8 Pro")),
-            peers = listOf(advert(them, "forged name")),
+            peers = listOf(advert(them, "forged name", linkName = "Redmi Note 8 Pro")),
         )
         assertEquals("Redmi Note 8 Pro", peerLabel(s, them))
     }
@@ -88,8 +84,7 @@ class PeerLabelTest {
     @Test
     fun `a blank name is treated as no name at all`() {
         val s = state(
-            appPeers = listOf(AppPeer(npub = them, name = "   ")),
-            peers = listOf(advert(them, "their pixel")),
+            peers = listOf(advert(them, "their pixel", linkName = "   ")),
         )
         assertEquals("their pixel", peerLabel(s, them))
     }

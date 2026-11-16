@@ -45,8 +45,8 @@ This chain is established in
 The load-bearing consequence: **once you have a peer's device npub,
 you can compute where they live on the mesh with no further exchange.** No
 directory, no lookup, no signed announcement. A device npub (from a link offer's `.fips` URL, say)
-is sufficient to address that peer's services at `<npub>.fips:4870` (relay)
-and `<npub>.fips:24243` (Blossom), via the local DNS interceptor
+is sufficient to address that peer's link service at `<npub>.fips:4873`, via
+the local DNS interceptor
 ([fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md)).
 
 ### 1.1 Device identity vs. nsite author identity (do not conflate)
@@ -55,7 +55,7 @@ These are two different kinds of key and they never overlap:
 
 - **Device identity** — the device's one Nostr keypair (this section). It is the
   FIPS mesh address, the BLE link credential, and the host of *this device's*
-  relay + Blossom (`<npub_device>.fips`). It is **never** used to author nsites.
+  link service (`<npub_device>.fips`). It is **never** used to author nsites.
 - **nsite author identity** — *external* keys belonging to whoever authored a
   site, created by external nsite tooling elsewhere. An author key appears here
   **only** as the URL host of a requested site (`<npub_author>.localhost`) and as the
@@ -64,9 +64,10 @@ These are two different kinds of key and they never overlap:
 
 The practical consequence: **the site you want and the peer you fetch it from are
 different keys.** A site is identified by its *author* npub; the peer holding a
-copy is a *holder*, reached at `<npub_holder>.fips`. To pull a held site you query
-that holder's relay with `{kinds:[15128 or 35128], authors:[<author_pubkey>]}` —
-the holder's device key addresses the relay, the author key selects the events.
+copy is a *holder*. A linked holder is reached at `<npub_holder>.fips:4873`;
+pulling a held site queries its scoped neighborhood relay with
+`{kinds:[15128 or 35128], authors:[<author_pubkey>]}` — the holder's device key
+addresses the link service, the author key selects the events.
 
 ## 2. Identity storage
 

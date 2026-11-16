@@ -12,13 +12,14 @@ import java.security.SecureRandom
 
 /**
  * Build + encode the **share-an-nsite** payload: a single QR that carries the
- * nsite id *and* this device's npub, so the scanning device can fetch the nsite
- * from the sharer in one scan.
+ * nsite id, so the scanning device can open it — from its neighborhoods, then
+ * the internet. The sharer's npub still rides along for older builds, but
+ * nobody contacts it.
  *
  * Payload: `myco://share/<base64url(json)>` where the JSON is
  * `{ v, nsite, npub, name, secret }`:
  * - `nsite`  — the `<host>` label to open (`npub1…` root, or `<pubkeyB36><dTag>`).
- * - `npub`   — the **sharer's device** npub (the mesh identity; the holder).
+ * - `npub`   — the sharer's device npub. Not used to contact anyone.
  * - `name`   — a human label for the sharer's device.
  * - `secret` — a one-time secret. Pairing is gone, so nothing checks it now;
  *   kept so older builds still read the payload.

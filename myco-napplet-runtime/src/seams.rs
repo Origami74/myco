@@ -525,9 +525,8 @@ pub fn remote_lanes(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane
 /// `blossom:` scheme.
 ///
 /// The local [`BlobStore`] is always asked first, by the handler; this is
-/// only ever reached on a miss. An implementation goes to app peers'
-/// Blossom stores over the mesh and to the public servers when reachable,
-/// and returns the bytes only if they hash to `sha256_hex`. What it returns
+/// only ever reached on a miss. An implementation goes to the public servers
+/// when reachable, and returns the bytes only if they hash to `sha256_hex`. What it returns
 /// is stored locally by the handler before delivery, so the next ask is
 /// local — "anything queried is saved".
 #[async_trait]

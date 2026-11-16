@@ -1,34 +1,30 @@
 //! The Myco content layer: the embedded relay + Blossom stores wired to the
 //! `nsite-deck` gateway engine, plus the Library and per-site sync status the FFI
 //! surfaces. This is the in-process glue (`myco-core` is the only crate that names
-//! a concrete relay/Blossom). The localhost `:4870` / `:24243` sockets and the
-//! `:80` external door are **not** bound in P2 — the in-app WebView reaches the
-//! gateway in-process via `gateway_get` (the `gatewayGet` JNI). Peer sync over
-//! those sockets is P3.
+//! a concrete relay/Blossom). The in-app WebView reaches the gateway in-process
+//! via `gateway_get` (the `gatewayGet` JNI); the relay is served on loopback
+//! only (`ws://127.0.0.1:4870`) and the blob store on no socket at all. Other
+//! phones reach this one only through neighborhood links (`crate::neighbor`).
 //!
 //! Sync is **spawn-not-block**: `open_site` runs on the Tokio runtime and writes
 //! status into `sites`; the reducer never blocks on it (Kotlin polls `siteStatus`
 //! via `Tick`). See `docs/design/nsite/nsite-layer.md` and the FFI contract.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::IpAddr;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::nips::nip19::{FromBech32, ToBech32};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey};
+use nostr::{Event, Filter, Keys, Kind, PublicKey};
 use nsite_deck::gateway::{self, Readiness};
 use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
-use crate::file_transfer::{self, FileMessage, FileTransferRecord, FileTransferView};
-use crate::mesh_relay::{Inbound, Origin};
 use myco_blossom::FsBlobStore;
 use myco_relay::RelayStore;
 
@@ -264,74 +260,6 @@ impl NappletGrants {
     }
 }
 
-/// A peer this device shares apps with: the device behind a neighborhood
-/// link, sharing an extension with us (`crate::neighbor::extensions`). Not persisted — the runtime
-/// derives the set from the links and the neighborhoods' settings
-/// ([`Content::set_app_peers`]), so leaving a neighborhood or turning extensions
-/// off takes the peer out at once.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppPeer {
-    /// The peer's device npub, from the `.fips` address in its link offer.
-    pub npub: String,
-    /// The name the peer gave in the invitation.
-    pub name: String,
-    /// What this peer may do to us.
-    #[serde(default)]
-    pub perms: PeerPerms,
-}
-
-/// Per-peer permissions: what an app peer is allowed to do against this node.
-///
-/// Read every flag as a grant *we* make to *them*. "Multihop" is ambiguous on
-/// its own, so it means specifically whether their traffic travels further
-/// through us — not anything we send them. See
-/// `reference/thinning-custom-relay.md` (D10).
-///
-/// A stored record may still carry `relayReadMultihop` from an older build;
-/// unknown fields are ignored, so it reads fine and is dropped on the next save.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PeerPerms {
-    /// May open a `REQ` and receive our stored events.
-    #[serde(default = "yes")]
-    pub relay_read: bool,
-    /// May publish events to us.
-    #[serde(default = "yes")]
-    pub relay_write: bool,
-    /// Events from them may be forwarded onward by us (a hop-budget clamp).
-    #[serde(default = "yes")]
-    pub relay_write_multihop: bool,
-    /// May `GET` / `HEAD` blobs from us.
-    #[serde(default = "yes")]
-    pub blossom_read: bool,
-    /// May `PUT /upload` to us. **Off by default** — this is the one that costs
-    /// us disk, and nothing in normal operation needs it: propagation is
-    /// pull-based, so peers fetch blobs from the holder rather than pushing them.
-    /// The dev-menu speedtest is the only caller, and it reports the refusal.
-    #[serde(default = "no")]
-    pub blossom_write: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-fn no() -> bool {
-    false
-}
-
-impl Default for PeerPerms {
-    fn default() -> Self {
-        Self {
-            relay_read: yes(),
-            relay_write: yes(),
-            relay_write_multihop: yes(),
-            blossom_read: yes(),
-            blossom_write: no(),
-        }
-    }
-}
-
 /// Cache/store counts for the UI.
 ///
 /// These always describe the **embedded** store and blob directory, which is
@@ -378,57 +306,10 @@ impl CacheView {
 /// on sockets, however many authors the Library holds.
 const UPDATE_CHECK_AUTHOR_RELAYS: usize = 12;
 
-/// Longest [`Content::pull_from_peers`] waits on any one app peer.
-const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
-
-/// How many events passing through a pull are stored together.
-const PULL_REMEMBER_BATCH: usize = 32;
-
 /// How long napplet-driven internet lanes are skipped after every public relay
 /// failed in one round. Short: a phone walking back into Wi-Fi should not wait
 /// long to notice.
 pub(crate) const INTERNET_DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The mesh access gate backing the relay + Blossom servers: content (reads,
-/// manifests, blobs) is restricted to app peers — linked devices in
-/// sharing an extension with us — and what one may do is its [`PeerPerms`].
-///
-/// Holds the [`Content`] so the live set is consulted per request: a peer
-/// leaving a neighborhood, or Apps turned off, takes effect immediately.
-// Constructed by the Android runtime's mesh relay wiring; the host build has
-// no mesh socket to gate.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub struct AppPeerGate {
-    content: Arc<Content>,
-}
-
-impl AppPeerGate {
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    pub fn new(content: Arc<Content>) -> Self {
-        Self { content }
-    }
-}
-
-impl crate::mesh_relay::PeerGate for AppPeerGate {
-    fn may_read(&self, ip: IpAddr) -> bool {
-        self.content.perms_for_ip(ip).is_some_and(|p| p.relay_read)
-    }
-
-    fn may_connect(&self, ip: IpAddr) -> bool {
-        // Membership alone, checked before the WebSocket upgrade. A peer with a
-        // narrower permission set still gets a socket; what it may do with it is
-        // decided per message below.
-        self.content.perms_for_ip(ip).is_some()
-    }
-
-    fn may_publish(&self, ip: IpAddr, _kind: u16) -> bool {
-        self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
-    }
-
-    fn may_forward(&self, ip: IpAddr) -> bool {
-        self.content.may_forward_from(ip)
-    }
-}
 
 /// The shell cache's budgets, in bytes (Settings → Storage).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -494,8 +375,8 @@ pub struct Content {
     /// read together with the event cache, and written as **kept**
     /// (`tiered.rs`).
     relay: Arc<dyn RelayBackend>,
-    /// The same two stores, written as **cache**: pulled backlog, mesh
-    /// pass-through, query answers nobody asked to keep.
+    /// The same two stores, written as **cache**: pulled backlog, query
+    /// answers nobody asked to keep.
     cache_relay: Arc<dyn RelayBackend>,
     /// The shell's event cache, apart from the relay (`myco-cache`).
     event_cache: Arc<myco_cache::EventCache>,
@@ -526,8 +407,8 @@ pub struct Content {
     /// The pull source for not-yet-present sites. `None` in P2 M2 (local only);
     /// set to the IP online-fallback source in M3, the FIPS source in P3.
     source: Mutex<Option<Arc<dyn PeerSource>>>,
-    /// "Mesh-only": when true, `open_site` never uses the IP online fallback —
-    /// it pulls only over the mesh (holder + connected app peers). Lets you
+    /// "Mesh-only": when true, nothing is fetched over the internet — apps and
+    /// their files come only from this device and its neighborhoods. Lets you
     /// verify the mesh path even when this device has internet (e.g. a hotspot).
     offline_only: AtomicBool,
     /// When the internet last looked down from here, as a moment until which
@@ -542,20 +423,13 @@ pub struct Content {
     /// Releases as this phone keeps a new one ([`Content::release_updates`]):
     /// announcement, file events, APK sha256.
     release_updates: tokio::sync::broadcast::Sender<(Event, Vec<Event>, String)>,
-    /// Where a release APK is looked for in the neighborhoods
-    /// ([`Content::set_release_source`]).
-    release_source: Mutex<Option<Arc<dyn PeerSource>>>,
+    /// Per update extension, where its files (and manifests) are looked for
+    /// in the neighborhoods that get it ([`Content::set_extension_source`]).
+    extension_sources: Mutex<HashMap<&'static str, Arc<dyn PeerSource>>>,
     /// Nsite updates as they are activated ([`Content::site_updates`]).
     site_updates: tokio::sync::broadcast::Sender<Event>,
     /// Napplet updates as they are pinned ([`Content::napplet_updates`]).
     napplet_updates: tokio::sync::broadcast::Sender<Event>,
-    /// App peers: linked devices sharing an extension with us. Set by the
-    /// runtime from the links, never persisted.
-    app_peers: Mutex<Vec<AppPeer>>,
-    /// npubs of currently-connected mesh peers, refreshed by the runtime each poll.
-    /// `open_site` pulls from connected app peers (bounded to who's reachable,
-    /// so it never blocks on an offline contact's connect timeout).
-    connected_peers: Mutex<Vec<String>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
     sites: Mutex<HashMap<String, SiteStatusView>>,
     /// Sites the user removed, by host label. Nothing brings one back but
@@ -570,10 +444,6 @@ pub struct Content {
     /// The device keypair. Behind an `Arc` because a remote blob store needs it
     /// to sign BUD-01 upload authorizations, and it is set after construction.
     device_keys: Arc<Mutex<Option<Keys>>>,
-    /// Persistent WS connections to peers' relays, so chat fan-out and manifest
-    /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
-    /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
-    peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
     /// host_label -> a newer version being staged (downloaded) before activation.
     /// See `docs/design/nsite/nsite-updates.md` §2. P-U1: staged outside the relay store;
     /// activation stores the manifest (making it the served version).
@@ -582,26 +452,9 @@ pub struct Content {
     update_check: Mutex<UpdateCheckView>,
     /// The throttle every update-check trigger goes through (`update_gate.rs`).
     update_gate: Mutex<crate::update_gate::UpdateGate>,
-    /// Native app peer file transfers. Metadata is persisted; file keys and
-    /// encrypted outbox paths remain inside the app-private data directory.
-    file_transfers: Mutex<Vec<FileTransferRecord>>,
-    /// Incoming transfers this device finished, newest last, as `(id, peer)`.
-    /// The row itself is forgotten as soon as the shell publishes the file, but
-    /// the sender may still be retrying its `ready` if our `complete` was lost —
-    /// this is what lets a late `ready` be answered with a fresh `complete`
-    /// rather than refused as unknown. The peer is kept alongside the id so an
-    /// answer goes only to the peer the transfer was with; every other check on
-    /// that path binds the peer, and this one must too. Persisted, so a restart
-    /// in the window between publishing the file and the sender giving up does
-    /// not cost them the whole offer TTL.
-    completed_incoming: Mutex<VecDeque<(String, String)>>,
-    completed_incoming_path: PathBuf,
-    file_transfers_path: PathBuf,
-    file_outbox_dir: PathBuf,
-    received_dir: PathBuf,
     /// The **active version** the gateway serves per slot — decoupled from the
     /// relay's newest, so a newer (received/checked) manifest can sit in the relay
-    /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
+    /// store (NIP-01-faithful) while we keep serving the fully
     /// downloaded version until its replacement is staged. See
     /// `docs/design/nsite/nsite-updates.md` §1. Persisted to `active.json`.
     active_manifests: Arc<Mutex<HashMap<String, Event>>>,
@@ -629,9 +482,9 @@ pub struct Content {
 /// straight through to the relay. This is what keeps a working app serving while a
 /// newer manifest is still downloading. See `docs/design/nsite/nsite-updates.md` §1.
 ///
-/// The app peer-facing relay reads through the same view ([`Content::pinned_relay`]),
-/// so a peer asking for an installed app's manifest gets the version this phone
-/// has the files for, not a newer one kept in the store without them.
+/// The loopback relay reads through the same view ([`Content::pinned_relay`]),
+/// so a client asking for an installed app's manifest gets the version this
+/// phone has the files for, not a newer one kept in the store without them.
 #[derive(Clone)]
 struct ActiveBackend {
     relay: Arc<dyn RelayBackend>,
@@ -650,7 +503,7 @@ impl RelayBackend for ActiveBackend {
     /// has a slot-shaped read to override — everything goes through `query` now.
     /// A pinned event shares its slot with the one it replaces (same kind,
     /// author, and `d` tag), but not its `created_at`, id or other tags, so a
-    /// app peer's `since`, `ids` or tag filter can match the newer version
+    /// client's `since`, `ids` or tag filter can match the newer version
     /// and not the pin. The pin is served only when it matches the request
     /// itself; otherwise the slot answers nothing, as a relay holding only the
     /// pin would.
@@ -877,20 +730,21 @@ impl Content {
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
         // The Circle and its pairing handshake are gone; neighborhoods
-        // replaced them. Their files go with them.
-        for old in ["circle.json", "outbound_pairs.json"] {
+        // replaced them. Their files go with them. So does file transfer
+        // between phones, with its records, outbox and received files.
+        for old in [
+            "circle.json",
+            "outbound_pairs.json",
+            "file_transfers.json",
+            "completed_transfers.json",
+        ] {
             let _ = std::fs::remove_file(data_dir.join(old));
+        }
+        for old in ["file-outbox", "received"] {
+            let _ = std::fs::remove_dir_all(data_dir.join(old));
         }
         let active_path = data_dir.join("active.json");
         let active_manifests = load_active(&active_path);
-        let file_transfers_path = data_dir.join("file_transfers.json");
-        let file_transfers = load_file_transfers(&file_transfers_path);
-        let completed_incoming_path = data_dir.join("completed_transfers.json");
-        let completed_incoming = load_completed_incoming(&completed_incoming_path);
-        let file_outbox_dir = data_dir.join("file-outbox");
-        let received_dir = data_dir.join("received");
-        let _ = std::fs::create_dir_all(&file_outbox_dir);
-        let _ = std::fs::create_dir_all(&received_dir);
         Ok(Self {
             relay,
             cache_relay,
@@ -908,26 +762,17 @@ impl Content {
             library: Mutex::new(library),
             library_path,
             library_changed: Arc::new(tokio::sync::Notify::new()),
-            app_peers: Mutex::new(Vec::new()),
             napplet_updates: tokio::sync::broadcast::channel(32).0,
             site_updates: tokio::sync::broadcast::channel(32).0,
             release_updates: tokio::sync::broadcast::channel(4).0,
-            release_source: Mutex::new(None),
-            connected_peers: Mutex::new(Vec::new()),
+            extension_sources: Mutex::new(HashMap::new()),
             sites: Mutex::new(HashMap::new()),
             forgotten: Mutex::new(std::collections::HashSet::new()),
             loading_retries: Mutex::new(HashMap::new()),
             device_keys: device_keys.clone(),
-            peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
             update_gate: Mutex::new(crate::update_gate::UpdateGate::default()),
-            file_transfers: Mutex::new(file_transfers),
-            completed_incoming: Mutex::new(completed_incoming),
-            completed_incoming_path,
-            file_transfers_path,
-            file_outbox_dir,
-            received_dir,
             active_manifests: Arc::new(Mutex::new(active_manifests)),
             active_path,
             napplet_status: Mutex::new(HashMap::new()),
@@ -1005,12 +850,6 @@ impl Content {
         } else {
             Some(std::time::Instant::now() + INTERNET_DOWN_FOR)
         };
-    }
-
-    /// The shared per-peer relay pool, for building a mesh source against a
-    /// specific holder.
-    pub fn peer_relays(&self) -> Arc<crate::peer_relay::PeerRelayPool> {
-        self.peer_relays.clone()
     }
 
     /// Keep the profiles, relay lists and manifests among `events` — seen
@@ -1130,14 +969,14 @@ impl Content {
         self.blob_cache.save_snapshot().await;
     }
 
-    /// The store as app peers sees it: an installed app's manifest slot reads
+    /// The store as the loopback relay serves it: an installed app's manifest slot reads
     /// as its **pinned** version, the one this phone has the files for, even
     /// when a newer one sits in the store. Everything else passes through.
     pub fn pinned_relay(&self) -> Arc<dyn RelayBackend> {
         Arc::new(self.active_backend())
     }
 
-    /// The event store (shared), for the mesh WS proxy in front of it.
+    /// The event store (shared), read together with the event cache.
     pub fn relay(&self) -> Arc<dyn RelayBackend> {
         self.relay.clone()
     }
@@ -1163,9 +1002,8 @@ impl Content {
         self.blobs.clone()
     }
 
-    /// The embedded blob store, if that is what we are using. The mesh Blossom
-    /// server needs the concrete one: it serves our own blobs to peers, and a
-    /// custom server is reached by its own URL rather than proxied through us.
+    /// The embedded blob store, if that is what we are using: the usage counts,
+    /// the selective retain and the release APK need the concrete one.
     pub fn blobs_local(&self) -> Option<Arc<FsBlobStore>> {
         self.blobs_local.clone()
     }
@@ -1289,9 +1127,7 @@ impl Content {
                     due
                 };
                 if start {
-                    // A WebView load doesn't know the holder; the IP fallback (and
-                    // any earlier mesh attempt's cached result) covers the retry.
-                    tokio::spawn(Arc::clone(&self).open_site(addr, None));
+                    tokio::spawn(Arc::clone(&self).open_site(addr));
                 }
                 resp = GatewayResponse {
                     status: 503,
@@ -1307,12 +1143,11 @@ impl Content {
     // --- site entry ---
 
     /// Ensure a site is present, syncing if needed, updating its `siteStatus`.
-    /// Source order (`docs/design/nsite/nsite-layer.md` §5): local → the **holder**'s
-    /// relay/Blossom over the mesh (whoever shared it) → the public IP fallback.
-    /// `holder` is the sharer's device npub from a share QR (`None` for a pasted
-    /// link). Safe to call repeatedly; meant to be `spawn`ed, never awaited under
-    /// the reducer lock.
-    pub async fn open_site(self: Arc<Self>, addr: SiteAddr, holder: Option<String>) {
+    /// Source order (`docs/design/nsite/nsite-layer.md` §5): local → the
+    /// neighborhoods where this device gets `nsite-updates` → the public IP
+    /// fallback. Safe to call repeatedly; meant to be `spawn`ed, never awaited
+    /// under the reducer lock.
+    pub async fn open_site(self: Arc<Self>, addr: SiteAddr) {
         self.set_status(&addr, "syncing", 0, 0, "Loading…");
 
         // Already complete locally? Serve direct, no fetch. If the manifest is
@@ -1337,26 +1172,13 @@ impl Content {
                 }
             };
 
-        // Ordered sources: the mesh holder first (pull from whoever shared it),
-        // then any currently-connected app peer (your app peers double as
-        // relays), then the public IP online fallback.
+        // Ordered sources: the neighborhoods that carry nsites to us, then the
+        // public IP online fallback.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
-        let mut tried: HashSet<String> = HashSet::new();
-        if let Some(npub) = holder.as_deref() {
-            if tried.insert(npub.to_string()) {
-                match crate::ip_source::mesh_source_for(self.peer_relays.clone(), npub) {
-                    Ok(mesh) => sources.push(Arc::new(mesh)),
-                    Err(e) => tracing::warn!(error = %e, "skipping mesh source"),
-                }
-            }
-        }
-        for npub in self.app_peer_npubs() {
-            if tried.insert(npub.clone()) {
-                match crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
-                    Ok(mesh) => sources.push(Arc::new(mesh)),
-                    Err(e) => tracing::warn!(error = %e, npub, "skipping app peer mesh source"),
-                }
-            }
+        if let Some(neighborhoods) =
+            self.extension_source(crate::neighbor::extensions::NSITE_UPDATES)
+        {
+            sources.push(neighborhoods);
         }
         // The IP online fallback — unless mesh-only is enforced.
         if !self.is_offline_only() {
@@ -1376,7 +1198,6 @@ impl Content {
         }
         tracing::info!(
             host = %addr.host_label(),
-            holder = ?holder,
             sources = sources.len(),
             staged = known.is_some(),
             "open_site: syncing"
@@ -1939,122 +1760,11 @@ impl Content {
         out
     }
 
-    // --- app peers (linked devices sharing an extension with us) ---
-
-    /// Replace the app peers. A peer new to the set gets its dial backoff
-    /// cleared, so the next keepwarm tick reaches it at once.
-    pub fn set_app_peers(&self, peers: Vec<AppPeer>) {
-        let mut cur = self.app_peers.lock().unwrap();
-        for p in &peers {
-            if !cur.iter().any(|c| c.npub == p.npub) {
-                self.peer_relays.reset_backoff(&p.npub);
-            }
-        }
-        *cur = peers;
-    }
-
-    pub fn app_peers_snapshot(&self) -> Vec<AppPeer> {
-        self.app_peers.lock().unwrap().clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn add_app_peer_for_test(&self, npub: &str, name: &str) {
-        let mut peers = self.app_peers_snapshot();
-        peers.push(AppPeer {
-            npub: npub.to_string(),
-            name: name.to_string(),
-            perms: PeerPerms::default(),
-        });
-        self.set_app_peers(peers);
-    }
-
-    fn is_app_peer(&self, npub: &str) -> bool {
-        self.app_peers
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.npub == npub)
-    }
-
-    /// Record which mesh peers are *directly* connected right now (called by the
-    /// runtime from the node's peer snapshot). This is only an edge detector for
-    /// dial backoff — nothing gates on it, because whether a app peer is a
-    /// direct neighbour or twenty hops away is FIPS's business, not ours.
-    pub fn set_connected_peers(&self, npubs: Vec<String>) {
-        let mut cur = self.connected_peers.lock().unwrap();
-        // A peer newly present in the mesh view is a reconnect edge: forget its
-        // dial backoff so the next keepwarm tick dials it immediately.
-        for npub in &npubs {
-            if !cur.contains(npub) {
-                self.peer_relays.reset_backoff(npub);
-            }
-        }
-        *cur = npubs;
-    }
-
-    /// Every app peer's npub. Hop count is deliberately not a factor: FIPS
-    /// routes to a mesh address whether the peer is adjacent or many hops away,
-    /// so a routed `ws://<npub>.fips:4870` dial reaches any of them. A member
-    /// who is genuinely offline costs one bounded dial (the callers time out)
-    /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
-    /// See `docs/design/nap-neighbor/app-peers.md`.
-    pub fn app_peer_npubs(&self) -> Vec<String> {
-        self.app_peers
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|c| c.npub.clone())
-            .collect()
-    }
-
-    /// The permissions granted to the peer at `ip`, or `None` if `ip` is not a
-    /// current app peer. One lookup answers both "are they an app peer" and "what
-    /// may they do", so the access checks never consult two sources that could
-    /// disagree. See `reference/thinning-custom-relay.md` (D10).
-    ///
-    /// Consulted per request, so adding a peer, removing one, or changing a
-    /// permission takes effect immediately — there is no cached set. A peer's ULA
-    /// is `fd…+node_addr[0..15]` (`PeerIdentity::from_npub(npub).address()`),
-    /// which is exactly the source address the mesh sockets see.
-    pub fn perms_for_ip(&self, ip: IpAddr) -> Option<PeerPerms> {
-        let IpAddr::V6(v6) = ip else { return None };
-        self.app_peers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|c| {
-                fips::PeerIdentity::from_npub(&c.npub)
-                    .map(|p| p.address().to_ipv6() == v6)
-                    .unwrap_or(false)
-            })
-            .map(|c| c.perms.clone())
-    }
-
-    /// Whether events arriving from the peer at `ip` may be forwarded onward by
-    /// us. Without the grant their events are still stored and shown locally —
-    /// they simply stop here (`reference/thinning-custom-relay.md`, D10).
-    pub fn may_forward_from(&self, ip: IpAddr) -> bool {
-        self.perms_for_ip(ip)
-            .is_some_and(|p| p.relay_write_multihop)
-    }
-
-    /// Whether the peer at `ip` may upload blobs to our Blossom. Off by default:
-    /// propagation is pull-based, so nothing in normal operation pushes blobs to
-    /// a peer, and an upload costs us disk.
-    pub fn may_upload_blobs(&self, ip: IpAddr) -> bool {
-        self.perms_for_ip(ip).is_some_and(|p| p.blossom_write)
-    }
-
-    /// Whether the peer at `ip` may read blobs from our Blossom.
-    pub fn may_read_blobs(&self, ip: IpAddr) -> bool {
-        self.perms_for_ip(ip).is_some_and(|p| p.blossom_read)
-    }
-
     /// Library sites worth (re)trying right now: not yet `ready`, and not already
     /// `syncing` (an attempt is in flight). Skipping the in-flight ones is what lets
     /// a caller poll this every tick without piling on duplicate syncs — it re-tries
-    /// roughly once per attempt-duration. Used to pull from a holder that just became
-    /// reachable (the sharer) or any newly-connected app peer.
+    /// roughly once per attempt-duration, so a neighbor who comes into reach, or
+    /// the internet coming back, finishes the download.
     pub fn retriable_library_addrs(&self) -> Vec<SiteAddr> {
         // Snapshot the library first (releasing its lock) before taking `sites`, so
         // the two mutexes are never held nested.
@@ -2071,21 +1781,6 @@ impl Content {
             .collect()
     }
 
-    /// app peers we hold a live mesh relay connection to right now. The
-    /// keepwarm tick keeps one open per member, so this reflects who is
-    /// actually reachable — at any hop count — rather than who happens to be
-    /// an adjacent node.
-    pub fn reachable_npubs(&self) -> Vec<String> {
-        let live = self.peer_relays.connected_npubs();
-        self.app_peers
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| live.contains(&c.npub))
-            .map(|c| c.npub.clone())
-            .collect()
-    }
-
     // --- device identity ---
 
     /// Set the device keypair from the persisted nsec.
@@ -2094,1175 +1789,6 @@ impl Content {
             Ok(keys) => *self.device_keys.lock().unwrap() = Some(keys),
             Err(e) => tracing::warn!(error = %e, "content: bad device nsec"),
         }
-    }
-
-    /// One keepwarm pass (driven by a runtime tick): ensure a live pooled connection
-    /// to every app peer, so a dropped connection is respawned promptly rather
-    /// than lazily on the next outbound frame, wherever the peer sits in the mesh.
-    pub fn keepwarm_tick(self: &Arc<Self>) {
-        // Cheap, and the only clock the transfer state machine has.
-        self.sweep_file_transfers();
-        let resend = self.stalled_file_messages(file_transfer::now_secs());
-        if !resend.is_empty() {
-            let content = Arc::clone(self);
-            tokio::spawn(async move {
-                for (peer_npub, message) in resend {
-                    let Ok(target) = PublicKey::from_bech32(&peer_npub) else {
-                        continue;
-                    };
-                    let transfer_id = message.transfer_id().to_string();
-                    match content
-                        .send_file_message(&target, &peer_npub, message)
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::info!(transfer = %transfer_id, "file share: re-sent pending message")
-                        }
-                        Err(e) => {
-                            tracing::debug!(transfer = %transfer_id, error = %e, "file share: re-send failed")
-                        }
-                    }
-                }
-            });
-        }
-        for npub in &self.app_peer_npubs() {
-            if fips::PeerIdentity::from_npub(npub).is_ok() {
-                // Teach the node this npub's address→pubkey mapping first. We
-                // dial a raw `fd00::` literal below, which skips DNS — and
-                // without the identity the node has no pubkey to open a session
-                // with, so the dial fails as unroutable for anyone who isn't
-                // already a direct neighbour. See `dns_intercept::warm_route`.
-                crate::dns_intercept::warm_route(npub);
-                let url = crate::ip_source::mesh_relay_url(npub);
-                self.peer_relays.ensure(npub, &url);
-            }
-        }
-    }
-
-    // --- native app peer file transfer ---
-
-    /// Snapshot transfer rows for the FFI/UI. Secrets and local source paths
-    /// never cross this boundary.
-    pub fn file_transfers_snapshot(&self) -> Vec<FileTransferView> {
-        self.file_transfers
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|r| r.view.clone())
-            .collect()
-    }
-
-    /// Encrypt a local file, retain the ciphertext in the app-private outbox,
-    /// and send only a gift-wrapped metadata offer. The ciphertext is not put
-    /// into Blossom until the recipient accepts.
-    pub async fn start_file_share(
-        self: Arc<Self>,
-        path: String,
-        name: String,
-        mime: String,
-        target_npub: String,
-    ) -> anyhow::Result<()> {
-        if !self.is_app_peer(&target_npub) {
-            anyhow::bail!("file share target is not an app peer");
-        }
-        let keys = self
-            .device_keys
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-        let target = PublicKey::from_bech32(&target_npub)
-            .map_err(|e| anyhow::anyhow!("invalid target npub: {e}"))?;
-        let imported_from_android_share = Path::new(&path)
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            .map(|name| name == "myco-share-outbox")
-            .unwrap_or(false);
-        let plain = tokio::fs::read(&path).await?;
-        let filename = file_transfer::safe_filename(&name, "shared-file");
-        let mime = if mime.trim().is_empty() {
-            "application/octet-stream".to_string()
-        } else {
-            mime
-        };
-        if let Some(reason) = file_transfer::rejected_payload(&filename, &mime) {
-            anyhow::bail!(reason);
-        }
-        let transfer_id = file_transfer::new_transfer_id();
-        let (package, key) =
-            file_transfer::encrypt_file(&plain, &transfer_id, &target_npub, &filename)?;
-        let outbox_path = self.file_outbox_dir.join(format!("{transfer_id}.bin"));
-        tokio::fs::write(&outbox_path, &package).await?;
-        if imported_from_android_share {
-            // Android's copy is only an input staging file. Once the native
-            // encrypted outbox exists, retaining it would create a second
-            // private history of every shared file.
-            let _ = tokio::fs::remove_file(&path).await;
-        }
-        let now = file_transfer::now_secs();
-        let expires_at = now + file_transfer::OFFER_TTL_SECS;
-        let peer_name = self
-            .app_peers_snapshot()
-            .into_iter()
-            .find(|p| p.npub == target_npub)
-            .map(|p| p.name)
-            .unwrap_or_else(|| target_npub.chars().take(16).collect());
-        self.insert_file_transfer(FileTransferRecord {
-            view: FileTransferView {
-                id: transfer_id.clone(),
-                direction: "outgoing".to_string(),
-                peer_npub: target_npub.clone(),
-                peer_name,
-                name: filename.clone(),
-                mime: mime.clone(),
-                size: plain.len() as u64,
-                status: "offered".to_string(),
-                blob_hash: String::new(),
-                received_path: String::new(),
-                publish_pending: false,
-                error: String::new(),
-                updated_at: now,
-            },
-            source_path: Some(outbox_path.to_string_lossy().into_owned()),
-            key_b64: Some(file_transfer::encode_key(&key)),
-            ciphertext_size: package.len() as u64,
-            expires_at,
-            last_resend_at: 0,
-        });
-        let sender_npub = keys.public_key().to_bech32()?;
-        let message = FileMessage::Offer {
-            transfer_id: transfer_id.clone(),
-            sender_npub,
-            recipient_npub: target_npub.clone(),
-            filename,
-            mime,
-            size: plain.len() as u64,
-            issued_at: now,
-            expires_at,
-        };
-        if let Err(e) = self.send_file_message(&target, &target_npub, message).await {
-            // The row stays. `error` is the only channel this failure has to the
-            // user, and deleting the row here is what made every failed send
-            // look like a successful one.
-            self.set_file_status(&transfer_id, "failed", &e.to_string());
-            return Err(e);
-        }
-        tracing::info!(target = %target_npub, transfer = %transfer_id, "file share offer sent");
-        Ok(())
-    }
-
-    /// Respond to an incoming offer. Accepting only sends the control reply;
-    /// the sender uploads the encrypted blob afterward.
-    pub async fn respond_file_transfer(
-        self: Arc<Self>,
-        transfer_id: String,
-        accepted: bool,
-    ) -> anyhow::Result<()> {
-        let target_npub = {
-            let records = self.file_transfers.lock().unwrap();
-            let record = records
-                .iter()
-                .find(|r| r.view.id == transfer_id && r.view.direction == "incoming")
-                .ok_or_else(|| anyhow::anyhow!("file offer not found"))?;
-            if record.view.status != "waiting_user" {
-                anyhow::bail!("file offer is no longer waiting for a response");
-            }
-            record.view.peer_npub.clone()
-        };
-        let keys = self
-            .device_keys
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-        let target = PublicKey::from_bech32(&target_npub)?;
-        let own_npub = keys.public_key().to_bech32()?;
-        self.set_file_status(
-            &transfer_id,
-            if accepted { "accepted" } else { "denied" },
-            "",
-        );
-        let message = FileMessage::Response {
-            transfer_id: transfer_id.clone(),
-            sender_npub: own_npub,
-            recipient_npub: target_npub.clone(),
-            accepted,
-            reason: (!accepted).then(|| "declined by recipient".to_string()),
-        };
-        let result = self.send_file_message(&target, &target_npub, message).await;
-        if !accepted && result.is_ok() {
-            self.forget_file_transfer(&transfer_id);
-        }
-        result
-    }
-
-    /// Called by the mesh relay hook (`MeshGossiper`) for every newly-arrived
-    /// gift wrap. Invalid, expired, non-file, and non-app peer messages are
-    /// ignored.
-    pub async fn handle_file_event(self: &Arc<Self>, event: &Event) {
-        if event.kind != Kind::GiftWrap {
-            return;
-        }
-        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
-            return;
-        };
-        let Ok(unwrapped) = nostr::nips::nip59::extract_rumor(&keys, event).await else {
-            return;
-        };
-        if unwrapped.rumor.kind != Kind::PrivateDirectMessage {
-            return;
-        }
-        let Ok(message) = serde_json::from_str::<FileMessage>(&unwrapped.rumor.content) else {
-            return;
-        };
-        // The id reaches a filesystem path and every lookup below keys on it, so
-        // it is checked once, here, before any branch has a chance to use it.
-        if !file_transfer::valid_transfer_id(message.transfer_id()) {
-            tracing::warn!("file message with a malformed transfer id ignored");
-            return;
-        }
-        let sender_npub = unwrapped.sender.to_bech32().unwrap_or_default();
-        if !self.is_app_peer(&sender_npub) {
-            tracing::warn!(sender = %sender_npub, "file message from a non-app-peer sender ignored");
-            return;
-        }
-        let own_npub = match keys.public_key().to_bech32() {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        match message {
-            FileMessage::Offer {
-                transfer_id,
-                recipient_npub,
-                filename,
-                mime,
-                size,
-                expires_at,
-                ..
-            } if recipient_npub == own_npub => {
-                if expires_at <= file_transfer::now_secs()
-                    || size > file_transfer::MAX_FILE_BYTES as u64
-                {
-                    tracing::warn!(transfer_id, "expired or oversized file offer ignored");
-                    return;
-                }
-                let offered_name = file_transfer::safe_filename(&filename, "shared-file");
-                if let Some(reason) = file_transfer::rejected_payload(&offered_name, &mime) {
-                    tracing::warn!(transfer_id, %reason, "file offer refused by payload policy");
-                    return;
-                }
-                if self
-                    .file_transfers
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|r| r.view.id == transfer_id)
-                {
-                    return;
-                }
-                // Drop finished rows to make room first; refuse the offer only if
-                // the list is genuinely full of live ones. Otherwise a peer that
-                // spams offers grows the persisted list without bound.
-                if self.file_transfers.lock().unwrap().len() >= file_transfer::MAX_TRACKED_TRANSFERS
-                {
-                    self.prune_finished_transfers();
-                    if self.file_transfers.lock().unwrap().len()
-                        >= file_transfer::MAX_TRACKED_TRANSFERS
-                    {
-                        tracing::warn!(transfer_id, "file offer refused, too many open transfers");
-                        return;
-                    }
-                }
-                let peer_name = self
-                    .app_peers_snapshot()
-                    .into_iter()
-                    .find(|p| p.npub == sender_npub)
-                    .map(|p| p.name)
-                    .unwrap_or_else(|| "peer".to_string());
-                self.insert_file_transfer(FileTransferRecord {
-                    view: FileTransferView {
-                        id: transfer_id,
-                        direction: "incoming".to_string(),
-                        peer_npub: sender_npub,
-                        peer_name,
-                        name: offered_name,
-                        mime,
-                        size,
-                        status: "waiting_user".to_string(),
-                        blob_hash: String::new(),
-                        received_path: String::new(),
-                        publish_pending: false,
-                        error: String::new(),
-                        updated_at: file_transfer::now_secs(),
-                    },
-                    source_path: None,
-                    key_b64: None,
-                    ciphertext_size: 0,
-                    expires_at,
-                    last_resend_at: 0,
-                });
-            }
-            FileMessage::Response {
-                transfer_id,
-                recipient_npub,
-                accepted,
-                reason,
-                ..
-            } if recipient_npub == own_npub => {
-                // A decline also travels this way when the *sender* cancels, so
-                // the recipient's own pending row resolves instead of waiting
-                // for its sweeper. An accept only ever makes sense outbound.
-                if !accepted {
-                    if self.has_file_transfer(&transfer_id, "outgoing", &sender_npub)
-                        || self.has_file_transfer(&transfer_id, "incoming", &sender_npub)
-                    {
-                        self.set_file_status(
-                            &transfer_id,
-                            "denied",
-                            reason.as_deref().unwrap_or("declined by recipient"),
-                        );
-                        self.clear_transfer_secrets(&transfer_id);
-                    }
-                    return;
-                }
-                // Only an offer still on the wire can be accepted. Without the
-                // status check a replayed accept restarts a finished transfer.
-                if !self.transfer_in_state(&transfer_id, "outgoing", &sender_npub, &["offered"]) {
-                    return;
-                }
-                self.set_file_status(&transfer_id, "accepted", "");
-                let content = Arc::clone(self);
-                tokio::spawn(async move {
-                    if let Err(e) = content.finish_outgoing_transfer(&transfer_id).await {
-                        content.set_file_status(&transfer_id, "failed", &e.to_string());
-                    }
-                });
-            }
-            FileMessage::Ready {
-                transfer_id,
-                recipient_npub,
-                filename,
-                mime,
-                size,
-                blob_hash,
-                ciphertext_size,
-                key_wrap,
-                ..
-            } if recipient_npub == own_npub => {
-                // The user's accept is what authorises the download. Matching on
-                // the transfer alone let a sender follow its own offer straight
-                // with a `ready`, and the file would be fetched, decrypted and
-                // published to Downloads without anyone ever tapping Accept.
-                if !self.transfer_in_state(&transfer_id, "incoming", &sender_npub, &["accepted"]) {
-                    // A `ready` for a transfer we already finished means our
-                    // `complete` never reached the sender: answer it again so
-                    // their row stops retrying and clears.
-                    if self.was_completed_incoming(&transfer_id, &sender_npub) {
-                        let content = Arc::clone(self);
-                        tokio::spawn(async move {
-                            if let Err(e) = content.send_complete(&transfer_id, &sender_npub).await
-                            {
-                                tracing::debug!(transfer = %transfer_id, error = %e, "file share: repeat completion failed");
-                            }
-                        });
-                        return;
-                    }
-                    // The sender retries `ready` until it hears `complete`, so
-                    // a repeat while the download is already running is the
-                    // expected case, not an out-of-order message.
-                    if self.transfer_in_state(
-                        &transfer_id,
-                        "incoming",
-                        &sender_npub,
-                        &["downloading"],
-                    ) {
-                        tracing::debug!(transfer_id, "file ready repeated while downloading");
-                        return;
-                    }
-                    tracing::warn!(
-                        transfer_id,
-                        "file ready arrived before the offer was accepted"
-                    );
-                    return;
-                }
-                if !file_transfer::valid_blob_hash(&blob_hash) {
-                    self.set_file_status(
-                        &transfer_id,
-                        "failed",
-                        "the sender sent a malformed blob id",
-                    );
-                    return;
-                }
-                // The offer is the contract. The user approved a specific name,
-                // type and size; a `ready` that describes a different file is a
-                // bait-and-switch, not a correction, so it fails the transfer
-                // rather than quietly replacing what was agreed to.
-                if let Some(mismatch) =
-                    self.file_offer_mismatch(&transfer_id, &filename, &mime, size)
-                {
-                    tracing::warn!(transfer_id, %mismatch, "file ready contradicts the accepted offer");
-                    self.set_file_status(&transfer_id, "failed", &mismatch);
-                    return;
-                }
-                if ciphertext_size > file_transfer::MAX_PACKAGE_BYTES {
-                    self.set_file_status(&transfer_id, "failed", "the sender's file is too large");
-                    return;
-                }
-                let sender = match PublicKey::from_bech32(&sender_npub) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-                let key = match file_transfer::unwrap_key(&keys, &sender, &key_wrap) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.set_file_status(
-                            &transfer_id,
-                            "failed",
-                            &format!("key unwrap failed: {e}"),
-                        );
-                        return;
-                    }
-                };
-                self.update_file_transfer(&transfer_id, |r| {
-                    r.view.status = "downloading".to_string();
-                    r.view.blob_hash = blob_hash.clone();
-                    r.view.updated_at = file_transfer::now_secs();
-                    r.key_b64 = Some(file_transfer::encode_key(&key));
-                    r.ciphertext_size = ciphertext_size;
-                });
-                let content = Arc::clone(self);
-                tokio::spawn(async move {
-                    if let Err(e) = content
-                        .finish_incoming_transfer(&transfer_id, &sender_npub)
-                        .await
-                    {
-                        content.set_file_status(&transfer_id, "failed", &e.to_string());
-                        content.clear_transfer_secrets(&transfer_id);
-                    }
-                });
-            }
-            FileMessage::Complete {
-                transfer_id,
-                recipient_npub,
-                ..
-            } if recipient_npub == own_npub
-                && self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) =>
-            {
-                // A completed send has nothing left to tell the user, so this
-                // is the one terminal state that still clears itself.
-                self.set_file_status(&transfer_id, "completed", "");
-                self.forget_file_transfer(&transfer_id);
-            }
-            _ => {}
-        }
-    }
-
-    async fn finish_outgoing_transfer(&self, transfer_id: &str) -> anyhow::Result<()> {
-        let (target_npub, source_path, key_b64, filename, mime, size) = {
-            let records = self.file_transfers.lock().unwrap();
-            let r = records
-                .iter()
-                .find(|r| r.view.id == transfer_id && r.view.direction == "outgoing")
-                .ok_or_else(|| anyhow::anyhow!("outgoing transfer disappeared"))?;
-            (
-                r.view.peer_npub.clone(),
-                r.source_path
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("outbox path missing"))?,
-                r.key_b64
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("file key missing"))?,
-                r.view.name.clone(),
-                r.view.mime.clone(),
-                r.view.size,
-            )
-        };
-        let package = tokio::fs::read(&source_path).await?;
-        let blob_hash = self.blobs.put(&package).await?;
-        let key = file_transfer::decode_key(&key_b64)?;
-        let keys = self
-            .device_keys
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-        let target = PublicKey::from_bech32(&target_npub)?;
-        let key_wrap = file_transfer::wrap_key(&keys, &target, &key)?;
-        let sender_npub = keys.public_key().to_bech32()?;
-        let message = FileMessage::Ready {
-            transfer_id: transfer_id.to_string(),
-            sender_npub,
-            recipient_npub: target_npub.clone(),
-            filename,
-            mime,
-            size,
-            blob_hash: blob_hash.clone(),
-            ciphertext_size: package.len() as u64,
-            key_wrap,
-        };
-        self.send_file_message(&target, &target_npub, message)
-            .await?;
-        self.update_file_transfer(transfer_id, |r| {
-            r.view.status = "ready".to_string();
-            r.view.blob_hash = blob_hash.clone();
-            r.view.updated_at = file_transfer::now_secs();
-        });
-        Ok(())
-    }
-
-    async fn finish_incoming_transfer(
-        &self,
-        transfer_id: &str,
-        sender_npub: &str,
-    ) -> anyhow::Result<()> {
-        let (filename, blob_hash, key_b64, declared_size, own_npub) = {
-            let records = self.file_transfers.lock().unwrap();
-            let r = records
-                .iter()
-                .find(|r| r.view.id == transfer_id && r.view.direction == "incoming")
-                .ok_or_else(|| anyhow::anyhow!("incoming transfer disappeared"))?;
-            let keys = self
-                .device_keys
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-            (
-                r.view.name.clone(),
-                r.view.blob_hash.clone(),
-                r.key_b64
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("file key missing"))?,
-                r.ciphertext_size,
-                keys.public_key().to_bech32()?,
-            )
-        };
-        // A app peer still only gets to send what it said it would send. The
-        // ceiling is the size declared in `ready` (or the absolute package cap
-        // when a pre-upgrade record carries none), enforced first against the
-        // advertised length and then again while the body streams in, so an
-        // over-long or length-lying response is dropped rather than buffered.
-        let limit = if declared_size == 0 {
-            file_transfer::MAX_PACKAGE_BYTES
-        } else {
-            declared_size.min(file_transfer::MAX_PACKAGE_BYTES)
-        };
-        let base = crate::ip_source::mesh_blossom_url(sender_npub);
-        let url = format!("{base}/{blob_hash}");
-        // Nothing about this download is bounded by total time any more, so the
-        // row's own state is what ends it: the user cancelling, or the sweeper
-        // failing an expired offer, must stop the fetch rather than have it
-        // finish minutes later and publish a file that was called off.
-        let still_wanted =
-            || self.transfer_in_state(transfer_id, "incoming", sender_npub, &["downloading"]);
-        // A mesh hop can be slow and can drop mid-body, so the fetch is bounded
-        // by silence rather than by total time, and a cut connection is tried
-        // again a few times before the transfer is failed.
-        let mut attempt = 0;
-        let package = loop {
-            attempt += 1;
-            // Re-warmed per attempt: a retry is usually a link that just
-            // flapped, and the route it flapped away from is the stale one.
-            crate::dns_intercept::warm_route(sender_npub);
-            match Self::fetch_package(
-                &url,
-                limit,
-                file_transfer::DOWNLOAD_IDLE_TIMEOUT,
-                &still_wanted,
-            )
-            .await
-            {
-                Ok(package) => break package,
-                Err(e) if attempt < file_transfer::DOWNLOAD_ATTEMPTS && is_transport_error(&e) => {
-                    tracing::warn!(
-                        transfer = %transfer_id,
-                        attempt,
-                        error = %e,
-                        "file share: download interrupted, retrying"
-                    );
-                    tokio::time::sleep(file_transfer::DOWNLOAD_RETRY_DELAY).await;
-                    if !still_wanted() {
-                        anyhow::bail!("transfer is no longer being downloaded");
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        };
-        if !still_wanted() {
-            anyhow::bail!("transfer is no longer being downloaded");
-        }
-        if file_transfer::sha256_hex(&package) != blob_hash {
-            anyhow::bail!("downloaded encrypted blob hash mismatch");
-        }
-        let key = file_transfer::decode_key(&key_b64)?;
-        let plain = file_transfer::decrypt_file(&package, &key, transfer_id, &own_npub, &filename)?;
-        let destination = self
-            .received_dir
-            .join(format!("{transfer_id}-{}", filename));
-        tokio::fs::write(&destination, &plain).await?;
-        self.update_file_transfer(transfer_id, |r| {
-            r.view.status = "completed".to_string();
-            r.view.received_path = destination.to_string_lossy().into_owned();
-            r.view.publish_pending = true;
-            r.view.updated_at = file_transfer::now_secs();
-            r.key_b64 = None;
-        });
-        self.remember_completed_incoming(transfer_id, sender_npub);
-        if let Err(e) = self.send_complete(transfer_id, sender_npub).await {
-            // The receiver's local copy is already complete. A failed sender
-            // acknowledgement must not turn this back into a failed transfer
-            // or prevent Android from publishing it to Downloads.
-            tracing::warn!(transfer = %transfer_id, error = %e, "file share: completion acknowledgement failed");
-        }
-        Ok(())
-    }
-
-    /// One download of the encrypted package: bounded against `limit` before
-    /// and while the body streams in, and failed if the peer goes quiet for
-    /// [`file_transfer::DOWNLOAD_IDLE_TIMEOUT`] — not by total duration, which
-    /// a large file over a slow Bluetooth hop legitimately exceeds.
-    ///
-    /// `still_wanted` is asked between chunks, and answering `false` ends the
-    /// fetch. With no total bound, a peer trickling a byte before every idle
-    /// timeout would otherwise hold this task and its buffer for as long as it
-    /// liked, whatever the row said.
-    async fn fetch_package(
-        url: &str,
-        limit: u64,
-        idle: Duration,
-        still_wanted: &(dyn Fn() -> bool + Sync),
-    ) -> anyhow::Result<Vec<u8>> {
-        // A app peer's Blossom: the client reaches the mesh and nothing
-        // else, whatever URL the offer carried.
-        let client = crate::http::HttpClient::mesh(
-            reqwest::Client::builder().connect_timeout(Duration::from_secs(15)),
-        );
-        let mut response = tokio::time::timeout(idle, client.get(url)?.send())
-            .await
-            .map_err(|_| anyhow::anyhow!("peer Blossom did not answer"))??;
-        if !response.status().is_success() {
-            anyhow::bail!("peer Blossom returned {}", response.status());
-        }
-        if let Some(advertised) = response.content_length() {
-            if advertised > limit {
-                anyhow::bail!("peer offered {advertised} bytes but declared {limit}");
-            }
-        }
-        let mut package: Vec<u8> = Vec::with_capacity(limit.min(1024 * 1024) as usize);
-        loop {
-            let chunk = tokio::time::timeout(idle, response.chunk())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!("download stalled: no data for {}s", idle.as_secs())
-                })??;
-            let Some(chunk) = chunk else { break };
-            if package.len() as u64 + chunk.len() as u64 > limit {
-                anyhow::bail!("peer sent more than the {limit} bytes it declared");
-            }
-            package.extend_from_slice(&chunk);
-            if !still_wanted() {
-                anyhow::bail!("transfer is no longer being downloaded");
-            }
-        }
-        Ok(package)
-    }
-
-    /// Tell the sender their file arrived. Sent once on completion and again
-    /// for every retried `ready`, since the first may have been dropped.
-    async fn send_complete(&self, transfer_id: &str, sender_npub: &str) -> anyhow::Result<()> {
-        let own_npub = {
-            let keys = self
-                .device_keys
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-            keys.public_key().to_bech32()?
-        };
-        let target = PublicKey::from_bech32(sender_npub)?;
-        let message = FileMessage::Complete {
-            transfer_id: transfer_id.to_string(),
-            sender_npub: own_npub,
-            recipient_npub: sender_npub.to_string(),
-        };
-        self.send_file_message(&target, sender_npub, message).await
-    }
-
-    fn remember_completed_incoming(&self, transfer_id: &str, peer_npub: &str) {
-        let snapshot = {
-            let mut done = self.completed_incoming.lock().unwrap();
-            done.retain(|(id, _)| id != transfer_id);
-            done.push_back((transfer_id.to_string(), peer_npub.to_string()));
-            while done.len() > file_transfer::MAX_TRACKED_TRANSFERS {
-                done.pop_front();
-            }
-            done.clone()
-        };
-        save_completed_incoming(&self.completed_incoming_path, &snapshot);
-    }
-
-    /// Whether `transfer_id` is one we finished **with this peer**. Matching on
-    /// the id alone would answer any app peer who guessed it.
-    pub(crate) fn was_completed_incoming(&self, transfer_id: &str, peer_npub: &str) -> bool {
-        self.completed_incoming
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(id, peer)| id == transfer_id && peer == peer_npub)
-    }
-
-    async fn send_file_message(
-        &self,
-        target: &PublicKey,
-        target_npub: &str,
-        message: FileMessage,
-    ) -> anyhow::Result<()> {
-        let keys = self
-            .device_keys
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-        let content = serde_json::to_string(&message)?;
-        let event = EventBuilder::private_msg(&keys, *target, content, std::iter::empty()).await?;
-        let event_json = serde_json::to_value(event)?;
-        // TTL 0 means store and handle at the addressed app peer relay, without
-        // flooding a private file-control message to every app peer.
-        let frame = crate::mesh_wire::wrap(
-            &crate::mesh_wire::MeshMeta::push(0),
-            serde_json::json!(["EVENT", event_json]),
-        );
-        self.gossip_to_peer(target_npub, frame);
-        Ok(())
-    }
-
-    fn insert_file_transfer(&self, record: FileTransferRecord) {
-        let snapshot = {
-            let mut records = self.file_transfers.lock().unwrap();
-            records.retain(|r| r.view.id != record.view.id);
-            records.push(record);
-            records.clone()
-        };
-        save_file_transfers(&self.file_transfers_path, &snapshot);
-    }
-
-    fn update_file_transfer<F>(&self, transfer_id: &str, update: F)
-    where
-        F: FnOnce(&mut FileTransferRecord),
-    {
-        let snapshot = {
-            let mut records = self.file_transfers.lock().unwrap();
-            let Some(record) = records.iter_mut().find(|r| r.view.id == transfer_id) else {
-                return;
-            };
-            update(record);
-            // Every step forward resets the clock, so the deadline measures a
-            // *stall* rather than the whole transfer. Without this the sweeper
-            // would eventually kill a large transfer that is progressing
-            // normally, just for taking longer than the original offer window.
-            if matches!(
-                record.view.status.as_str(),
-                "offered" | "waiting_user" | "accepted" | "ready" | "downloading"
-            ) {
-                record.expires_at = file_transfer::now_secs() + file_transfer::OFFER_TTL_SECS;
-            }
-            records.clone()
-        };
-        save_file_transfers(&self.file_transfers_path, &snapshot);
-    }
-
-    fn set_file_status(&self, transfer_id: &str, status: &str, error: &str) {
-        self.update_file_transfer(transfer_id, |r| {
-            r.view.status = status.to_string();
-            r.view.error = error.to_string();
-            r.view.updated_at = file_transfer::now_secs();
-        });
-    }
-
-    /// Remove a terminal transfer from the persisted transfer list and clean
-    /// its app-private ciphertext/plaintext staging file. A completed receive
-    /// calls this only after Android has copied the file into MediaStore, so a
-    /// repeated send is always a fresh offer/blob rather than a replay.
-    pub fn forget_file_transfer(&self, transfer_id: &str) {
-        let (snapshot, cleanup_paths) = {
-            let mut records = self.file_transfers.lock().unwrap();
-            let Some(index) = records.iter().position(|r| r.view.id == transfer_id) else {
-                return;
-            };
-            let record = &records[index];
-            if !matches!(
-                record.view.status.as_str(),
-                "completed" | "denied" | "failed" | "cancelled"
-            ) {
-                return;
-            }
-            let record = records.remove(index);
-            let mut paths = Vec::new();
-            if let Some(path) = record.source_path.as_deref() {
-                if let Some(path) = self.transfer_cleanup_path(path) {
-                    paths.push(path);
-                }
-            }
-            if !record.view.received_path.is_empty() {
-                if let Some(path) = self.transfer_cleanup_path(&record.view.received_path) {
-                    paths.push(path);
-                }
-            }
-            (records.clone(), paths)
-        };
-        save_file_transfers(&self.file_transfers_path, &snapshot);
-        for path in cleanup_paths {
-            if let Err(error) = std::fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::debug!(path = %path.display(), %error, "file share: staging cleanup failed");
-                }
-            }
-        }
-    }
-
-    fn transfer_cleanup_path(&self, path: &str) -> Option<PathBuf> {
-        let path = PathBuf::from(path);
-        (path.starts_with(&self.file_outbox_dir) || path.starts_with(&self.received_dir))
-            .then_some(path)
-    }
-
-    /// Why a `ready` message disagrees with the offer the user accepted, or
-    /// `None` when it describes the same file. Compared against the offer's
-    /// already-sanitised name so a sender cannot slip a new one past the check
-    /// by spelling it differently.
-    fn file_offer_mismatch(
-        &self,
-        transfer_id: &str,
-        filename: &str,
-        mime: &str,
-        size: u64,
-    ) -> Option<String> {
-        let records = self.file_transfers.lock().unwrap();
-        let view = &records.iter().find(|r| r.view.id == transfer_id)?.view;
-        let offered_name = file_transfer::safe_filename(filename, "shared-file");
-        if offered_name != view.name {
-            return Some(format!(
-                "the sender changed the file name after you accepted \"{}\"",
-                view.name
-            ));
-        }
-        if mime != view.mime {
-            return Some(format!(
-                "the sender changed the file type after you accepted \"{}\"",
-                view.name
-            ));
-        }
-        if size != view.size {
-            return Some(format!(
-                "the sender changed the file size after you accepted \"{}\"",
-                view.name
-            ));
-        }
-        None
-    }
-
-    /// Drop the key and staging file of a transfer that will never finish, while
-    /// keeping its row so the UI can still explain what happened.
-    fn clear_transfer_secrets(&self, transfer_id: &str) {
-        let stale = {
-            let mut records = self.file_transfers.lock().unwrap();
-            let Some(record) = records.iter_mut().find(|r| r.view.id == transfer_id) else {
-                return;
-            };
-            record.key_b64 = None;
-            let stale = record.source_path.take();
-            let snapshot = records.clone();
-            drop(records);
-            save_file_transfers(&self.file_transfers_path, &snapshot);
-            stale
-        };
-        if let Some(path) = stale.as_deref().and_then(|p| self.transfer_cleanup_path(p)) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-
-    /// Fail every transfer whose offer window has closed. Without this a control
-    /// message that never arrives — the push plane is best-effort and drops
-    /// frames while a peer is in dial backoff — leaves a transfer pending
-    /// forever with no way for the user to clear it. Driven by the keepwarm
-    /// tick, so an offer dies `OFFER_TTL_SECS` after it was made.
-    pub fn sweep_file_transfers(&self) {
-        let now = file_transfer::now_secs();
-        let expired: Vec<String> = self
-            .file_transfers
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|r| {
-                r.expires_at > 0
-                    && r.expires_at <= now
-                    && !matches!(
-                        r.view.status.as_str(),
-                        "completed" | "denied" | "failed" | "cancelled"
-                    )
-            })
-            .map(|r| r.view.id.clone())
-            .collect();
-        for id in expired {
-            tracing::info!(transfer = %id, "file share: offer timed out");
-            self.set_file_status(&id, "failed", "timed out waiting for the other phone");
-            self.clear_transfer_secrets(&id);
-        }
-    }
-
-    /// The control messages a stalled transfer is still waiting to have heard.
-    ///
-    /// Every control message is a single push, and the push plane drops frames
-    /// while a peer is in dial backoff — so an accept pressed during a BLE flap
-    /// never arrives and the sender waits out the whole offer TTL. Each state
-    /// that waits on the *other* side is re-sent from what the record already
-    /// holds once it has sat for [`file_transfer::RESEND_AFTER_SECS`] since the
-    /// last step or retry: an outgoing `offered` re-sends the offer, an incoming
-    /// `accepted` the accept, an outgoing `ready` the ready. Safe to repeat —
-    /// every receiving handler is gated on the state it advances from, so a
-    /// duplicate of a message that already landed is ignored. Stamps the rows
-    /// it returns; the caller sends.
-    pub(crate) fn stalled_file_messages(&self, now: u64) -> Vec<(String, FileMessage)> {
-        let keys = self.device_keys.lock().unwrap().clone();
-        let Some(keys) = keys else {
-            return Vec::new();
-        };
-        let Ok(own_npub) = keys.public_key().to_bech32();
-        // Taken before the transfer lock, never under it: every other path
-        // takes app peers lock first.
-        let app_peers: HashSet<String> = self.app_peer_npubs().into_iter().collect();
-        let mut out = Vec::new();
-        let snapshot = {
-            let mut records = self.file_transfers.lock().unwrap();
-            for r in records.iter_mut() {
-                let since = r.view.updated_at.max(r.last_resend_at);
-                if r.expires_at <= now
-                    || now.saturating_sub(since) < file_transfer::RESEND_AFTER_SECS
-                {
-                    continue;
-                }
-                // Removing someone stops us talking to them. Their side drops a
-                // message from a non-app peer sender anyway; retrying at a person
-                // just removed is the part that would be wrong.
-                if !app_peers.contains(&r.view.peer_npub) {
-                    continue;
-                }
-                let state = (r.view.direction.as_str(), r.view.status.as_str());
-                if !matches!(
-                    state,
-                    ("outgoing", "offered") | ("incoming", "accepted") | ("outgoing", "ready")
-                ) {
-                    continue;
-                }
-                // Stamped before the message is built, so a row we cannot
-                // rebuild waits out the window like any other rather than
-                // retrying the same failing work every tick.
-                r.last_resend_at = now;
-                let message = match state {
-                    ("outgoing", "offered") => FileMessage::Offer {
-                        transfer_id: r.view.id.clone(),
-                        sender_npub: own_npub.clone(),
-                        recipient_npub: r.view.peer_npub.clone(),
-                        filename: r.view.name.clone(),
-                        mime: r.view.mime.clone(),
-                        size: r.view.size,
-                        issued_at: r.expires_at.saturating_sub(file_transfer::OFFER_TTL_SECS),
-                        expires_at: r.expires_at,
-                    },
-                    ("incoming", "accepted") => FileMessage::Response {
-                        transfer_id: r.view.id.clone(),
-                        sender_npub: own_npub.clone(),
-                        recipient_npub: r.view.peer_npub.clone(),
-                        accepted: true,
-                        reason: None,
-                    },
-                    ("outgoing", "ready") => {
-                        let (Some(key_b64), Ok(target)) = (
-                            r.key_b64.as_deref(),
-                            PublicKey::from_bech32(&r.view.peer_npub),
-                        ) else {
-                            continue;
-                        };
-                        let Ok(key) = file_transfer::decode_key(key_b64) else {
-                            continue;
-                        };
-                        let Ok(key_wrap) = file_transfer::wrap_key(&keys, &target, &key) else {
-                            continue;
-                        };
-                        FileMessage::Ready {
-                            transfer_id: r.view.id.clone(),
-                            sender_npub: own_npub.clone(),
-                            recipient_npub: r.view.peer_npub.clone(),
-                            filename: r.view.name.clone(),
-                            mime: r.view.mime.clone(),
-                            size: r.view.size,
-                            blob_hash: r.view.blob_hash.clone(),
-                            ciphertext_size: r.ciphertext_size,
-                            key_wrap,
-                        }
-                    }
-                    _ => continue,
-                };
-                out.push((r.view.peer_npub.clone(), message));
-            }
-            records.clone()
-        };
-        if !out.is_empty() {
-            save_file_transfers(&self.file_transfers_path, &snapshot);
-        }
-        out
-    }
-
-    /// Cancel a transfer the user no longer wants and tell the other phone, so
-    /// its own row resolves instead of sitting pending until the sweeper runs.
-    pub async fn cancel_file_transfer(self: Arc<Self>, transfer_id: String) -> anyhow::Result<()> {
-        let (peer_npub, direction) = {
-            let records = self.file_transfers.lock().unwrap();
-            let record = records
-                .iter()
-                .find(|r| r.view.id == transfer_id)
-                .ok_or_else(|| anyhow::anyhow!("transfer not found"))?;
-            if matches!(
-                record.view.status.as_str(),
-                "completed" | "denied" | "failed" | "cancelled"
-            ) {
-                anyhow::bail!("transfer has already finished");
-            }
-            (record.view.peer_npub.clone(), record.view.direction.clone())
-        };
-        self.set_file_status(&transfer_id, "cancelled", "cancelled on this phone");
-        self.clear_transfer_secrets(&transfer_id);
-        let own_npub = {
-            let keys = self
-                .device_keys
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
-            keys.public_key().to_bech32()?
-        };
-        let target = PublicKey::from_bech32(&peer_npub)?;
-        // A cancel is a decline in both directions: it is the same "this is not
-        // happening" the responder already knows how to act on, so no new
-        // message type is added to the wire for it.
-        let message = FileMessage::Response {
-            transfer_id: transfer_id.clone(),
-            sender_npub: own_npub,
-            recipient_npub: peer_npub.clone(),
-            accepted: false,
-            reason: Some(if direction == "outgoing" {
-                "cancelled by the sender".to_string()
-            } else {
-                "cancelled by the recipient".to_string()
-            }),
-        };
-        self.send_file_message(&target, &peer_npub, message).await
-    }
-
-    /// Like [`Self::has_file_transfer`], but also requires the transfer to be in
-    /// one of `states`. Every message that advances a transfer uses this: the
-    /// state machine's guarantees come from refusing out-of-order messages, not
-    /// from trusting the sender to send them in order.
-    fn transfer_in_state(
-        &self,
-        transfer_id: &str,
-        direction: &str,
-        peer_npub: &str,
-        states: &[&str],
-    ) -> bool {
-        self.file_transfers.lock().unwrap().iter().any(|r| {
-            r.view.id == transfer_id
-                && r.view.direction == direction
-                && r.view.peer_npub == peer_npub
-                && states.contains(&r.view.status.as_str())
-        })
-    }
-
-    /// Drop finished rows, oldest first, to make room for a new transfer.
-    fn prune_finished_transfers(&self) {
-        let finished: Vec<String> = {
-            let mut records = self.file_transfers.lock().unwrap();
-            records.sort_by_key(|r| r.view.updated_at);
-            records
-                .iter()
-                .filter(|r| {
-                    matches!(
-                        r.view.status.as_str(),
-                        "completed" | "denied" | "failed" | "cancelled"
-                    )
-                })
-                .map(|r| r.view.id.clone())
-                .collect()
-        };
-        for id in finished {
-            self.forget_file_transfer(&id);
-        }
-    }
-
-    fn has_file_transfer(&self, transfer_id: &str, direction: &str, peer_npub: &str) -> bool {
-        self.file_transfers.lock().unwrap().iter().any(|r| {
-            r.view.id == transfer_id
-                && r.view.direction == direction
-                && r.view.peer_npub == peer_npub
-        })
-    }
-
-    /// Queue a pre-built relay frame (`["EVENT", {…}]`) to a peer's relay over a
-    /// persistent pooled connection (no per-message connect). `npub` is the target
-    /// app peer. Non-blocking.
-    pub fn gossip_to_peer(&self, npub: &str, frame: String) {
-        let Ok(_peer) = fips::PeerIdentity::from_npub(npub) else {
-            return;
-        };
-        let url = crate::ip_source::mesh_relay_url(npub);
-        self.peer_relays.send(npub, &url, frame);
-    }
-
-    /// Ask every connected app peer's relay for `filters` and collect what
-    /// they hold, once every peer has answered or [`PULL_HOP_TIMEOUT`] ran
-    /// out. Single hop: a plain NIP-01 `REQ`, answered from each peer's own
-    /// store and never passed further.
-    ///
-    /// All filters ride in one `REQ` per peer over the shared connection (the
-    /// relay any-matches across them), so this is a single round trip per
-    /// peer, and a dead relay costs at most the timeout. Events are verified
-    /// by the pool at ingress.
-    pub async fn pull_from_peers(self: &Arc<Self>, filters: Vec<serde_json::Value>) -> Vec<Event> {
-        let deadline = tokio::time::Instant::now() + PULL_HOP_TIMEOUT;
-        let mut asks = Vec::new();
-        for npub in self.app_peer_npubs() {
-            if fips::PeerIdentity::from_npub(&npub).is_err() {
-                continue;
-            }
-            let url = crate::ip_source::mesh_relay_url(&npub);
-            let mut events = self
-                .peer_relays
-                .request_stream(&npub, &url, filters.clone());
-            let this = self.clone();
-            asks.push(tokio::spawn(async move {
-                // Keep the profiles, relay lists and manifests, and cache the
-                // rest, so the next ask stops here — in small batches, not an
-                // LMDB write per event.
-                let mut got = Vec::new();
-                let mut passing = Vec::new();
-                while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
-                    passing.push(event.clone());
-                    if passing.len() >= PULL_REMEMBER_BATCH {
-                        this.remember(&passing);
-                        passing.clear();
-                    }
-                    got.push(event);
-                }
-                this.remember(&passing);
-                got
-            }));
-        }
-        let mut out = Vec::new();
-        for ask in asks {
-            out.extend(ask.await.unwrap_or_default());
-        }
-        out
     }
 
     // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
@@ -3334,28 +1860,13 @@ impl Content {
             s.into_iter().collect()
         };
 
-        // Query set, one combined REQ per relay read until EOSE
-        // (docs/design/nsite/nsite-updates.md §3.2):
-        //  - connected app peers' mesh relays, one hop: each answers from
-        //    its own store;
-        //  - online relays, unless mesh-only is on.
-        let mesh_filter = serde_json::json!({
-            "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
-            "authors": authors,
-        });
+        // Query set: the online relays, one combined REQ each read until EOSE,
+        // unless mesh-only is on (docs/design/nsite/nsite-updates.md §3.2).
+        // Neighbors are not asked: they push updates through `nsite-updates`.
         let online_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
             "authors": authors,
         });
-        let mesh_peers: Vec<(String, String)> = self
-            .app_peer_npubs()
-            .into_iter()
-            .filter_map(|npub| {
-                fips::PeerIdentity::from_npub(&npub).ok()?; // validate
-                let url = crate::ip_source::mesh_relay_url(&npub);
-                Some((npub, url))
-            })
-            .collect();
         // Online: the authors' NIP-65 write relays, then the defaults. Only
         // lists stored here decide the relay set, so the check never waits on
         // a list fetch. Every author's list rides along in the same REQ to the
@@ -3392,28 +1903,18 @@ impl Content {
             "kinds": [crate::ip_source::SERVER_LIST_KIND],
             "authors": authors,
         });
-        if mesh_peers.is_empty() && online.is_empty() {
-            return NsiteCheck::Done("No peers or relays to check".to_string());
+        if online.is_empty() {
+            return NsiteCheck::Done("No relays to check".to_string());
         }
-        let mesh_count = mesh_peers.len();
         tracing::info!(
             apps = addrs.len(),
-            mesh_peers = mesh_count,
-            targets = mesh_count + online.len(),
+            targets = online.len(),
             offline_only = self.is_offline_only(),
             "update check: querying"
         );
 
-        // Mesh peers pull over the shared persistent connection; public relays stay
-        // one-shot (we don't hold long-lived sockets — or leak presence — to them).
-        let pool = &self.peer_relays;
-        let mesh_q = mesh_peers.into_iter().map(|(npub, url)| {
-            let f = mesh_filter.clone();
-            async move {
-                pool.request(&npub, &url, vec![f], std::time::Duration::from_secs(15))
-                    .await
-            }
-        });
+        // One-shot: we don't hold long-lived sockets — or leak presence — to
+        // public relays.
         let online_q = online.into_iter().map(|url| {
             // A relay named only by a relay list is resolved and refused if
             // it points at a private address; a default also carries the
@@ -3449,8 +1950,7 @@ impl Content {
         // Bounded well inside the queries' own timeout, so it never
         // lengthens the check.
         let fetch_missing = outbox.fetch_lists(&missing_lists, outbox.indexers());
-        let (mesh_res, online_res, ()) =
-            futures_util::future::join3(join_all(mesh_q), join_all(online_q), fetch_missing).await;
+        let (online_res, ()) = futures_util::future::join(join_all(online_q), fetch_missing).await;
         for ev in online_res.iter().flatten() {
             if !pubkeys.contains(&ev.pubkey) {
                 continue;
@@ -3465,7 +1965,7 @@ impl Content {
         // Newest verified manifest per slot across all relays.
         let mut newest: HashMap<String, Event> = HashMap::new();
         let mut received = 0usize;
-        for batch in mesh_res.into_iter().chain(online_res) {
+        for batch in online_res {
             received += batch.len();
             for ev in batch {
                 let kind = ev.kind.as_u16();
@@ -3573,7 +2073,7 @@ impl Content {
     }
 
     /// Online update path: if `candidate` is newer than what we serve, download its
-    /// blobs from online sources, activate, and propagate to peers (we now hold the
+    /// blobs, activate, and share it through `nsite-updates` (we now hold the
     /// blobs). Returns whether it activated.
     async fn stage_update(self: Arc<Self>, addr: SiteAddr, candidate: Event) -> bool {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
@@ -3591,32 +2091,19 @@ impl Content {
         if candidate.created_at.as_secs() <= active_ts {
             return false;
         }
-        // Pull blobs from connected mesh peers first (closer/faster, and the only
-        // option under mesh-only), then the online fallback unless mesh-only.
+        // The neighborhoods first (closer, and the only option under
+        // mesh-only), then the online fallback unless mesh-only. Activation
+        // stores the manifest and shares it through `nsite-updates`.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
-        for npub in self.app_peer_npubs() {
-            if let Ok(m) = crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
-                sources.push(Arc::new(m));
-            }
+        if let Some(neighborhoods) =
+            self.extension_source(crate::neighbor::extensions::NSITE_UPDATES)
+        {
+            sources.push(neighborhoods);
         }
-        if !self.is_offline_only() {
-            sources.push(Arc::new(
-                crate::ip_source::IpPeerSource::new(
-                    crate::ip_source::default_relays(),
-                    crate::ip_source::default_blossom_servers(),
-                )
-                .with_author_servers(Arc::new(crate::ip_source::AuthorOutbox::new(self.relay()))),
-            ));
-        }
-        // Activation stores the manifest in the relay (so peers REQ-ing us see it)
-        // and then propagates it over the mesh.
-        let activated = Arc::clone(&self)
-            .download_and_activate(addr, candidate.clone(), sources, true)
-            .await;
-        if activated {
-            self.forward_updated_manifest(&candidate);
-        }
-        activated
+        sources.extend(self.fallback_sources(None));
+        Arc::clone(&self)
+            .download_and_activate(addr, candidate, sources, true)
+            .await
     }
 
     /// Download `candidate`'s blobs from `sources` (in order) into Blossom, then
@@ -3698,161 +2185,19 @@ impl Content {
         }
     }
 
-    /// How many hops a pushed manifest — an nsite's or a napplet's — may still
-    /// travel from here. 0 means stop here.
-    ///
-    /// Mirrors chat: a local publish originates at the default — or at an
-    /// explicit budget, where `Some(0)` means "store here, send nowhere" —
-    /// and a mesh push at the ttl that rode in, clamped
-    /// so a peer can't over-extend us. The same per-peer clamp the chat push
-    /// plane applies: a peer we have not granted multihop writes still gets
-    /// its manifest stored and served here, it simply travels no further
-    /// through us. Manifests were missing this check, so that grant was
-    /// enforced on one plane but not the other (D10).
-    fn manifest_forward_budget(&self, inbound: &Inbound) -> u8 {
-        let peer_cap = match inbound.sender {
-            Some(ip) if !self.may_forward_from(ip) => 0,
-            _ => crate::mesh_wire::EVENT_TTL,
-        };
-        match inbound.origin {
-            Origin::Local => inbound.event_ttl.unwrap_or(crate::mesh_wire::EVENT_TTL),
-            Origin::Mesh => inbound.event_ttl.unwrap_or(0),
-        }
-        .min(crate::mesh_wire::EVENT_TTL)
-        .min(peer_cap)
-    }
-
-    /// A manifest landed in our relay over the mesh (an app peer's push, handed
-    /// over by the mesh relay hook). Forward it to app peers
-    /// (`docs/design/nsite/nsite-updates.md` §4); if it's one of our installed sites, download its blobs from the sender
-    /// and activate. Forwarding never waits on the download for sites we don't run.
-    pub async fn on_manifest_event(self: Arc<Self>, event: Event, inbound: Inbound) {
-        let d = event_d_tag(&event);
-        let addr = SiteAddr {
-            author: event.pubkey,
-            d_tag: d,
-        };
-
-        let effective = self.manifest_forward_budget(&inbound);
-        let out_ttl = effective.saturating_sub(1);
-
-        if !self.is_in_library(&addr) {
-            // Not our app: pure relay — pass it on at once (we won't fetch/serve it).
-            if effective > 0 {
-                self.forward_manifest(&event, out_ttl, inbound.sender);
-            }
-            return;
-        }
-
-        // Our app: best-effort download from the sender (its mesh Blossom) first,
-        // then the online fallback unless mesh-only. Activate when complete.
-        let sources = self.manifest_push_sources(inbound.sender, None);
-        // Manifest is already in our relay (NIP-01), so don't re-store.
-        let _ = Arc::clone(&self)
-            .download_and_activate(addr, event.clone(), sources, false)
-            .await;
-        // Forward regardless of download outcome so the wave never stalls (§4).
-        if effective > 0 {
-            self.forward_manifest(&event, out_ttl, inbound.sender);
-        }
-    }
-
-    /// Where to fetch the bytes of a manifest pushed to us, in order: the peer
-    /// that sent it (its mesh Blossom), then the public Blossom servers unless
-    /// offline-only. The same for nsites and napplets.
-    ///
-    /// `max_blob_bytes` caps each blob as it streams in, before the hash check
-    /// has anything to say: whoever pushed the manifest also chose what it
-    /// references. Napplets pass NAP-RESOURCE's cap; nsites have no agreed
-    /// per-blob limit yet and pass `None`.
-    fn manifest_push_sources(
-        &self,
-        sender: Option<IpAddr>,
-        max_blob_bytes: Option<usize>,
-    ) -> Vec<Arc<dyn PeerSource>> {
-        let cap = |source: crate::ip_source::IpPeerSource| match max_blob_bytes {
-            Some(max) => source.with_max_blob_bytes(max),
-            None => source,
-        };
-        let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
-        if let Some(IpAddr::V6(ip)) = sender {
-            // The one place a bare mesh address is right: this is whoever just
-            // sent us the event, known only as a transport address — an address
-            // does not reduce back to an npub. It is safe here precisely because
-            // they just reached us, so the node already holds their identity;
-            // everywhere else, peers are addressed as `<npub>.fips` so that
-            // resolving the name registers that identity (see
-            // `ip_source::mesh_relay_url`).
-            sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(
-                vec![format!("ws://[{ip}]:4870")],
-                vec![format!("http://[{ip}]:24243")],
-            )
-            .on_mesh())));
-        }
-        if !self.is_offline_only() {
-            sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(
-                crate::ip_source::default_relays(),
-                crate::ip_source::default_blossom_servers(),
-            )
-            .with_author_servers(Arc::new(crate::ip_source::AuthorOutbox::new(
-                self.relay(),
-            ))))));
-        }
-        sources
-    }
-
-    /// Send a manifest this device just brought in by an update check to the
-    /// app peer: we now hold its bytes, so we are a source for the next hop.
-    /// Originates at the default budget, like any local publish.
-    pub fn forward_updated_manifest(&self, manifest: &Event) {
-        self.forward_manifest(
-            manifest,
-            crate::mesh_wire::EVENT_TTL.saturating_sub(1),
-            None,
-        );
-    }
-
-    /// A napplet manifest (`15129` / `35129`) landed in our relay over the push
-    /// plane. The napplet counterpart of [`Content::on_manifest_event`]: the same
-    /// interest-aware download-then-forward policy, hop budget, split-horizon
-    /// and multihop clamp, with the napplet's own checks in front
-    /// (`docs/design/napplet/napplet-runtime.md` §7.3).
-    ///
-    /// Snapshots (`5129`) never come here — they are immutable builds that no
-    /// Library entry resolves by, so there is nothing to update, and they stay
-    /// out of this path.
-    pub async fn on_napplet_manifest_event(&self, event: Event, inbound: Inbound) {
-        // A napplet is one `index.html`; nothing it may reference is bigger
-        // than what a napplet may fetch by hash.
-        let sources = self.manifest_push_sources(
-            inbound.sender,
-            Some(myco_napplet_runtime::nap::resource::MAX_BYTES),
-        );
-        let id = event.id;
-        let outcome = self
-            .handle_napplet_manifest(event, &inbound, &sources, |manifest, ttl| {
-                self.forward_manifest(manifest, ttl, inbound.sender)
-            })
-            .await;
-        tracing::info!(event = %id, ?outcome, "napplet manifest push");
-    }
-
-    /// The policy behind [`Content::on_napplet_manifest_event`], with the
-    /// sources and the fan-out handed in so it can be exercised without a
-    /// mesh. `forward` is called at most once, with the outbound hop budget,
-    /// and only after any download has finished.
+    /// A napplet update a neighbor shared (`napplet-updates`), with the
+    /// sources handed in so it can be exercised without a mesh.
     ///
     /// - Not a valid, signed NIP-5D manifest, or older than the version this
-    ///   relay already keeps for the slot: stopped here, not passed on.
-    /// - Not installed here: passed on at once, nothing fetched — as an nsite
-    ///   we don't run.
+    ///   relay already keeps for the slot: dropped.
+    /// - Not installed here: nothing fetched.
     /// - Installed, but not newer than the pinned version: a replay or a
-    ///   downgrade, stopped here.
+    ///   downgrade, dropped.
     /// - Installed and newer: the bytes are fetched from `sources` in order,
     ///   verified, stored and pinned (the pin never moves back, see
     ///   [`Content::set_active_if_newer`]) — the next launch opens it, an open
-    ///   window keeps its session — and then it is passed on. A download that
-    ///   fails still passes it on, so the wave never stalls on one phone.
+    ///   window keeps its session. Once pinned, this device shares it onward
+    ///   itself.
     ///
     /// Nothing here touches grants. The Library entry keeps what the user
     /// reviewed; a version declaring more comes back through the review sheet
@@ -3860,9 +2205,7 @@ impl Content {
     pub(crate) async fn handle_napplet_manifest(
         &self,
         event: Event,
-        inbound: &Inbound,
         sources: &[Arc<dyn PeerSource>],
-        forward: impl FnOnce(&Event, u8),
     ) -> NappletPush {
         if event.verify().is_err() {
             return NappletPush::Dropped;
@@ -3879,7 +2222,7 @@ impl Content {
         let d_tag = manifest.d_tag.as_deref();
 
         // The relay kept something newer for this slot and refused this one:
-        // a stale version, not worth anyone's hop.
+        // a stale version.
         if let Ok(Some(newest)) =
             nsite_deck::seams::newest_in_slot(self.relay.as_ref(), kind, &author, d_tag).await
         {
@@ -3888,17 +2231,12 @@ impl Content {
             }
         }
 
-        let budget = self.manifest_forward_budget(inbound);
-
         // Installed means the same author and `d` tag in the Library: the
         // signature already ties the manifest to `author`, so a napplet by
         // anyone else under the same name is a different napplet.
         let npub = author.to_bech32().unwrap_or_default();
         if self.napplet_grants(&npub, d_tag).is_none() {
-            if budget > 0 {
-                forward(&event, budget - 1);
-            }
-            return NappletPush::Relayed;
+            return NappletPush::NotInstalled;
         }
 
         if let Some(pinned) = self.pinned_manifest(kind, &author, d_tag) {
@@ -3931,11 +2269,6 @@ impl Content {
         }
         if updated {
             self.refresh_napplet_status().await;
-        }
-        if budget > 0 {
-            forward(&event, budget - 1);
-        }
-        if updated {
             NappletPush::Updated
         } else {
             NappletPush::NotDownloaded
@@ -3962,8 +2295,8 @@ impl Content {
     /// with the same `created_at`, is accepted. Returns whether it pinned.
     ///
     /// Every napplet pin goes through here ([`crate::napplet::ManifestStore`]).
-    /// Two versions downloading at once — a push from app peers and the
-    /// update check, say — must not leave the older one served because it
+    /// Two versions downloading at once — an update a neighbor shared and
+    /// the update check, say — must not leave the older one served because it
     /// finished last, and a window opening must not re-pin what it resolved
     /// over a newer version pinned meanwhile. Equal is allowed because the
     /// legitimate re-pins are all of the same version: `open` re-pinning
@@ -4006,14 +2339,23 @@ impl Content {
         self.release_updates.subscribe()
     }
 
-    /// Where `release_apk` looks for a release APK neighbors shared. Set
-    /// once by the runtime.
-    pub fn set_release_source(&self, source: Arc<dyn PeerSource>) {
-        *self.release_source.lock().unwrap() = Some(source);
+    /// Where an update extension's apps are looked for in the neighborhoods
+    /// (`crate::neighbor::updates::ExtensionSource`): opening a site or
+    /// installing a napplet that is not here yet, and `release_apk` for the
+    /// release APK. Set once per extension by the runtime.
+    pub fn set_extension_source(&self, extension: &'static str, source: Arc<dyn PeerSource>) {
+        self.extension_sources
+            .lock()
+            .unwrap()
+            .insert(extension, source);
     }
 
-    pub(crate) fn release_source(&self) -> Option<Arc<dyn PeerSource>> {
-        self.release_source.lock().unwrap().clone()
+    pub(crate) fn extension_source(&self, extension: &str) -> Option<Arc<dyn PeerSource>> {
+        self.extension_sources
+            .lock()
+            .unwrap()
+            .get(extension)
+            .cloned()
     }
 
     /// Nsite manifests as an update is activated — this device now holds
@@ -4056,46 +2398,37 @@ impl Content {
         self.download_and_activate(addr, event, sources, true).await
     }
 
-    /// The public servers, unless offline-only: where a pushed version's
-    /// files are looked for when the neighbor who pushed it can't supply
-    /// them.
+    /// The public servers, unless offline-only: where a version's files are
+    /// looked for when the neighborhoods can't supply them. The same for
+    /// nsites and napplets.
+    ///
+    /// `max_blob_bytes` caps each blob as it streams in, before the hash check
+    /// has anything to say: whoever signed the manifest also chose what it
+    /// references. Napplets pass NAP-RESOURCE's cap; nsites have no agreed
+    /// per-blob limit yet and pass `None`.
     pub(crate) fn fallback_sources(
         &self,
         max_blob_bytes: Option<usize>,
     ) -> Vec<Arc<dyn PeerSource>> {
-        self.manifest_push_sources(None, max_blob_bytes)
+        if self.is_offline_only() {
+            return Vec::new();
+        }
+        let source = crate::ip_source::IpPeerSource::new(
+            crate::ip_source::default_relays(),
+            crate::ip_source::default_blossom_servers(),
+        )
+        .with_author_servers(Arc::new(crate::ip_source::AuthorOutbox::new(self.relay())));
+        let source = match max_blob_bytes {
+            Some(max) => source.with_max_blob_bytes(max),
+            None => source,
+        };
+        vec![Arc::new(source)]
     }
 
     /// Napplet manifests as they are pinned over an older version — updates
     /// this device now holds the files of.
     pub fn napplet_updates(&self) -> tokio::sync::broadcast::Receiver<Event> {
         self.napplet_updates.subscribe()
-    }
-
-    /// Fan a manifest to connected app peers over the push plane (carrying a
-    /// decremented hop budget), split-horizon. `exclude` is the peer it came from.
-    fn forward_manifest(&self, manifest: &Event, out_ttl: u8, exclude: Option<IpAddr>) {
-        let ev_json = match serde_json::to_value(manifest) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "manifest forward: serialize failed");
-                return;
-            }
-        };
-        let frame = crate::mesh_wire::wrap(
-            &crate::mesh_wire::MeshMeta::push(out_ttl),
-            serde_json::json!(["EVENT", ev_json]),
-        );
-        for npub in self.app_peer_npubs() {
-            let ip = match fips::PeerIdentity::from_npub(&npub) {
-                Ok(p) => IpAddr::V6(p.address().to_ipv6()),
-                Err(_) => continue,
-            };
-            if exclude == Some(ip) {
-                continue;
-            }
-            self.gossip_to_peer(&npub, frame.clone());
-        }
     }
 
     /// Whether an **nsite** is in our Library (we "run" it, so we're interested
@@ -4129,26 +2462,7 @@ impl Content {
         self.active_manifests.lock().unwrap().clear();
         let _ = std::fs::remove_file(&self.library_path);
         let _ = std::fs::remove_file(&self.active_path);
-        self.clear_file_transfers();
         Ok(())
-    }
-
-    /// Drop every transfer and the files staged for them.
-    ///
-    /// The `received/` directory holds **decrypted plaintext** between the
-    /// native receive finishing and Android publishing it, and `file-outbox/`
-    /// holds the encrypted copy of everything being sent. A privacy control that
-    /// leaves either behind is not doing its job, so both wipes clear them.
-    fn clear_file_transfers(&self) {
-        self.file_transfers.lock().unwrap().clear();
-        let _ = std::fs::remove_file(&self.file_transfers_path);
-        for dir in [&self.file_outbox_dir, &self.received_dir] {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
     }
 
     /// The shell cache is not cleared here: it can hold the whole blob
@@ -4159,7 +2473,7 @@ impl Content {
     /// nsites (Settings → Storage → "Clear local database"). The served manifest version of
     /// each pinned site and every blob it references survive, so installed apps keep
     /// working offline; everything else — unpinned opened sites and staged
-    /// updates — is dropped. Identity and app peer are untouched.
+    /// updates — is dropped. Identity and neighborhoods are untouched.
     ///
     /// `keep_author` is the user key's pubkey, when there is one: its kind 0,
     /// kind 10002 and kind 10050 survive too. They were published once, at first napplet
@@ -4220,7 +2534,7 @@ impl Content {
             }
         }
 
-        // The release APK this phone carries for its app peers, and the signed
+        // The release APK this phone carries for its neighborhoods, and the signed
         // events that vouch for it.
         let (release_events, release_apk) = crate::release_apk::kept_release(self).await;
         keep_events.extend(release_events.iter().map(|id| id.to_bytes()));
@@ -4269,7 +2583,6 @@ impl Content {
         if let Some(store) = &self.blobs_local {
             store.retain_blobs(&keep_blobs);
         }
-        self.clear_file_transfers();
 
         // Drop unpinned Library entries and the live status of anything unpinned.
         let pinned_hosts: HashSet<String> = pinned.iter().map(|i| i.url_host.clone()).collect();
@@ -4612,57 +2925,17 @@ fn save_library(path: &Path, items: &[LibraryItem]) {
     }
 }
 
-/// Whether a download error is the connection's fault (worth another try)
-/// rather than the peer's answer (a status, a size lie, a hash mismatch).
-fn is_transport_error(error: &anyhow::Error) -> bool {
-    match error.downcast_ref::<reqwest::Error>() {
-        Some(e) => e.is_timeout() || e.is_connect() || e.is_body() || e.is_request(),
-        None => {
-            let text = error.to_string();
-            text.starts_with("download stalled") || text.starts_with("peer Blossom did not answer")
-        }
-    }
-}
-
-fn load_file_transfers(path: &Path) -> Vec<FileTransferRecord> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn save_file_transfers(path: &Path, items: &[FileTransferRecord]) {
-    if let Ok(json) = serde_json::to_vec(items) {
-        let tmp = path.with_extension("json.tmp");
-        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
-    }
-}
-
-fn load_completed_incoming(path: &Path) -> VecDeque<(String, String)> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn save_completed_incoming(path: &Path, items: &VecDeque<(String, String)>) {
-    if let Ok(json) = serde_json::to_vec(items) {
-        let tmp = path.with_extension("json.tmp");
-        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
-    }
-}
-
-/// What became of a napplet manifest pushed to this device. See
+/// What became of a napplet update a neighbor shared. See
 /// [`Content::handle_napplet_manifest`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NappletPush {
-    /// Invalid, stale, or not newer than the installed version: stopped here.
+    /// Invalid, stale, or not newer than the installed version.
     Dropped,
-    /// Not installed here: passed on, nothing fetched.
-    Relayed,
-    /// Installed: the new version's bytes are here and pinned, then passed on.
+    /// Not installed here: nothing fetched.
+    NotInstalled,
+    /// Installed: the new version's bytes are here and pinned.
     Updated,
-    /// Installed, but no source supplied the bytes: passed on regardless.
+    /// Installed, but no source supplied the bytes.
     NotDownloaded,
 }
 
@@ -4680,7 +2953,7 @@ impl crate::napplet::ManifestStore for Content {
     }
 
     /// A napplet's pin never moves back: every napplet pin — open, install,
-    /// "Download again", the update check, a push from app peers — goes
+    /// "Download again", the update check, an update a neighbor shared — goes
     /// through [`Content::set_active_if_newer`]. See there for why.
     ///
     /// A napplet pin that moved also rewrites the installed entry's
@@ -4708,6 +2981,7 @@ impl crate::napplet::ManifestStore for Content {
 mod tests {
     use super::*;
     use nostr::nips::nip19::ToBech32;
+    use nostr::EventBuilder;
     use nsite_deck::testing::build_test_site;
 
     /// `cache_view` reads the blob figures without touching the disk, so they
@@ -4736,14 +3010,14 @@ mod tests {
         let npub = nostr::ToBech32::to_bech32(&nostr::Keys::generate().public_key()).unwrap();
         let addr = nsite_deck::parse_link(&npub).unwrap();
 
-        content.clone().open_site(addr.clone(), None).await;
+        content.clone().open_site(addr.clone()).await;
         let listed = |c: &Content| c.sites.lock().unwrap().contains_key(&addr.host_label());
         assert!(listed(&content), "an unreachable site has no tile");
 
         content.forget_site(&addr);
         assert!(!listed(&content));
         // What an in-flight sync or a reloading window would do.
-        content.clone().open_site(addr.clone(), None).await;
+        content.clone().open_site(addr.clone()).await;
         content.add_to_library(&addr, None, now_secs());
         assert!(!listed(&content), "the removed tile came back");
         assert!(
@@ -4752,7 +3026,7 @@ mod tests {
         );
 
         content.unforget_site(&addr);
-        content.clone().open_site(addr.clone(), None).await;
+        content.clone().open_site(addr.clone()).await;
         assert!(listed(&content), "asking again did not bring it back");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4996,555 +3270,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Revoking an app peer's multihop writes stops its events here, and a
-    /// stranger's are never forwarded.
-    #[test]
-    fn revoking_multihop_writes_covers_both_push_planes() {
-        let dir = tmp("multihop-clamp");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Arc::new(Content::open(&dir).unwrap());
-
-        let peer = Keys::generate();
-        let npub = peer.public_key().to_bech32().unwrap();
-        content.add_app_peer_for_test(&npub, "Peer");
-        let ip = IpAddr::V6(
-            fips::PeerIdentity::from_npub(&npub)
-                .unwrap()
-                .address()
-                .to_ipv6(),
-        );
-
-        assert!(
-            content.may_forward_from(ip),
-            "multihop writes are granted by default"
-        );
-
-        // Revoke it the way the UI eventually will.
-        {
-            let mut app_peers = content.app_peers.lock().unwrap();
-            app_peers[0].perms.relay_write_multihop = false;
-        }
-        assert!(
-            !content.may_forward_from(ip),
-            "a revoked peer's events stop here, on either plane"
-        );
-        // An unknown peer is not forwarded for either.
-        let stranger = Keys::generate().public_key().to_bech32().unwrap();
-        let stranger_ip = IpAddr::V6(
-            fips::PeerIdentity::from_npub(&stranger)
-                .unwrap()
-                .address()
-                .to_ipv6(),
-        );
-        assert!(!content.may_forward_from(stranger_ip));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The multihop-write clamp holds for napplet manifests too: a push from a
-    /// peer we have not granted multihop writes is kept here and goes no
-    /// further; the same push from a granted peer is passed on.
-    #[tokio::test]
-    async fn a_napplet_manifest_from_a_peer_without_multihop_goes_no_further() {
-        let dir = tmp("napplet-multihop");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Arc::new(Content::open(&dir).unwrap());
-
-        let peer = Keys::generate();
-        let npub = peer.public_key().to_bech32().unwrap();
-        content.add_app_peer_for_test(&npub, "Peer");
-        let ip = IpAddr::V6(
-            fips::PeerIdentity::from_npub(&npub)
-                .unwrap()
-                .address()
-                .to_ipv6(),
-        );
-        let from_peer = Inbound {
-            origin: Origin::Mesh,
-            event_ttl: Some(3),
-            sender: Some(ip),
-        };
-        let push = |at: u64| {
-            let content = content.clone();
-            let inbound = from_peer;
-            async move {
-                let napplet = myco_napplet_runtime::testing::NappletBuilder::new()
-                    .created_at(at)
-                    .build();
-                content
-                    .relay()
-                    .publish(napplet.manifest.clone())
-                    .await
-                    .unwrap();
-                let mut forwarded = Vec::new();
-                let outcome = content
-                    .handle_napplet_manifest(napplet.manifest, &inbound, &[], |_, ttl| {
-                        forwarded.push(ttl)
-                    })
-                    .await;
-                (outcome, forwarded)
-            }
-        };
-
-        let (outcome, forwarded) = push(1_000).await;
-        assert_eq!(outcome, NappletPush::Relayed);
-        assert_eq!(
-            forwarded,
-            vec![2],
-            "a granted peer's push was not passed on"
-        );
-
-        content.app_peers.lock().unwrap()[0]
-            .perms
-            .relay_write_multihop = false;
-        let (outcome, forwarded) = push(2_000).await;
-        assert_eq!(outcome, NappletPush::Relayed);
-        assert!(
-            forwarded.is_empty(),
-            "a revoked peer's napplet went further"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The defaults are the whole permission model until the UI exposes them, so
-    /// pin them rather than trusting the struct to stay as written.
-    #[test]
-    fn default_permissions_are_open_except_uploads() {
-        let p = PeerPerms::default();
-        assert!(p.relay_read);
-        assert!(p.relay_write);
-        assert!(p.relay_write_multihop);
-        assert!(p.blossom_read);
-        assert!(!p.blossom_write);
-    }
-
-    /// A record for driving the transfer state machine without a peer.
-    fn incoming_record(id: &str, expires_at: u64) -> FileTransferRecord {
-        FileTransferRecord {
-            view: FileTransferView {
-                id: id.to_string(),
-                direction: "incoming".to_string(),
-                peer_npub: "npub1peer".to_string(),
-                peer_name: "Peer".to_string(),
-                name: "photo.jpg".to_string(),
-                mime: "image/jpeg".to_string(),
-                size: 2048,
-                status: "waiting_user".to_string(),
-                blob_hash: String::new(),
-                received_path: String::new(),
-                publish_pending: false,
-                error: String::new(),
-                updated_at: 0,
-            },
-            source_path: None,
-            key_b64: None,
-            ciphertext_size: 0,
-            expires_at,
-            last_resend_at: 0,
-        }
-    }
-
-    /// A `ready` message is only allowed to describe the file the user actually
-    /// said yes to. Changing the name, type or size after the accept is a
-    /// bait-and-switch, and each one has to be caught on its own — the AEAD
-    /// cannot catch it, because the sender recomputes the AAD from whatever it
-    /// sends.
-    #[test]
-    fn a_ready_message_cannot_change_what_the_user_accepted() {
-        let dir = tmp("file-ready-mismatch");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        content.insert_file_transfer(incoming_record("t1", u64::MAX));
-
-        assert!(
-            content
-                .file_offer_mismatch("t1", "photo.jpg", "image/jpeg", 2048)
-                .is_none(),
-            "the offered file itself must pass"
-        );
-        assert!(
-            content
-                .file_offer_mismatch("t1", "invoice.pdf", "image/jpeg", 2048)
-                .is_some(),
-            "a renamed file must be refused"
-        );
-        assert!(
-            content
-                .file_offer_mismatch("t1", "photo.jpg", "application/pdf", 2048)
-                .is_some(),
-            "a retyped file must be refused"
-        );
-        assert!(
-            content
-                .file_offer_mismatch("t1", "photo.jpg", "image/jpeg", 900 * 1024 * 1024)
-                .is_some(),
-            "a resized file must be refused"
-        );
-        // Spelling the same name with a path prefix is still the same name.
-        assert!(
-            content
-                .file_offer_mismatch("t1", "../photo.jpg", "image/jpeg", 2048)
-                .is_none(),
-            "comparison happens after sanitising, not before"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A slow Bluetooth hop used to fail a large download by hitting a total
-    /// timeout while bytes were still arriving ("error decoding response
-    /// body"). The fetch is now bounded by silence: a body that keeps trickling
-    /// in completes no matter how long it takes, and one that goes quiet fails
-    /// with an error the retry loop recognises as the connection's fault.
-    #[tokio::test]
-    async fn a_download_is_failed_by_silence_not_by_total_time() {
-        use tokio::io::AsyncWriteExt;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            // First request: 8 bytes, drip-fed slower than the old total cap
-            // would scale to. Second: 8 bytes promised, 4 sent, then silence.
-            // Third: another trickle, for the abandoned case. Each is served on
-            // its own task, so the one that goes quiet does not hold up the
-            // next connection.
-            for stalls in [false, true, false] {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                tokio::spawn(async move {
-                    // Read the request first: a response sent before it can
-                    // reach the client, through the mesh proxy, before the
-                    // request is written, and is refused as unexpected.
-                    let mut head = Vec::new();
-                    let mut byte = [0u8; 1];
-                    while !head.ends_with(b"\r\n\r\n") {
-                        use tokio::io::AsyncReadExt;
-                        if sock.read(&mut byte).await.unwrap() == 0 {
-                            return;
-                        }
-                        head.push(byte[0]);
-                    }
-                    sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n")
-                        .await
-                        .unwrap();
-                    for i in 0..8u8 {
-                        if stalls && i == 4 {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            break;
-                        }
-                        sock.write_all(&[i]).await.unwrap();
-                        sock.flush().await.unwrap();
-                        tokio::time::sleep(Duration::from_millis(150)).await;
-                    }
-                });
-            }
-        });
-        let url = format!("http://127.0.0.1:{port}/blob");
-        let idle = Duration::from_millis(600);
-
-        let wanted = || true;
-        let slow = Content::fetch_package(&url, 1024, idle, &wanted)
-            .await
-            .unwrap();
-        assert_eq!(
-            slow,
-            (0..8u8).collect::<Vec<_>>(),
-            "a trickle still completes"
-        );
-
-        let stalled = Content::fetch_package(&url, 1024, idle, &wanted)
-            .await
-            .unwrap_err();
-        assert!(
-            stalled.to_string().starts_with("download stalled"),
-            "silence must fail the fetch: {stalled}"
-        );
-        assert!(is_transport_error(&stalled), "and be retried, not reported");
-        assert!(
-            !is_transport_error(&anyhow::anyhow!("downloaded encrypted blob hash mismatch")),
-            "a wrong answer from the peer is not retried"
-        );
-
-        // Cancelled, or swept after the offer expired: the fetch stops instead
-        // of finishing minutes later and publishing a file nobody wants.
-        let abandoned = Content::fetch_package(&url, 1024, idle, &|| false)
-            .await
-            .unwrap_err();
-        assert!(
-            abandoned.to_string().starts_with("transfer is no longer"),
-            "a row that left `downloading` ends the fetch: {abandoned}"
-        );
-        assert!(
-            !is_transport_error(&abandoned),
-            "and is not treated as a connection fault worth retrying"
-        );
-    }
-
-    /// An accept pressed while the peer's relay link is in dial backoff is
-    /// dropped on the floor, and the sender used to wait out the whole offer
-    /// TTL for it. Each side re-sends the message its state is waiting to have
-    /// heard — but only once the row has sat still for a while, never for a
-    /// finished or expired row, and not again until the window has passed.
-    #[test]
-    fn a_stalled_transfer_resends_its_pending_control_message() {
-        let dir = tmp("file-resend");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        content.set_device_keys(&Keys::generate().secret_key().to_bech32().unwrap());
-        let peer = Keys::generate().public_key().to_bech32().unwrap();
-        content.add_app_peer_for_test(&peer, "peer");
-        let now = 1_000_000;
-        let mut offered = incoming_record("offered", now + 60);
-        offered.view.direction = "outgoing".to_string();
-        offered.view.status = "offered".to_string();
-        offered.view.peer_npub = peer.clone();
-        offered.view.updated_at = now - 30;
-        let mut accepted = incoming_record("accepted", now + 60);
-        accepted.view.status = "accepted".to_string();
-        accepted.view.peer_npub = peer.clone();
-        accepted.view.updated_at = now - 30;
-        let mut fresh = incoming_record("fresh", now + 60);
-        fresh.view.status = "accepted".to_string();
-        fresh.view.peer_npub = peer.clone();
-        fresh.view.updated_at = now - 2;
-        let mut waiting = incoming_record("waiting", now + 60);
-        waiting.view.peer_npub = peer.clone();
-        waiting.view.updated_at = now - 30;
-        let mut expired = incoming_record("expired", now - 1);
-        expired.view.status = "accepted".to_string();
-        expired.view.peer_npub = peer.clone();
-        expired.view.updated_at = now - 30;
-        // Removed from app peers mid-transfer: we stop talking to them.
-        let removed_peer = Keys::generate().public_key().to_bech32().unwrap();
-        let mut removed = incoming_record("removed", now + 60);
-        removed.view.status = "accepted".to_string();
-        removed.view.peer_npub = removed_peer;
-        removed.view.updated_at = now - 30;
-        for r in [offered, accepted, fresh, waiting, expired, removed] {
-            content.insert_file_transfer(r);
-        }
-
-        let mut resent: Vec<(String, String)> = content
-            .stalled_file_messages(now)
-            .into_iter()
-            .map(|(npub, m)| {
-                let kind = match m {
-                    FileMessage::Offer { .. } => "offer",
-                    FileMessage::Response { accepted: true, .. } => "accept",
-                    _ => "other",
-                };
-                (npub, format!("{}:{kind}", m.transfer_id()))
-            })
-            .collect();
-        resent.sort();
-        assert_eq!(
-            resent,
-            vec![
-                (peer.clone(), "accepted:accept".to_string()),
-                (peer, "offered:offer".to_string())
-            ],
-            "only the rows waiting on the other side, with a peer still an app peer, \
-             and only once they have stalled"
-        );
-        assert!(
-            content.stalled_file_messages(now + 5).is_empty(),
-            "a retry must not repeat until the window has passed again"
-        );
-        // By now the row that was fresh has stalled as well.
-        assert_eq!(
-            content
-                .stalled_file_messages(now + file_transfer::RESEND_AFTER_SECS)
-                .len(),
-            3,
-            "and repeats once it has"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The receiver forgets a finished row as soon as the shell publishes the
-    /// file, but its `complete` may have been lost and the sender is then
-    /// retrying `ready` against a transfer we no longer track. The id has to
-    /// stay known so that retry is answered, and the memory must not grow
-    /// without bound.
-    #[test]
-    fn a_finished_incoming_transfer_stays_known_after_its_row_is_forgotten() {
-        let dir = tmp("file-completed-memory");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        let peer = Keys::generate().public_key().to_bech32().unwrap();
-        let other = Keys::generate().public_key().to_bech32().unwrap();
-        assert!(!content.was_completed_incoming("t1", &peer));
-        content.remember_completed_incoming("t1", &peer);
-        content.forget_file_transfer("t1");
-        assert!(
-            content.was_completed_incoming("t1", &peer),
-            "forgetting the row must not forget the id"
-        );
-        assert!(
-            !content.was_completed_incoming("t1", &other),
-            "another app peer asking about the same id is not answered"
-        );
-        // A restart between publishing the file and the sender giving up must
-        // not cost them the rest of the offer TTL.
-        let reopened = Content::open(&dir).unwrap();
-        assert!(
-            reopened.was_completed_incoming("t1", &peer),
-            "the memory has to survive a restart"
-        );
-        for i in 0..file_transfer::MAX_TRACKED_TRANSFERS {
-            content.remember_completed_incoming(&format!("later-{i}"), &peer);
-        }
-        assert!(
-            !content.was_completed_incoming("t1", &peer),
-            "the oldest id is evicted at the cap"
-        );
-        assert!(content.was_completed_incoming("later-0", &peer));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The control plane is best-effort — `PeerRelayPool::send` drops frames
-    /// while a peer is in dial backoff — so a transfer can be left waiting on a
-    /// message that will never arrive. The sweeper is the only thing that ends
-    /// it, and the row has to survive as `failed` so the UI can say why.
-    #[test]
-    fn an_offer_that_is_never_answered_expires_instead_of_hanging() {
-        let dir = tmp("file-sweep");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        content.insert_file_transfer(incoming_record("stale", 1));
-        content.insert_file_transfer(incoming_record("fresh", u64::MAX));
-
-        content.sweep_file_transfers();
-
-        let rows = content.file_transfers_snapshot();
-        let stale = rows.iter().find(|r| r.id == "stale").unwrap();
-        assert_eq!(stale.status, "failed", "an expired offer must terminate");
-        assert!(
-            !stale.error.is_empty(),
-            "the row has to survive carrying its reason — deleting it is what \
-             made every failure invisible"
-        );
-        assert_eq!(
-            rows.iter().find(|r| r.id == "fresh").unwrap().status,
-            "waiting_user",
-            "a live offer is untouched"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `received/` holds decrypted plaintext until Android publishes it. Both
-    /// wipes have to clear it — a "delete my data" control that leaves the
-    /// plaintext of received files on disk is worse than not having one.
-    #[tokio::test]
-    async fn wiping_clears_staged_plaintext() {
-        let dir = tmp("file-wipe-staging");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        let staged = dir.join("received").join("leftover.txt");
-        std::fs::write(&staged, b"decrypted secrets").unwrap();
-        let outbox = dir.join("file-outbox").join("abc.bin");
-        std::fs::write(&outbox, b"ciphertext").unwrap();
-        content.insert_file_transfer(incoming_record("t1", u64::MAX));
-
-        content.wipe_cache(None).await.unwrap();
-
-        assert!(
-            !staged.exists(),
-            "decrypted plaintext must not survive a wipe"
-        );
-        assert!(
-            !outbox.exists(),
-            "the encrypted outbox must not survive either"
-        );
-        assert!(content.file_transfers_snapshot().is_empty());
-        assert!(
-            !dir.join("file_transfers.json").exists(),
-            "the transfer list itself is metadata about who sent you what",
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The accept is the whole consent model. A sender must not be able to
-    /// follow its own offer with a `ready` and have the file fetched, decrypted
-    /// and published while the prompt is still on screen — so every message that
-    /// advances a transfer is gated on the state it is allowed to advance from.
-    #[test]
-    fn a_ready_is_refused_until_the_user_has_accepted() {
-        let dir = tmp("file-consent-gate");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        content.insert_file_transfer(incoming_record("t1", u64::MAX));
-
-        assert!(
-            !content.transfer_in_state("t1", "incoming", "npub1peer", &["accepted"]),
-            "a freshly offered transfer is not yet accepted",
-        );
-
-        content.set_file_status("t1", "accepted", "");
-        assert!(
-            content.transfer_in_state("t1", "incoming", "npub1peer", &["accepted"]),
-            "the accept is what opens the gate",
-        );
-        // ...and only for the peer that made the offer.
-        assert!(
-            !content.transfer_in_state("t1", "incoming", "npub1other", &["accepted"]),
-            "a third app peer cannot drive someone else's transfer",
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The deadline has to measure a stall, not the whole transfer. A large
-    /// file that is moving along normally must not be killed for outliving the
-    /// window its offer was made in.
-    #[test]
-    fn progress_pushes_the_deadline_back() {
-        let dir = tmp("file-stall-window");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        content.insert_file_transfer(incoming_record("moving", 1));
-
-        content.set_file_status("moving", "downloading", "");
-        content.sweep_file_transfers();
-
-        assert_eq!(
-            content
-                .file_transfers_snapshot()
-                .iter()
-                .find(|r| r.id == "moving")
-                .unwrap()
-                .status,
-            "downloading",
-            "a transfer that just made progress must survive the sweep",
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `forget` is the UI's dismiss button, so it has to accept every terminal
-    /// state — including a cancel — and refuse anything still in flight.
-    #[test]
-    fn only_finished_transfers_can_be_dismissed() {
-        let dir = tmp("file-forget");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-
-        content.insert_file_transfer(incoming_record("live", u64::MAX));
-        content.forget_file_transfer("live");
-        assert_eq!(
-            content.file_transfers_snapshot().len(),
-            1,
-            "an in-flight transfer must not be dismissable"
-        );
-
-        for status in ["completed", "denied", "failed", "cancelled"] {
-            content.set_file_status("live", status, "");
-            content.forget_file_transfer("live");
-            assert!(
-                content.file_transfers_snapshot().is_empty(),
-                "{status} is terminal and must dismiss"
-            );
-            content.insert_file_transfer(incoming_record("live", u64::MAX));
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     pub(super) fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-content-test-{}-{}", std::process::id(), tag))
     }
@@ -5750,7 +3475,7 @@ mod tests {
             author: site.author,
             d_tag: None,
         };
-        content.clone().open_site(addr, None).await;
+        content.clone().open_site(addr).await;
 
         let sites = content.sites_snapshot();
         assert_eq!(sites.len(), 1);
@@ -5765,6 +3490,7 @@ pub(crate) mod library_kind_tests {
     use super::tests::{tmp, write_bundle};
     use super::*;
     use nostr::nips::nip19::ToBech32;
+    use nostr::EventBuilder;
     use nsite_deck::testing::build_test_site;
 
     fn entry(kind: LibraryKind, d_tag: &str) -> LibraryItem {
@@ -5889,8 +3615,8 @@ pub(crate) mod library_kind_tests {
     }
 
     /// A napplet-only Library does not make the same-slot nsite "installed":
-    /// `is_in_library` is what decides whether a manifest arriving from a
-    /// peer gets every blob staged and a tile on the grid.
+    /// `is_in_library` is what decides whether a manifest a neighbor shares
+    /// gets every blob staged and a tile on the grid.
     #[tokio::test]
     async fn a_napplet_entry_does_not_make_the_nsite_twin_installed() {
         let dir = tmp("library-napplet-only");
@@ -6006,8 +3732,8 @@ pub(crate) mod library_kind_tests {
         assert_eq!(served.status, 200);
         assert_eq!(served.body, b"<h1>v1</h1>");
 
-        // A app peer asking over the wire gets v1 too — the version whose
-        // files this phone can hand over.
+        // A client asking this phone's relay gets v1 too — the version whose
+        // files this phone has.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         tokio::spawn(crate::mesh_relay::serve_on(
@@ -6026,7 +3752,7 @@ pub(crate) mod library_kind_tests {
         assert_eq!(
             answered.iter().map(|e| e.id).collect::<Vec<_>>(),
             [v1.manifest.id],
-            "the app peer's relay offered a version without its files"
+            "the relay offered a version without its files"
         );
         // A filter only the newer version matches gets nothing, not a stale v1.
         let answered = crate::ip_source::query_relay(
@@ -6138,102 +3864,6 @@ pub(crate) mod library_kind_tests {
             .sign_with_keys(&nostr::Keys::generate())
             .unwrap();
         assert!(content.keep_seen([&profile]).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A mesh peer's relay on loopback: answers every `REQ` — bare or in a
-    /// `MESH` envelope, which the real proxy refuses from loopback — with
-    /// `events` and `EOSE`. Returns its URL.
-    pub(crate) async fn mesh_peer_holding(events: Vec<Event>) -> String {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
-        let events = Arc::new(events);
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let events = events.clone();
-                tokio::spawn(async move {
-                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
-                        return;
-                    };
-                    while let Some(Ok(Message::Text(txt))) = ws.next().await {
-                        let Ok(mut frame) = serde_json::from_str::<serde_json::Value>(&txt) else {
-                            continue;
-                        };
-                        if frame[0] == "MESH" {
-                            frame = frame[2].clone();
-                        }
-                        if frame[0] != "REQ" {
-                            continue;
-                        }
-                        let sub = frame[1].clone();
-                        for ev in events.iter() {
-                            let out = serde_json::json!(["EVENT", sub, ev]).to_string();
-                            let _ = ws.send(Message::Text(out)).await;
-                        }
-                        let eose = serde_json::json!(["EOSE", sub]).to_string();
-                        let _ = ws.send(Message::Text(eose)).await;
-                    }
-                });
-            }
-        });
-        url
-    }
-
-    /// Events pulled from an app peer are remembered here — the profiles kept
-    /// in the relay, the notes in the cache — through the real pull path over
-    /// the peer pool.
-    #[tokio::test]
-    async fn a_pull_from_peers_keeps_what_passes_through() {
-        let dir = tmp("keep-seen-pull");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Arc::new(Content::open(&dir).unwrap());
-
-        // A app peer whose relay (a mock on loopback) holds a profile
-        // and a note.
-        let peer = nostr::Keys::generate();
-        let peer_npub = peer.public_key().to_bech32().unwrap();
-        let author = nostr::Keys::generate();
-        let profile = EventBuilder::metadata(&nostr::Metadata::new().name("far"))
-            .sign_with_keys(&author)
-            .unwrap();
-        let note = EventBuilder::text_note("passing")
-            .sign_with_keys(&author)
-            .unwrap();
-        let url = mesh_peer_holding(vec![profile.clone(), note.clone()]).await;
-        content.add_app_peer_for_test(&peer_npub, "peer");
-        content.peer_relays().redirect(&peer_npub, &url);
-
-        let pulled = content
-            .pull_from_peers(vec![
-                serde_json::json!({ "authors": [author.public_key().to_hex()] }),
-            ])
-            .await;
-        assert_eq!(pulled.len(), 2, "the pull did not reach the peer");
-
-        let relay = content.relay_store().unwrap();
-        let cache = content.event_cache();
-        for _ in 0..100 {
-            if relay.count() > 0 && cache.contains(&note.id.to_bytes()) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let kept = relay.query(&[Filter::new()]).await.unwrap();
-        assert_eq!(
-            kept.iter().map(|e| e.id).collect::<Vec<_>>(),
-            [profile.id],
-            "only the profile is kept"
-        );
-        assert!(
-            cache.contains(&note.id.to_bytes()),
-            "the note was not cached"
-        );
-        assert!(
-            !cache.contains(&profile.id.to_bytes()),
-            "the profile is held twice"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6391,7 +4021,7 @@ pub(crate) mod library_kind_tests {
             author: keys.public_key(),
             d_tag: None,
         };
-        Arc::clone(&content).open_site(addr, None).await;
+        Arc::clone(&content).open_site(addr).await;
 
         let host = format!("{}.nsite", keys.public_key().to_bech32().unwrap());
         let served = content.gateway_get(&host, "/", None).await;

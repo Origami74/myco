@@ -34,16 +34,24 @@ branch; see the CHANGELOG's `[Unreleased]`):
 - **Neighborhoods replace the Circle.** Links set up from one-time
   invitations (`myco://link/…` by QR, share link or NFC), a link key per
   link, signed offers, the link service on `:4873`, traffic scoped per
-  neighborhood and passed on link to link, per-neighborhood reach and an
-  **Apps** switch. App peers (linked devices sharing an extension with us)
-  take over what the Circle did for apps, updates and files —
+  neighborhood and passed on link to link, and per-neighborhood reach —
   [nap-neighbor/](design/nap-neighbor/README.md).
+- **Apps and updates through neighborhoods.** `napplet-updates`,
+  `nsite-updates` and `myco-release` extensions, each with a Get and a Share
+  switch per neighborhood; a missing app is fetched from the neighborhoods
+  that get it, then the internet —
+  [extensions.md](design/nap-neighbor/extensions.md).
+- **One port open to other phones.** The link service on `:4873`. Myco's relay
+  is loopback only and its Blossom store has no port.
 - **NAP-NEIGHBOR** for napplets
   ([napplet/naps#146](https://github.com/napplet/naps/pull/146)), with
   `neighborhood://` addresses for `relay`, `outbox`, `resource` and `upload`.
 - **Removed:** pairing (`myco://pair/`, kinds 9101–9103), the Circle (not
   migrated: people re-invite), general event gossip and backlog resync,
-  outbox mesh lanes, NAP-MESH and the App reach setting.
+  outbox mesh lanes, NAP-MESH and the App reach setting, manifest forwarding
+  between linked phones over their relays, sending files between phones (to
+  return as a napplet on NAP-FS and NAP-NEIGHBOR), and the Dev peer speed
+  test.
 
 ## Earlier releases
 
@@ -167,10 +175,10 @@ declaring more puts only the new domains up for review.
 ### N11 — Share Myco itself
 
 **Built** — update notices: a publisher-signed release event is found on
-Zapstore or from app peers and the phone is told (see Status); **Share Myco**
+Zapstore or from a neighborhood with `myco-release` on, and the phone is told (see Status); **Share Myco**
 on the Apps tab hands the installed APK to a phone without Myco, over a
 hotspot page or the Android share menu; and every phone carries the newest
-release APK for its app peers, so a linked phone updates over the mesh
+release APK and shares it into those neighborhoods, so a linked phone updates over the mesh
 (`docs/design/core/software-updates.md`). Still to show on two phones: the
 exit criterion below.
 
@@ -186,9 +194,9 @@ a group that needs the internet.
   sheet (Quick Share, Bluetooth), or a QR code to a one-off local download
   served from this phone over the shared Wi-Fi or a local hotspot. The page
   says how to allow the install and how to check it's genuine.
-- **Updates from phones nearby.** A phone with a newer Myco offers it to its
-  app peers over the mesh: the APK as a Blossom blob, announced by a signed
-  release event. The receiver installs only if the APK's signing certificate
+- **Updates from phones nearby.** A phone with a newer Myco shares it into
+  its neighborhoods (`myco-release`): the APK as a neighborhood blob,
+  announced by a signed release event. The receiver installs only if the APK's signing certificate
   matches its own (Android enforces this for updates anyway) and the release
   is signed by the Myco release key.
 - Installing from inside Myco needs `REQUEST_INSTALL_PACKAGES` and the
@@ -454,7 +462,7 @@ its reads fell back to a one-shot pull instead of a live stream.
 - One-shot queries, manifest lookups, relay-list lookups and account publishes
   go through the same pool, so a warm connection serves all of them.
 - The relay skip list and the internet breaker sit in front of the pool.
-  Peers' mesh relays and custom relays keep their own connections.
+  Custom relays keep their own connections.
 
 **Exit criterion.** On a device, AppStore at steady state holds at most one
 socket per relay it reads. It never logs `stream bound reached`. A reopen
@@ -473,9 +481,6 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Reclaiming event-cache disk sooner.** The shell cache evicts to its
   budget, but LMDB never shrinks its file in place: space freed by eviction
   is reused, and after "Clear cache" the file shrinks only at the next start.
-- **Not serving the cache to app peers.** A per-device setting, for someone
-  who does not want linked phones to enumerate what their apps read
-  ([security.md](./design/core/security.md) §6).
 - **Pruning of kept events (profiles, relay lists, manifests).** The local
   relay keeps these kinds when a lookup sees them, and only "Clear local database"
   removes them. Bounded in practice by small, replaceable kinds, but not by a
@@ -496,13 +501,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   from the default relays and the indexers, not the user's NIP-65 write
   relays — the last open part of
   [#67](https://github.com/Origami74/myco/issues/67).
-- **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
-  ask every linked peer in a neighborhood, or only the peer whose event
-  referenced it —
-  [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
-- **One permission model for apps and peers.** Napplet grants (per capability,
-  per app) and peer permissions (per peer) grew up apart. Bring them under
-  one structure, and use it to answer what a blanket `relay` grant leaves
+- **Sensitive kinds in the permission model.** Answer what a blanket `relay` grant leaves
   open today: a napplet signs any kind as the user — profile (0), contacts
   (3), relay list (10002), deletions (5) — with no prompt. Sensitive
   replaceable kinds want a separate grant or a per-event confirmation; a
@@ -536,9 +535,6 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Background subscriptions.** A Myco-side subscription that survives the
   napplet's window closing, so a doorbell can ring with the app closed. Needs
   the notification path (N4) and a battery story.
-- **Relay read-auth.** The mesh relay is open-read to app peers; per-link
-  auth and read scoping would let a peer hold private apps —
-  [security.md](./design/core/security.md) §3.
 - **External browsers (NAT46 / `.nsite`).** Let system Chrome reach a site;
   the in-process gateway serves only Myco's own WebViews —
   [ports.md](./reference/ports.md) §3.

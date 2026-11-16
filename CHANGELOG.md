@@ -65,9 +65,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The "App reach" setting.** Reach is set per neighborhood.
 - **Event gossip between phones.** Posts no longer spread to every nearby
   phone; they travel only in neighborhoods.
+- **File transfer between phones.** It is to return as a napplet, built on
+  NAP-FS and NAP-NEIGHBOR.
+- **The Dev speedtest.**
 
 ### Changed
 
+- **Myco's relay and Blossom are no longer reachable by other phones.** The
+  relay listens on this phone only (`127.0.0.1:4870`) and Blossom on no port
+  (`24243` is no longer served). The link service on `:4873` is the only port
+  open to other phones.
+- **Apps and updates travel through neighborhoods.** Opening or installing an
+  app this phone doesn't have yet asks the neighborhoods where you get that
+  kind of update, then the internet; nobody else is contacted, including the
+  person named in a share link, so installing from someone you share no
+  neighborhood with needs the internet. The update check asks public relays
+  only; neighbors share updates through **Updates**.
 - **Bluetooth no longer advertises your device name.** Names travel only in
   invitations, to the person invited.
 - **NAP-INTENT names apps by publisher.** A candidate's `id`, a result's

@@ -1,7 +1,6 @@
 //! Keep what we see: a handful of event kinds that arrive from outside the
-//! local relay — a public relay, an app peer's relay — are written into the
-//! local relay on the way past, so the next lookup answers here, works
-//! offline, and is served on to app peers.
+//! local relay — a public relay, say — are written into the local relay on
+//! the way past, so the next lookup answers here and works offline.
 //!
 //! Only kinds another lookup will want again, and only replaceable ones, so
 //! each author (and `d` tag) costs one event however often it is seen:

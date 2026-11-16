@@ -99,10 +99,11 @@ same way.
 
 A neighborhood works both ways. The people you share one with can:
 
-- get the apps on your phone, while the neighborhood's **Apps** switch is on
-  (the default),
-- receive what your apps post into that neighborhood, and pass it on,
-- offer you files.
+- get your apps and their updates, and Myco updates, while the
+  neighborhood's **Share** switches under **Updates** are on (the default),
+- receive what your apps post into that neighborhood, and pass it on.
+
+You get theirs the same way, under the **Get** switches.
 
 A neighborhood is not private: people in it can pass posts on, even outside
 it. Nothing else on your phone is open to them, and people you share no
@@ -237,8 +238,9 @@ Every phone runs its own Nostr relay and Blossom file store, and keeps the
 signed files of every app it holds. That is why a phone that got an app can
 hand it on. Phones connect over a [FIPS](https://github.com/jmcorgan/fips)
 mesh: Bluetooth (L2CAP), Wi-Fi Aware, a USB cable, the local network, or the
-internet when there is one. Mesh links are encrypted. Your neighborhoods — and the people you set up a
-link with from an invitation — decide who may pull from your phone.
+internet when there is one. Mesh links are encrypted. Your relay and file store are never open to other
+phones: apps and updates travel only through your neighborhoods, to the
+people you set up a link with from an invitation.
 
 The reusable content layer (relay, Blossom, gateway, sync) is the
 `nsite-deck` crate. `myco-core` wires it to FIPS and the Android app.
@@ -265,15 +267,14 @@ Read on:
   sends the APK through Quick Share, Bluetooth or a messenger.
 - **Updates:** Myco checks daily for publisher-signed stable releases, including
   while the UI is closed (turn it off in Settings → Software updates). It asks
-  your app peers (people sharing an update extension with you) and
   `wss://relay.zapstore.dev`, which sees your IP address and a
-  query for Myco releases; no user identity or private signing key is sent. In
-  mesh-only mode it asks only your app peers. Every phone keeps the newest signed
-  announcement it has seen, so one phone with internet tells the rest.
+  query for Myco releases; no user identity or private signing key is sent.
+  Release announcements also reach you through your neighborhoods (**Myco
+  updates**), so one phone with internet tells the rest, even in mesh-only
+  mode.
 - **Updates from your neighborhoods:** every phone also keeps the newest
-  release APK (from its own install, an app peer, or, on unmetered Wi-Fi, the release
-  download) and hands it to app peers over the mesh, compressed to about
-  11 MB. When it's on your phone, **Install** updates Myco with no internet:
+  release APK (from its own install, a neighborhood, or, on unmetered Wi-Fi,
+  the release download) and shares it into its neighborhoods. When it's on your phone, **Install** updates Myco with no internet:
   Myco checks it is signed by the publisher, and Android asks before
   installing. Otherwise **View update** opens the Zapstore listing.
 - **Installing the APK:** Android asks whether your browser (or file app) may

@@ -2,7 +2,7 @@
 //!
 //! The node's packets used to reach Myco's servers and clients through the
 //! kernel: the `VpnService` handed them to a TUN, the kernel's TCP terminated
-//! them, and ordinary sockets on `[::]:4870` or to `[fd00::peer]:24243` did
+//! them, and ordinary sockets on `[::]:4873` or to `[fd00::peer]:4873` did
 //! the rest. That held the user's one VPN slot for traffic that never leaves
 //! the app. Now a userspace TCP/IP stack
 //! ([`fips_host::netstack::Netstack`]) on the node's own address terminates
@@ -79,7 +79,7 @@ pub(crate) fn listen(port: u16) -> Option<io::Result<MeshListener>> {
 }
 
 /// A server's listener on the mesh stack. Hands axum each peer's mesh
-/// address, as a kernel listener would, so the app peer gate reads the same.
+/// address, as a kernel listener would, so a per-peer limit reads the same.
 pub(crate) struct MeshListener(TcpListener);
 
 impl axum::serve::Listener for MeshListener {
@@ -191,29 +191,6 @@ pub(crate) async fn dial(addr: SocketAddr) -> io::Result<MeshStream> {
             Ok(MeshStream::Kernel(stream))
         }
     }
-}
-
-/// A WebSocket to `url`, whose host must be an address literal (a mesh name
-/// is resolved before it gets here; see `dns_intercept::mesh_literal_url`).
-// The same error `tokio_tungstenite::connect_async` returns, so callers that
-// classify its faults (`peer_relay`) need not change.
-#[allow(clippy::result_large_err)]
-pub(crate) async fn connect_ws(
-    url: &str,
-) -> Result<tokio_tungstenite::WebSocketStream<MeshStream>, tokio_tungstenite::tungstenite::Error> {
-    use tokio_tungstenite::tungstenite::{error::UrlError, Error};
-    let unusable = || Error::Url(UrlError::UnableToConnect(url.to_string()));
-    let parsed = reqwest::Url::parse(url).map_err(|_| unusable())?;
-    let ip: IpAddr = parsed
-        .host_str()
-        .map(|h| h.trim_start_matches('[').trim_end_matches(']'))
-        .and_then(|h| h.parse().ok())
-        .ok_or_else(unusable)?;
-    let port = parsed.port_or_known_default().ok_or_else(unusable)?;
-    let addr = SocketAddr::new(ip, port);
-    let stream = dial(addr).await.map_err(Error::Io)?;
-    let (ws, _) = tokio_tungstenite::client_async(url, stream).await?;
-    Ok(ws)
 }
 
 /// A connection from [`dial`]: on the mesh stack, or a kernel socket.
@@ -333,7 +310,7 @@ fn bridge_stopped(port: u16) {
     }
 }
 
-/// A random hex secret: the CSPRNG the file transfer uses.
+/// A random hex secret, from the OS CSPRNG.
 fn secret() -> String {
     use chacha20poly1305::aead::{KeyInit, OsRng};
     hex::encode(chacha20poly1305::XChaCha20Poly1305::generate_key(
@@ -742,9 +719,9 @@ mod tests {
         (a, b)
     }
 
-    /// A server on the mesh stack sees each peer by its mesh address, so the
-    /// app peer gate judges the right one — here Blossom's, which refuses a
-    /// stranger.
+    /// A server on the mesh stack sees each peer by its mesh address, so a
+    /// per-peer gate judges the right one — here a Blossom server's, which
+    /// refuses a stranger.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_gate_sees_a_stack_peer_by_its_mesh_address() {
         let (a, b) = stack_pair();
@@ -780,8 +757,8 @@ mod tests {
 
     /// A peer sends the stack segments that fit the node's MTU. A stack
     /// whose MSS ran past the node's drew full segments FIPS could only
-    /// fragment: a v0.8 phone's file-share offer never arrived, though its
-    /// small frames did.
+    /// fragment: a v0.8 phone's larger frames never arrived, though its
+    /// small ones did.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_peer_sends_segments_that_fit_the_node() {
         // FIPS's IPv6 MTU on its default transports.

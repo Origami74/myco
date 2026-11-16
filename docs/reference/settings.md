@@ -29,7 +29,6 @@ start".
 | `cache/events/` | the shell event cache: an LMDB database (`lmdb/`), its index snapshot (`index.bin`), and a `compact-on-open` marker after "Clear cache" | `myco-cache` |
 | `cache/blobs/` | the shell blob cache: content-addressed blobs (`blobs/`) and its index snapshot (`index.bin`) | `myco-cache` |
 | `blossom/` | content-addressed blobs, named by sha256 | `myco-blossom` |
-| `file_transfers.json`, `file-outbox/`, `received/` | native file sharing between app peers | `file_transfer.rs` |
 | `ble-attempts.jsonl` | the BLE connect-attempt log the Dev tab shows | `attempt_store.rs` |
 | `fips-control.sock` | the node's control socket (runtime, not state) | `control_client.rs` |
 | `seeded-defaults`, `profileInstalled` | one-shot markers | `runtime.rs`, `user_key.rs` |
@@ -109,7 +108,6 @@ Circle is gone" notice was dismissed (`circle_removed_seen`).
 - **Grants are never widened by anything but the user.** Install review and the
   Manage permissions sheet are the only writers of `granted`; an open window
   learns of a change by relaunching.
-- **Peer permissions** are not persisted: every app peer gets the defaults.
-  See [nsite-permissions.md](../design/nsite/nsite-permissions.md).
-- **Ports** are fixed: relay `4870`, Blossom `24243`, link service `4873`. See
+- **Ports** are fixed: relay `4870` (loopback only), link service `4873` (the
+  only port open to other phones); Blossom is not served on a port. See
   [ports.md](./ports.md).

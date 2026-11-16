@@ -7,7 +7,7 @@
 //! and refuses, **at the dial**, anything outside it.
 //!
 //! - [`Reach::Internet`] — the public internet only. The default.
-//! - [`Reach::Mesh`] — an app peer over FIPS: `.fips` names and the mesh's
+//! - [`Reach::Mesh`] — a linked peer over FIPS: `.fips` names and the mesh's
 //!   `fd00::/8` addresses, nothing else.
 //! - [`Reach::Configured`] — a server the user typed in themselves (a custom
 //!   Blossom store), which may well be on their own network. The one
@@ -101,14 +101,9 @@ impl HttpClient {
         Self::build(Reach::Internet, Redirects::None, builder, cfg!(test))
     }
 
-    /// An app peer over the mesh only.
+    /// A linked peer over the mesh only.
     pub(crate) fn mesh(builder: reqwest::ClientBuilder) -> Self {
         Self::build(Reach::Mesh, Redirects::Judged, builder, cfg!(test))
-    }
-
-    /// An app peer over the mesh only, redirects not followed.
-    pub(crate) fn mesh_unredirected(builder: reqwest::ClientBuilder) -> Self {
-        Self::build(Reach::Mesh, Redirects::None, builder, cfg!(test))
     }
 
     /// A server the user configured themselves. Not guarded: it may be on
@@ -238,7 +233,7 @@ pub(crate) fn shared_mesh() -> HttpClient {
         .get_or_init(|| {
             HttpClient::mesh(
                 reqwest::Client::builder()
-                    // Generous: a blob can be MBs over a slow BLE mesh link.
+                    // Generous: a link's blob can be MBs over a slow BLE mesh link.
                     .timeout(Duration::from_secs(60)),
             )
         })
@@ -484,10 +479,10 @@ mod tests {
         }
         for refused in [
             "http://127.0.0.1/x",
-            "http://localhost:24243/x",
+            "http://localhost:4873/x",
             "http://10.0.0.1/x",
-            "http://[fd00::1]:24243/x",
-            "http://npub1peer.fips:24243/x",
+            "http://[fd00::1]:4873/x",
+            "http://npub1peer.fips:4873/x",
             "http://[64:ff9b::c0a8:101]/x",
             "https://user@example.com/x",
             "file:///etc/passwd",
@@ -497,7 +492,7 @@ mod tests {
                 "{refused}"
             );
         }
-        for ok in ["http://npub1peer.fips:24243/x", "http://[fd12::3]:24243/x"] {
+        for ok in ["http://npub1peer.fips:4873/x", "http://[fd12::3]:4873/x"] {
             assert!(may_dial(Reach::Mesh, &url(ok), false).is_ok(), "{ok}");
         }
         for refused in [

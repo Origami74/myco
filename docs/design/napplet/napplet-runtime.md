@@ -85,7 +85,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
 | D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots — and only if the domain was on the list the review sheet showed; a later manifest declaring more goes back through the review sheet, drawn over the napplet's own window, before it gets it. Preinstalled napplets carry the permissions Myco vetted them for as their reviewed list (§7.3). A granted `relay` covers publishing with no per-event prompt, except — interim, until the permission model adds prompts — kinds 0, 3, 5 and 10000–19999, which are refused per call. |
-| D9 | Acquisition | Fetch when added by `naddr` — from the sharer and app peers in reach, then online; local and mesh-replicable from then on. |
+| D9 | Acquisition | Fetch when added by `naddr` — from the neighborhoods that get `napplet-updates`, then online; local, and shared into neighborhoods, from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |
 | D12 | Shell origin | One loopback origin per napplet, `<pubkeyB36><dTag>.localhost`, mirroring nsite hosts. |
@@ -106,8 +106,8 @@ Most of the runtime is wiring. The parts that carry over unchanged:
 - **`nsite-deck`** — the shape to follow, and now a shared dependency: trait seams
   (`RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink`), manifest parsing, verified
   sync, and the base36 host-label encoder. Transport-agnostic and testable off-device.
-- **`MeshGossiper` / `PeerRelayPool`** — manifest forwarding and per-peer connections to
-  app peers. Once a napplet manifest reaches the local relay, passing updates on is nearly free.
+- **Neighborhood extensions** (`neighbor/updates.rs`) — `napplet-updates` shares a new
+  version into neighborhoods and fetches one shared there.
 - **`remote_backend.rs` / `remote_blobs.rs`** — the online relay and Blossom fetch paths
   that D9 needs.
 - **`NsiteActivity`** — not the class, but the technique: a chrome-less WebView task that
@@ -208,7 +208,7 @@ nsite-deck/                    shared NIP-5A primitives
   aggregate.rs   the aggregate hash, used by both manifest families
 
 myco-core/
-  napplet.rs     wires the runtime to myco-relay, myco-blossom, PeerRelayPool, keys
+  napplet.rs     wires the runtime to myco-relay, myco-blossom, neighborhoods, keys
 ```
 
 The split follows the trust boundary, not the file format. The manifest layer is shared
@@ -489,34 +489,19 @@ Apps panel grows a type discriminant and its 🦆 / ＠ annotations.
 
 Review and "Add" ask the same sources, in order:
 
-1. **The mesh, all at once** (`ip_source::FirstOf`): the sharer, when the pointer names
-   one (`holder`), and every other app peer in reach (`Content::reachable_npubs`; see
-   [nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
-   This is what finds a napplet opened from a bare `naddr` link, which names no sharer.
-   The first manifest signed by the author for the asked slot wins; a peer with nothing,
-   or with a forged answer, is passed over, and a dead peer — a sharer who has walked
-   off included — does not hold up a live one. Only app peers: no one else's relay
-   or Blossom lets this phone pull.
-2. **The public relays** — the pointer's hints, the author's NIP-65 relays and the
-   defaults — unless offline-only is on. The mesh is not the internet, so offline-only
-   keeps 1.
-
-Manifests are raced, being one small `REQ` each; bytes are not. The blobs come from one
-phone at a time: the one whose manifest answer won — in reach, quick, and holding this
-app. "Add" starts from a fresh source, so before its first blob the manifest is raced once
-more to pick that phone. When it lacks a blob, fails, or goes silent for 5 s (no response,
-no next chunk — `NAPPLET_MESH_STALL`), it is dropped and the next phone is picked the same
-way from those not yet asked. Silence, not total time: a slow link still sends something,
-so a large download that is getting there is never cut off, while a phone that walked out
-of range costs 5 s rather than the HTTP client's 60 s. The
-first answer wins rather than the newest: getting the app onto the phone comes first,
-and a newer version reaches it later the way updates do (§7.3).
+1. **This device's own store.**
+2. **Neighborhoods where this device gets `napplet-updates`** (`ExtensionSource`):
+   the manifest from each neighborhood's scope here, then asked of its links over
+   the link relay; blobs from the scope, then the links
+   ([nap-neighbor/extensions.md](../nap-neighbor/extensions.md#getting-an-app-that-isnt-here-yet)).
+   A sharer the pointer names (`holder`) is not contacted directly.
+3. **The public relays** — the pointer's hints, the author's NIP-65 relays and the
+   defaults — unless offline-only is on.
 
 Whatever answers is untrusted: `fetch_manifest` checks signature, author, address and `d`
-tag, and every blob is verified against the manifest before it is kept. Asking app peers
-tells them which napplet you are looking at — the disclosure §7.11 describes, for
-an app you chose to install rather than an attachment a feed showed you. The update check
-(§7.2) still asks the public relays only.
+tag, and every blob is verified against the manifest before it is kept. Asking a
+neighborhood's links tells them which napplet you are looking at — people you linked
+with on purpose. The update check (§7.2) asks the public relays only.
 
 *Done when* a real napplet, fetched by `naddr`, renders on a phone and completes the
 handshake. Every implemented API is injected whatever was granted, and
@@ -534,8 +519,7 @@ never a bare pubkey and every event they publish carries an invitation.
 `NAP-RESOURCE`, `NAP-RELAY` (`subscribe`, `publish`, `query`) and a read-only
 `NAP-IDENTITY` come up. `NAP-RESOURCE` serves `blossom:` and `https:` (`nap/resource.rs`).
 For `blossom:`, every ask reads this device's Blossom store first; a miss goes through the `BlobFetcher`
-seam — app peers' stores over the mesh and, unless offline-only, the internet, asked
-**at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
+seam to the internet, unless offline-only. Other phones are not asked. It asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
 author's kind 10063 servers as held here, https only, four of each at most), then the
 public defaults, over one shared HTTP client. Only when all of those miss is an `as`
@@ -761,15 +745,14 @@ lookups (`ip_source`), account publishes, and public Blossom fetches.
   at least 8 s. A napplet's short `timeoutMs` and a round's shared cutoff never count, and
   a relay that connected and was slow to answer is slow, not gone. 30 s, doubling, up to
   5 min.
-- **A success clears the entry.** Mesh successes (`.fips`, `fd00::/8`, an app peer's
-  Blossom) do not count as "online". Blossom counts a 404 as an answer ("not here"), never
+- **A success clears the entry.** Mesh successes (`.fips`, `fd00::/8`) do not count
+  as "online". Blossom counts a 404 as an answer ("not here"), never
   a failure.
 - **A skipped relay is finished, with nothing, at once** — not dialled, not even resolved —
   so it never costs a round time. A round of only skipped relays does not trip the internet
   breaker. A lane skipped (or not usable) when a subscription opens takes no stream slot;
   it gets its one pull, which costs nothing.
-- **Never listed:** app peers' relays and Blossom, and the custom relay and Blossom
-  set in Storage — their clients never consult the list.
+- **Never listed:** the custom relay and Blossom set in Storage — their clients never consult the list.
 - **Bounded:** keys are normalised as `ip_source::same_relay` does, plus the default port
   dropped; spent entries are pruned on insert and the map holds at most 512.
 - **Logged once** per skip, when the relay is put on the list.
@@ -1067,7 +1050,7 @@ relays. The relay lists are a kind 10002 (NIP-65) and a kind 10050 (NIP-17 DM in
 both from their own constants in `outbox.rs` (`USER_OUTBOX_RELAYS`, `USER_INBOX_RELAYS`:
 damus, ditto, primal) rather than the lookup defaults, which include an indexer. A relay in
 both lists is one unmarked `r` tag; one in a single list is marked `read` or `write`.
-Neither names this device's mesh relay (§7.4). The events go to the configured relays
+Neither names this device's own relay (§7.4). The events go to the configured relays
 plus every relay the lists name, so the declared outbox actually holds them, and the
 publish counts as done only once the kind 0 and each stored list have each reached a
 relay. The lists are signed once, when the guest is created; the publish sends what is
@@ -1089,12 +1072,12 @@ the library row tracks an addressable `(pubkey, dTag)` pointer.
 Settled the way nsites settle it (`nsite-updates.md` §1): the version **served** is the
 one whose index blob is here, pinned through the content layer's active-version map
 (`ManifestStore` in `napplet.rs`, `Content::set_active` behind it). A newer manifest
-landing in the relay with no blob behind it — pulled by a subscription, flooded by a peer
+landing in the relay with no blob behind it — pulled by a subscription, shared in a neighborhood
 — does not displace the one that opens. The pin moves when a fetch brings the new bytes:
 "Check for updates" refreshes every installed napplet from its pointer's relays beside
 the nsite check (`NappletHost::refresh`, bytes first, manifest, then pin), and a version
-it brings in is passed on to app peers, as an nsite update found by the check is (§7.3).
-A newer version pushed by an app peer moves the pin the same way (§7.3). The tile
+it brings in is shared into neighborhoods, as an nsite update found by the check is (§7.3).
+A newer version shared by a neighbor moves the pin the same way (§7.3). The tile
 reports `ready` or `missing` from the same pin. The same check also runs on its own, on
 foreground and every 6 h, through the throttle in `nsite-updates.md` §3.1; under
 offline-only the napplet half is skipped (counted as checked, none updated). An open
@@ -1117,38 +1100,36 @@ across versions is still open: napplets have no storage capability yet.
 
 ### 7.3 Mesh replication of the new kinds
 
-**Updates travel between app peers the way nsite updates do.** The mesh relay hook
-(`MeshGossiper`) routes the napplet manifest kinds `15129` / `35129` to their own handler
-(`Content::on_napplet_manifest_event`). It is the nsite policy
-([nsite-updates.md §4](../nsite/nsite-updates.md)) — the same hop budget, split-horizon
-and multihop clamp — with the napplet's checks in front:
+**Updates travel through neighborhoods, as `napplet-updates`**
+([nap-neighbor/extensions.md](../nap-neighbor/extensions.md#napplet-updates)), the
+way nsite updates travel as `nsite-updates`. A napplet manifest arriving in a
+neighborhood is kept and passed on like any neighborhood event; where this device
+gets `napplet-updates`, the napplet's checks come first:
 
 - **Checked first, on every phone.** The manifest must be signed and parse as NIP-5D
-  (one artifact `x`, or a legacy single `path` with a matching aggregate). One that does not, or that is older
-  than the version the relay already keeps for its slot, stops here.
-- **Not installed here** (no Library entry for that author and `d` tag): passed on at
-  once and nothing is fetched — a pure relay, as for an nsite we don't run. Holding no
-  bytes costs the next phone nothing: it asks the sender, gets a 404, and falls back to
-  the public servers (nsite-updates.md §4.2).
+  (one artifact `x`, or a legacy single `path` with a matching aggregate). One that does
+  not, or that is older than the version already kept for its slot, stops here.
+- **Not installed here** (no Library entry for that author and `d` tag): nothing is
+  fetched. The manifest stays in the neighborhood, so an app store reading it sees
+  that someone around holds that napplet.
 - **Installed, not newer than the pinned version:** a downgrade or a replay. Not
-  fetched, not pinned, not passed on.
-- **Installed and newer:** the index blob is fetched from the sender's mesh Blossom
-  first, then the public Blossom servers unless offline-only; verified against the
-  manifest; stored; pinned — and only then passed on, so the next phone can fetch the
-  bytes from this one. A download that fails still passes the manifest on, so the wave
-  never stalls on one phone; the old version keeps serving.
+  fetched, not pinned.
+- **Installed and newer:** the index blob is fetched from that neighborhood (its scope,
+  then its links), then the public Blossom servers unless offline-only; verified against
+  the manifest; stored; pinned — and then shared into every neighborhood where this
+  device shares `napplet-updates`. A download that fails leaves the old version serving.
 
 A napplet's pin never moves back — every pin (open, install, "Download again", the update
 check, a push) refuses a version older than the pinned one and accepts an equal one — so
 two versions downloading at once cannot leave the older one served, and a window opening
 on the old version cannot re-pin it. Equal is allowed because the real re-pins are of the
 version already served. The blob fetch is capped at NAP-RESOURCE's per-blob limit, so a
-sender cannot stream an unbounded body before the hash check. The version activates as
+link cannot stream an unbounded body before the hash check. The version activates as
 §7.2 says: an open window keeps its session, the next launch opens the new one.
 
 **An update never widens grants.** Author and `d` tag are the address, and the
 signature ties a manifest to its author — a napplet by someone else under the same name
-is a different napplet, relayed like any other this phone lacks. Nothing on this path
+is a different napplet, kept like any other this phone lacks. Nothing on this path
 writes grants: a new version declaring a domain the user never reviewed opens without it,
 and the domain comes back as unreviewed (`open_with`).
 
@@ -1196,11 +1177,10 @@ cannot be told apart — a user who installed DingDong by hand before it was see
 nothing it can use.
 
 **Snapshots (`5129`) stay plain events.** A snapshot is an immutable build: nothing in the
-Library installs by it, so there is nothing to update, and the not-installed branch
-would pass it on unchanged anyway.
+Library installs by it, so there is nothing to update.
 
-Still not done: first delivery to a phone that has never had the napplet. It arrives by
-the share handoff (bump, QR) and the public relays; AppStore's "Around you" list of
+First delivery to a phone that has never had the napplet comes from the neighborhoods
+that get `napplet-updates` (see S1) and the public relays; AppStore's "Around you" list of
 napplets nearby phones hold is the start of a listing of what people nearby hold (roadmap N5).
 
 ### 7.4 The outbox model and the mesh
@@ -1274,52 +1254,16 @@ partly so the shell can be exercised in a desktop browser against a host build, 
 the only cheap way to run any of it. Passing the suite is not a goal this cycle (D7), but
 nothing here should make it impossible later.
 
-### 7.11 Pulling blobs over the mesh leaks what you are looking at
+### 7.11 Pulling blobs over the mesh
 
-**Open.** NAP-RESOURCE (S2) fetches a `blossom:` blob the local store lacks from every
-reachable app peer at once, and from the internet at the same time. Asking the room
-at all is the right choice
-for availability — the room is what this app is for — and the wrong one for privacy, in
-three ways.
+**Settled by removal.** NAP-RESOURCE no longer asks other phones for a `blossom:` blob:
+a miss goes to the internet, or nowhere when offline-only. Kept blobs are not served to
+other phones, so viewing something no longer makes you a host of it.
 
-**The ask is a disclosure.** "Do you have `<sha>`?" tells every phone in the room which
-picture or file you are opening, tied to your device npub, at that moment. A public server
-learns the same, but a public server is a stranger; an app peer is someone who knows
-you, and the hash is trivially matched to the event that referenced it — they hold the
-same event. Interest in a specific message's attachment is a specific fact about you.
-
-**The keep is a broadcast.** "Anything queried is saved" means a blob you merely viewed is
-now served from your phone to any app peer who asks (the mesh Blossom gates on
-being an app peer, not on why you hold it). You become a host of content you did not
-publish and may not endorse, and a peer probing your store learns what you have looked at.
-
-**The serve is a probe.** The inverse of the first point: answering "yes" reveals what you
-hold, to any app peer, for the cost of a hash. Hashes of well-known files are
-well known.
-
-None of this is new to the mesh — nsite sync pulls blobs from peers too — but an nsite's
-blobs are an app someone chose to install, and a napplet's are the attachments of whatever
-its feed happens to contain. The scale and the specificity are different.
-
-Options, roughly in order of how much they cost:
-
-1. **Ask the peer who told you.** A blob referenced by an event that arrived from a peer
-   can be asked of *that* peer without telling them anything they do not know — they sent
-   the reference. This is the `holder` pattern nsite sync already uses. Anything else goes
-   to the internet, or nowhere.
-2. **Internet first when online, mesh only when not.** Cheap, and it inverts the current
-   order; costs mesh availability for the online case, and still discloses offline.
-3. **Do not keep viewer-only fetches, or keep them unserved.** A "fetched for a napplet"
-   mark that the mesh Blossom refuses to serve until the user shares or the blob is
-   referenced by something they published. Breaks "anything queried is saved" as a mesh
-   promise, keeps it as a local cache.
-4. **A per-napplet or per-neighborhood switch.** Honest, and one more thing nobody sets.
-
-Recommendation: (1) as the default — it is the one that leaks nothing new — with (2) as the
-fallback path, and (3) worth doing regardless, since it closes the serve-side leak for
-content the user never chose to host. Until decided, `BlossomFetcher` stays as shipped and
-this section is the warning label. See also NAP-RESOURCE's own note that sidecar prefetch
-"can leak user interest to resource hosts": the mesh makes the hosts your friends.
+A neighborhood's blobs are read through a `neighborhood://` address, which asks only
+that neighborhood's links, one at a time
+([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md#blobs)). Asking them tells
+those people which blob you want; they are people you linked with on purpose.
 
 **`https:` tells the host, by design.** An `https:` resource is fetched from the one
 server its URL names, so that server — and whoever resolves its name — learns this

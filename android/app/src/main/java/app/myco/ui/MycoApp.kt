@@ -4,7 +4,6 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.net.Uri
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -61,8 +60,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.listSaver
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,9 +83,6 @@ import androidx.compose.ui.platform.LocalContext
 import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
-import app.myco.core.AppPeer
-import app.myco.core.FileTransfer
-import app.myco.core.NativeActions
 import app.myco.core.forShell
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
@@ -96,7 +90,6 @@ import app.myco.onboarding.SetupNotice
 import app.myco.ui.onboarding.SetupSnackbar
 import app.myco.ui.onboarding.SetupSnackbarVisuals
 import app.myco.share.DeviceName
-import app.myco.ui.screens.PeerShareSheet
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.DevScreen
 import app.myco.update.rememberSoftwareUpdates
@@ -126,16 +119,6 @@ private val TABS = listOf(
     Tab("neighbors", "Neighbors", Icons.Filled.People),
     Tab("settings", "Settings", Icons.Filled.Settings),
     Tab("dev", "Dev", Icons.Filled.Terminal),
-)
-
-/**
- * Picked share URIs across a configuration change. A `Uri` is Parcelable, but the
- * list handed back by the picker is not guaranteed to be a shape the default saver
- * can store, so save the strings and parse them back.
- */
-private val UriListSaver = listSaver<List<Uri>, String>(
-    save = { it.map(Uri::toString) },
-    restore = { it.map(Uri::parse) },
 )
 
 @Composable
@@ -171,18 +154,6 @@ fun MycoApp(
     onExitProxyChange: (String) -> Unit = {},
     /** Clears the intro's "already seen" flag so it plays in full again. */
     onReplayIntro: () -> Unit = {},
-    /** Documents received from Android's system Sharesheet. */
-    externalShareUris: List<Uri> = emptyList(),
-    onExternalShareDismissed: () -> Unit = {},
-    /** Selected peer hand-off; the native file transport will plug in here. */
-    onShareToPeer: (List<Uri>, AppPeer) -> Unit = { _, _ -> },
-    /** Copies a completed native receive into a user-visible Android location. */
-    onFileReceived: (FileTransfer) -> Unit = {},
-    /** Completed receive currently shown in the app-root preview dialog. */
-    receivedFile: FileTransfer? = null,
-    receivedFileUri: Uri? = null,
-    onDismissReceivedFile: () -> Unit = {},
-    onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
     // Two views of one poll. `live` is the full latest snapshot, provided as
     // [LocalLiveState] to the screens that draw per-second diagnostics. `state`
@@ -209,9 +180,6 @@ fun MycoApp(
     var lanEnabled by remember { mutableStateOf(initialLanEnabled) }
     // BLE advertiser exhaustion (set by the radio, read here for the Settings badge).
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
-    var dismissedFileOffers by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var handledReceivedFiles by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var showMycoAppPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
     // Re-poll the native state each second (every two on a low-RAM device) off
     // the main thread (it crosses JNI into the Rust core). Pure read — does not
@@ -238,29 +206,7 @@ fun MycoApp(
         }
     }
 
-    // Native transfer completion happens in Rust. Copy the decrypted file into
-    // Android's Downloads through the activity-owned MediaStore bridge exactly
-    // once per transfer.
-    androidx.compose.runtime.LaunchedEffect(state.fileTransfers) {
-        state.fileTransfers
-            .filter { it.status == "completed" && it.publishPending && it.receivedPath.isNotEmpty() }
-            .filterNot { it.id in handledReceivedFiles }
-            .forEach { transfer ->
-                handledReceivedFiles = handledReceivedFiles + transfer.id
-                onFileReceived(transfer)
-            }
-    }
-
     val nav = rememberNavController()
-    // "Send a file" to an app peer: remember who, then let the user pick what.
-    // Saveable, not merely remembered: the document picker is another activity, and
-    // a rotation behind it — or the sheet rotating afterwards — would otherwise drop
-    // the contact and the picks on the floor, leaving the user to start over with no
-    // sign of why.
-    var sendFileNpub by rememberSaveable { mutableStateOf<String?>(null) }
-    var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
-        mutableStateOf<List<Uri>>(emptyList())
-    }
     // The setup popup's parting word, or a one-off notice. A "Settings" tap
     // goes to Settings › Permissions, where everything setup skipped can be
     // fixed — or, for news, to Settings itself.
@@ -280,13 +226,7 @@ fun MycoApp(
         // Last: clearing it changes this effect's key and cancels it.
         onSetupNoticeShown()
     }
-    val pickFilesForPeer = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) pickedShareUris = uris else sendFileNpub = null
-    }
     // Keep the navigation host and all transient surfaces in one app-root layer.
-    // File offers must not be owned by any one selected destination.
     Box(Modifier.fillMaxSize()) {
         androidx.compose.runtime.CompositionLocalProvider(
             LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
@@ -441,31 +381,12 @@ fun MycoApp(
                         onReplayIntro = onReplayIntro,
                     )
                 }
-                composable("dev") { DevScreen(client) }
+                composable("dev") { DevScreen() }
             }
         }
         } // Row
     }
         } // CompositionLocalProvider(LocalMeshControl)
-
-        // The incoming-offer prompt is the one piece of transfer UI that has to
-        // sit above everything: it interrupts. Progress lives where the user
-        // went looking for it — the share sheet.
-        FileOfferLayer(
-            offer = state.fileTransfers.firstOrNull {
-                it.direction == "incoming" &&
-                    it.status == "waiting_user" &&
-                    it.id !in dismissedFileOffers
-            },
-            onAccept = {
-                dismissedFileOffers = dismissedFileOffers + it.id
-                publish(client.dispatch(NativeActions.acceptFileTransfer(it.id)))
-            },
-            onDeny = {
-                dismissedFileOffers = dismissedFileOffers + it.id
-                publish(client.dispatch(NativeActions.declineFileTransfer(it.id)))
-            },
-        )
 
     // A hotspot guest started a transfer — pop the AirDrop-style accept/reject
     // dialog wherever in the app you are (their browser is blocked on this
@@ -506,69 +427,6 @@ fun MycoApp(
                 TextButton(onClick = { TransferGate.decide(req.id, false) }) {
                     Text("Decline", color = MaterialTheme.colorScheme.error)
                 }
-            },
-        )
-    }
-
-    // Completed native receives are also app-root UI. This remains visible when
-    // the user accepted from Apps, Neighbors, Settings, or Dev; it is not attached
-    // to any one destination.
-    val completedTransfer = receivedFile
-    val completedUri = receivedFileUri
-    if (completedTransfer != null && completedUri != null) {
-        ReceivedFileDialog(
-            transfer = completedTransfer,
-            receivedUri = completedUri,
-            onOpenWithMycoApp = { showMycoAppPicker = true },
-            onOpenWithAnotherApp = { onOpenReceivedFile(completedTransfer, completedUri) },
-            onDismiss = onDismissReceivedFile,
-        )
-    }
-    if (showMycoAppPicker && completedTransfer != null) {
-        MycoAppPickerDialog(
-            transfer = completedTransfer,
-            apps = state.sites,
-            onDismiss = { showMycoAppPicker = false },
-        )
-    }
-
-    // Files come either from Android's Sharesheet (peer chosen afterwards) or from
-    // a neighbor (peer chosen first, files picked here). Both end in the same
-    // sheet; the second just arrives with a preselection.
-    val shareUris = externalShareUris.ifEmpty { pickedShareUris }
-    var peerShareVisible by remember { mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(shareUris) {
-        if (shareUris.isNotEmpty()) peerShareVisible = true
-    }
-    if (peerShareVisible && shareUris.isNotEmpty()) {
-        PeerShareSheet(
-            state = state,
-            uris = shareUris,
-            // Only if they are still there: a contact can drop off the mesh between
-            // the tap and the picker closing, and a preselection the picker then
-            // hides under "offline" is a selection the user cannot see.
-            preselectedNpub = sendFileNpub?.takeIf {
-                externalShareUris.isEmpty() &&
-                    (it in state.reachableNpubs || state.blePeers.any { p -> p.npub == it && p.connected })
-            },
-            onDismiss = {
-                peerShareVisible = false
-                // Closing the sheet acknowledges the outcomes it was showing.
-                // Cancelled and declined are decisions the user watched happen,
-                // so they go with it rather than queueing up in the share sheet
-                // waiting to be dismissed a second time. `failed` stays — that
-                // one is news, and may never have been on screen at all.
-                state.fileTransfers
-                    .filter { it.status == "cancelled" || it.status == "denied" }
-                    .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
-                publish(client.state())
-                pickedShareUris = emptyList()
-                sendFileNpub = null
-                onExternalShareDismissed()
-            },
-            onShare = { peer -> onShareToPeer(shareUris, peer) },
-            onCancelTransfer = {
-                publish(client.dispatch(NativeActions.cancelFileTransfer(it.id)))
             },
         )
     }

@@ -37,7 +37,6 @@ cited inline.
 | `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | **Read** — an app author's list rides along with its manifest lookup, a `blossom:` URL's `as=` author's is fetched when missing; kept in the local relay, tried after a manifest's `server` tags and before the defaults. The user's own drives NAP-UPLOAD |
 | `37516` | neighborhood link offer (placeholder number) | Param-replaceable (`d` = `offer`) | neighborhoods (layer 2) | **Published and read** — signed by a link key, exchanged with one linked peer over the link service `:4873`, never stored in the relay |
 | `27235` | NIP-98 HTTP auth | Regular | neighborhoods (layer 2) | **Published and read** — signed by a link key on every link service request after setup; never stored |
-| `14` in `13` in `1059` | NIP-17 rumor, NIP-59 seal and gift wrap | Regular | file sharing (layer 2) | **Published and read** — file offers and control messages between app peers, gift-wrapped to the device key |
 | `24242` | Blossom auth | Regular | blob store | **Published** — authorises uploads to a custom Blossom server |
 | `37195` | FIPS overlay advert | Param-replaceable (`d`) | FIPS discovery | Future public peering |
 | `21059` | FIPS traversal signaling | Ephemeral | FIPS discovery | Future public peering |
@@ -154,7 +153,9 @@ not-found page is the blob mapped at `/404.html`.
 ```
 
 These run against the **local** relay first (fast path) and, on a miss, against
-the source peer's relay over `.fips` (`ws://<npub>.fips:4870`). See
+the neighborhoods that get the matching extension — a linked peer's scoped
+relay over `.fips` (`ws://<npub>.fips:4873/nh/{pk}/relay?n=…`) — then public
+relays. See
 [../design/nsite/nsite-layer.md §5](../design/nsite/nsite-layer.md).
 
 > **Set reconciliation.** Between two connected relays, Myco reconciles the
@@ -229,8 +230,8 @@ unit.
 > ([BUD-03](https://github.com/hzrd149/blossom/blob/master/buds/03.md) user
 > Blossom servers) to find public sources, exactly as the Go reference does
 > (`service.go`). On the
-> **offline** BLE path these are irrelevant — the source is a single reachable
-> peer's `.fips` services.
+> **offline** path these are irrelevant — the sources are the neighborhoods
+> getting the matching extension.
 
 ---
 
@@ -240,55 +241,54 @@ There is **no** net-new announcement kind. The hybrid propagation default —
 **announce widely, pull content on demand** — is built entirely on the
 author-signed manifests above:
 
-- **The flooded unit is the author-signed manifest itself** (kind `15128` /
+- **The shared unit is the author-signed manifest itself** (kind `15128` /
   `35128`). It is small, self-authenticating (the author's signature travels
   with it), and re-emitted **unmodified** by relays — replicating an existing
   author-signed event relay-to-relay is ordinary relay behaviour, **not**
   authoring. Because the bytes are unchanged, the author's signature stays
   valid. A holder re-emitting an author's manifest needs **no new kind and no
   holder signature**.
-- **"Announce widely"** = forward those manifest events between app peers'
-  relays (interest-checked; see [nsite-updates.md §4](../design/nsite/nsite-updates.md)), with a hop budget of **TTL = 5** (a project default).
-- **"Pull on demand"** = fetch the large content-addressed **blobs** (by sha256
-  from Blossom) only when a site is actually opened — the manifest tells you
+- **"Announce widely"** = share those manifest events into neighborhoods
+  with the `nsite-updates` / `napplet-updates` extension on, travelling the
+  neighborhood's publish hops
+  ([extensions.md](../design/nap-neighbor/extensions.md)).
+- **"Pull on demand"** = fetch the large content-addressed **blobs** (by sha256,
+  from the neighborhood's links, then public Blossom) only when a site is
+  actually opened — the manifest tells you
   *what* a site is; the blobs are deferred until needed.
 - **Discovery / "nsites around me"** (not built today; the model the AppStore
   napplet builds on, roadmap N5) = simply the set of manifests you have
-  *received* (via flood) or *queried* from reachable relays. No separate "I have
+  *received* in a neighborhood or *queried* from reachable relays. No separate "I have
   it" event exists; possession of the manifest is the advertisement.
 
-Loop-suppression and dedup during the flood are done over the **manifest events
-themselves** — 16-byte SHA-256 IDs in a per-node seen-set — while steady-state
-catch-up between connected relays uses **negentropy (NIP-77)** reconciliation so a
-peer offers only manifests you lack (events only; blobs stay pull-by-sha256). TTL=5,
-that dedup story, transitive peer discovery, and the privacy question of *which
-manifests you choose to replicate* are all detailed in
+Dedup is per neighborhood: each event id is passed on once
+([data-plane.md](../design/nap-neighbor/data-plane.md)). The privacy question of
+*which manifests you choose to replicate* is in
 [../design/nsite/propagation.md](../design/nsite/propagation.md).
 
 ---
 
-## Neighborhood and file-sharing kinds (layer 2)
+## Neighborhood kinds (layer 2)
 
 Layer 2 has its own small vocabulary, carried point-to-point, never passed on:
 
 | Kind | Name | Signed by | Carried how |
 | --- | --- | --- | --- |
-| `37516` | link offer — the endpoints one side serves on a link (`link`, `relay`, `blossom`, with read/write/own flags), optional `name` tag | the link key | in the `/setup` exchange, then `GET <npub>.fips:4873/nh/{pk}/offer` |
+| `37516` | link offer — the endpoints one side serves on a link (`link`, `relay`, with read/write/own flags), optional `name` tag | the link key | in the `/setup` exchange, then `GET <npub>.fips:4873/nh/{pk}/offer` |
 | `27235` | NIP-98 auth for a link service request | the link key | `Authorization` header on `/nh/{pk}/…` |
-| `1059` (wrapping `13` wrapping `14`) | file offer / accept / decline / cancel / done, as NIP-17 private messages | the device key | an app peer's relay over the mesh; the wrap keeps them unreadable to anyone else, and the hub handles them without passing them on |
 
 `37516` is a placeholder until the neighborhood protocol has a number.
 Kinds `9101` / `9102` / `9103` (pair request / accept / remove) are gone with
 pairing.
 
-Design: [nap-neighbor/](../design/nap-neighbor/README.md), `file_transfer.rs`.
+Design: [nap-neighbor/](../design/nap-neighbor/README.md).
 
 ## Napplet-published kinds (layer 1)
 
 Signed by the **user key**, when a guest is created (first launch, or "Create a
 new identity"): a `0` guest profile named `Myco Guest <5 digits>`, with a
 `picture` on public Blossom, and a `10002` relay list naming the configured
-public relays — never this phone's mesh relay, which would tie the user to the
+public relays — never this phone's own relay, which would tie the user to the
 device — and a `3` follow list of three default accounts (`GUEST_FOLLOWS` in
 `account.rs`). The follow list is signed only when a guest is created; an
 existing or imported identity's is never written. Both go to the local relay at once and to the public relays when online.
@@ -339,9 +339,9 @@ and `../../reference/fips/docs/design/fips-nostr-discovery.md`.
 
 - [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md) — how the manifest kinds
   are fetched, verified, and served.
-- [../design/nsite/propagation.md](../design/nsite/propagation.md) — flooding the
-  author-signed manifests and device-to-device hopping.
-- [./ports.md](./ports.md) — the localhost ports the relay/Blossom listen on.
+- [../design/nsite/propagation.md](../design/nsite/propagation.md) — how
+  author-signed manifests travel between devices.
+- [./ports.md](./ports.md) — the ports Myco listens on.
 - the nsite-deck reference (`docs/nsite-protocol.md`)
   — NIP-5A, the authoritative nsite manifest spec.
 - [../../reference/fips/docs/reference/nostr-events.md](../../reference/fips/docs/reference/nostr-events.md)

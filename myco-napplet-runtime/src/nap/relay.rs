@@ -489,8 +489,7 @@ pub(crate) fn carries_signed_event(message: &Envelope) -> bool {
 /// else's words. The kinds refused under the grant stay refused either way.
 ///
 /// A NIP-70 protected event (`["-"]`) is only ever **kept** as it is, never
-/// sent on: its author asked that no one but they publish it to a relay, and
-/// app peers' relays are relays. `outward` says whether this publish sends.
+/// sent on: its author asked that no one but they publish it to a relay. `outward` says whether this publish sends.
 ///
 /// Returns the event and whether it arrived signed.
 pub(crate) async fn signed_or_template(

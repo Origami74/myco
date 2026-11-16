@@ -27,8 +27,8 @@ Two confusions the layering exists to prevent:
 
 - **A FIPS peer is not a link.** Layer 4 connects to any FIPS node in range
   and calls it a *peer*. Layer 2 sets up a *link* between two people, from a
-  one-time invitation. Only linked devices sharing an extension with us
-  (*app peers*) may read your relay and Blossom over the mesh. A FIPS peer can
+  one-time invitation. A linked peer reaches only the neighborhoods you share
+  with it; nobody reaches your relay or Blossom over the mesh. A FIPS peer can
   be connected and a stranger; a linked person can be out of range. See
   [Neighborhoods and links](#layer-2--neighborhoods-and-links).
 - **The device key is not the user key.** Layer 4's identity is the phone's;
@@ -92,36 +92,33 @@ other links in that neighborhood, within local limits.
 The link service runs on the auth plane, `<npub>.fips:4873/nh/…`. It is the
 only port a stranger can reach.
 
-An **app peer** is a linked device sharing an extension with us ([extensions.md](extensions.md)) (the
-default). App peers are who Myco fetches apps, updates and the release APK
-from, and the only devices the mesh relay and Blossom admit (the **app peer
-gate**).
+Apps, updates and the release APK travel through neighborhoods too, as
+**extensions** (`napplet-updates`, `nsite-updates`, `myco-release`), each with
+a Get and a Share switch per neighborhood
+([extensions.md](../nap-neighbor/extensions.md)).
 
 **Not the same as a FIPS peer.** FIPS connects to whatever compatible node is
 in range; that is transport, and it carries no trust. A link is a decision two
-people make. The docs say *peer* for layer 4 and *link* or *app peer* for
-layer 2. Design: [nap-neighbor/](../nap-neighbor/README.md).
+people make. The docs say *peer* for layer 4 and *link* for layer 2. Design: [nap-neighbor/](../nap-neighbor/README.md).
 
 ---
 
 ## Layer 3 — Relay and Blossom
 
-Every phone runs **its own** Nostr relay (`ws://localhost:4870`) and Blossom
-store (`http://localhost:24243`), in Rust, in-process. No external service is
+Every phone runs **its own** Nostr relay (`ws://localhost:4870`, loopback only)
+and Blossom store (in-process, no port), in Rust. No external service is
 required. Everything an app reads or writes rests here: manifests, blobs, chat,
 napplet events, relay lists.
 
-Both are reachable by app peers over the mesh at `<npub>.fips:4870` and
-`<npub>.fips:24243` — the same numbers, so a peer dialling your `.fips` name
-lands on your loopback service. Neighborhood traffic does not use them: it has
-its own scoped store, reached through the link service on `:4873`
+Neither is reachable from other phones. Neighborhood traffic has its own
+scoped store, reached through the link service on `:4873`
 ([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md)). What does not change is that a phone is a **holder**: a device that has an
 author's signed events and blobs and re-serves them. A holder is not the
 author; re-serving signed events is ordinary relay behaviour.
 
-Between app peers, nsite and napplet manifests are forwarded so updates
-spread ([../nsite/nsite-updates.md](../nsite/nsite-updates.md) §4). Other events
-travel only in neighborhoods.
+Nsite and napplet updates spread through neighborhoods as extensions
+([extensions.md](../nap-neighbor/extensions.md)). Nothing travels between
+phones outside a neighborhood.
 
 ---
 
@@ -177,14 +174,15 @@ identity of either endpoint. (See
 
 - **`.fips`** is the transport namespace: `<npub>.fips` → that phone's
   `fd00::` address (AAAA), answered by the node's own resolver through the TUN.
-  IPv6 only, mesh only. This is what **sync** talks to — relay and Blossom
-  connections to app peers, and the link service. The WebView never resolves it.
+  IPv6 only, mesh only. This is what **sync** talks to — the link service on
+  linked peers. The WebView never resolves it.
 - **`.localhost`** is the presentation namespace: what the WebView loads, served
   in-process by the gateway. It is not DNS at all.
 
 **The site you want and the peer you fetch it from are different keys.** A site
-is named by its *author*; you fetch it from a *holder*, at `<npub_holder>.fips`,
-with a query filtered on the author: `{kinds:[35128], authors:[<author>]}`.
+is named by its *author*; you fetch it from a *holder* — a linked peer in a
+neighborhood, at `<npub_holder>.fips:4873` — with a query filtered on the
+author: `{kinds:[35128], authors:[<author>]}`.
 
 ---
 
@@ -201,8 +199,8 @@ propagation. Two mechanisms, kept apart:
   seen a site becomes an independent holder. The data is self-authenticating,
   so any source is trustworthy regardless of who relays it.
 
-Propagation is **hybrid**: what floods is the author-signed manifest, small and
-re-emitted unmodified (3 hops); the large blobs are pulled on demand when a site
+Propagation is **hybrid**: what travels is the author-signed manifest, small and
+re-emitted unmodified, through neighborhoods (their publish hops); the large blobs are pulled on demand when a site
 is opened. Design: [../nsite/propagation.md](../nsite/propagation.md).
 
 ---
@@ -224,20 +222,19 @@ is opened. Design: [../nsite/propagation.md](../nsite/propagation.md).
 | **link key** | a keypair made for one link; neither the device key nor the user key |
 | **invitation** | a one-time `myco://link/…` payload (QR, share link, NFC) that sets up a link |
 | **offer** | a link-key-signed event (kind `37516`) listing what a device serves on a link |
-| **app peer** | a linked device sharing an extension with us; Myco fetches apps and updates from it |
-| **app peer gate** | the check on every mesh connection to the relay or Blossom: app peer, or refused |
+| **extension** | something a device shares proactively in a neighborhood (`napplet-updates`, `nsite-updates`, `myco-release`), with a Get and a Share switch |
 | **peer** | a FIPS node this phone has a transport link to; says nothing about trust |
 | **Circle, pairing** | removed; replaced by neighborhoods and links |
-| **holder** | a phone that has an author's events and blobs and re-serves them; reached at `<npub_holder>.fips` |
+| **holder** | a phone that has an author's events and blobs and re-serves them; for another phone, a linked peer in a neighborhood |
 | **device key** | this phone's keypair: mesh identity, FIPS link auth, `<npub>.fips` |
 | **user key** | the person's keypair for napplets: what they publish as |
 | **author key** | an app author's external key: the URL host and the `authors` filter; never held |
 | **node_addr** | `SHA256(npub)[0:16]`; the FIPS routing id |
 | **fd00:: IPv6** | `fd ‖ node_addr[0:15]`; the ULA overlay address via the TUN |
-| **`.fips`** | DNS → `fd00::` (AAAA); mesh sync only |
+| **`.fips`** | DNS → `fd00::` (AAAA); the link service only |
 | **`.localhost`** | what the WebView loads; answered in-process, not DNS |
-| **embedded relay** | in-process NIP-01 relay, `ws://localhost:4870`; `<npub>.fips:4870` to app peers |
-| **embedded Blossom** | in-process blob store, `http://localhost:24243`; `<npub>.fips:24243` to app peers |
+| **embedded relay** | in-process NIP-01 relay, `ws://localhost:4870`; loopback only |
+| **embedded Blossom** | in-process blob store; not served on any port |
 | **gateway** | the in-process resolver that answers a WebView's requests from relay + Blossom |
 | **link service** | the neighborhood protocol over HTTP, `/nh/{pk}/…` on `:4873` |
 | **lane** | one transport under FIPS: `ble`, `aware`, `udp` (LAN), `tcp` |

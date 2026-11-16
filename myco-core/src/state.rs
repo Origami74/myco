@@ -58,16 +58,8 @@ pub struct AppState {
     pub napplet_domains: Vec<String>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
-    /// App peers: linked devices sharing an extension with us, which this
-    /// device fetches apps and updates from and serves its own to.
-    pub app_peers: Vec<crate::content::AppPeer>,
-    /// App peers we currently hold a live mesh relay connection to. This
-    /// is the honest "reachable" signal: it means bytes are flowing to them
-    /// right now, whether they are a direct neighbour or many hops away. The
-    /// direct-peer table ([`AppState::ble_peers`]) is *not* a substitute — it
-    /// only ever names adjacent nodes.
-    pub reachable_npubs: Vec<String>,
-    /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
+    /// "Mesh-only": the IP online fallback is disabled (apps come only from
+    /// this device and its neighborhoods).
     pub offline_only: bool,
     /// Public internet mesh nodes (N10): the opt-in, why it is idle if it is,
     /// and every node heard of — recommended ones first — with its link state.
@@ -86,17 +78,12 @@ pub struct AppState {
     pub pending_blossom_url: String,
     /// Status of the latest nsite update check (feedback for "Check for updates").
     pub update_check: crate::content::UpdateCheckView,
-    /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).
-    pub speedtest: SpeedtestView,
     /// Neighborhoods and links (NAP-NEIGHBOR).
     pub neighborhoods: crate::neighbor::view::NeighborhoodsView,
-    /// Native app peer file transfers, including incoming offers awaiting
-    /// the user's accept/deny decision.
-    pub file_transfers: Vec<crate::file_transfer::FileTransferView>,
     /// The merged per-identity peer diagnostics view (DIAG-01/03/04/06):
     /// one row per known peer, covering every state from `connected` through
     /// `unreachable`, built once here rather than re-derived client-side from
-    /// `ble_peers` / `ble_adverts` / `app_peers` / `reachable_npubs`.
+    /// `ble_peers` / `ble_adverts` and the links' names.
     pub peers: Vec<PeerDiagnosticView>,
 }
 
@@ -117,11 +104,10 @@ pub struct PeerDiagnosticView {
     /// Raw BLE address (`adapter/AA:BB:..`); empty unless this row was seen or
     /// attributed as a scan advert.
     pub ble_addr: String,
-    /// Best-known display label (app peer name or peer-advertised display name),
+    /// Best-known display label (fips display name, else the link name),
     /// truncated to at most 64 characters before it crosses the FFI.
     pub name: String,
-    /// One of `connected`, `reachable-via-relay`, `seen-unidentified`,
-    /// `app-peer-offline`, `unreachable`.
+    /// One of `connected`, `seen-unidentified`, `unreachable`.
     pub state: String,
     /// Transport currently carrying this row, when connected (`ble`, `aware`,
     /// `usb`, `udp`, `tcp`); empty when not connected.
@@ -160,8 +146,9 @@ pub struct PeerDiagnosticView {
     /// Advertised listener PSM from the most recent scan advert attributed to
     /// this row; `0` when none.
     pub psm: u16,
-    /// Whether this npub is an app peer.
-    pub app_peer: bool,
+    /// The name this peer gave in its neighborhood invitation; empty when
+    /// it is not linked or gave none. Signed, unlike `advertised_name`.
+    pub link_name: String,
     /// BLE role this device chose for the most recent recorded attempt against
     /// this peer: `central`, `peripheral`, or empty when nothing has been
     /// recorded. Never a guess — an empty string means "no attempt recorded",
@@ -257,28 +244,6 @@ pub struct PeerAttemptView {
     /// One of `connected`, `connect-timeout`, `connect-error`,
     /// `pubkey-exchange-failed`, `lost-tiebreaker`, `pool-rejected`.
     pub outcome: String,
-}
-
-/// Outcome of a peer speedtest: upload + download throughput measured by PUTting
-/// a fresh payload to the peer's mesh Blossom and GETting it back. `generation`
-/// bumps on each completion so the UI can tell a fresh result from a stale one.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeedtestView {
-    /// A run is in flight (the UI shows a spinner / disables the button).
-    pub running: bool,
-    /// The peer the latest run targeted (npub), for the result label.
-    pub peer_npub: String,
-    /// Payload size moved each way, in bytes.
-    pub bytes: u64,
-    /// Upload (this device → peer) throughput, megabits per second.
-    pub up_mbps: f64,
-    /// Download (peer → this device) throughput, megabits per second.
-    pub down_mbps: f64,
-    /// Non-empty if the last run failed (e.g. peer unreachable / not an app peer).
-    pub error: String,
-    /// Bumped on each completed run (success or failure).
-    pub generation: u64,
 }
 
 /// The device identity, in the derived forms the UI shows.

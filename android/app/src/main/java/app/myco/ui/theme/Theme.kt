@@ -29,7 +29,6 @@ val StatusConnected = Color(0xFF22C55E)
 /// both themes.
 val TransportBluetooth = Color(0xFF0082FC)
 val TransportNetwork = Color(0xFF059669)
-val StatusReachable = Color(0xFF14B8A6)
 /// One peer: the mesh works but has no redundancy — lose that peer and you are
 /// alone, so it reads as a caution rather than a fault.
 val StatusThin = Color(0xFFF59E0B)

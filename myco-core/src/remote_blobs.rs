@@ -15,8 +15,7 @@
 //! one is a cost decision, and the cost is worth paying.
 //!
 //! Uploads are signed with the device key as a kind-24242 authorization event
-//! (BUD-01). The embedded server does not ask for one, because the app peer gate
-//! covers it; a public server will.
+//! (BUD-01). A public server will ask for one.
 //!
 //! See `reference/thinning-custom-relay.md` (D9).
 

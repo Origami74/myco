@@ -12,15 +12,12 @@
 //!
 //! Every `blossom:` ask goes to this device's Blossom store before anywhere
 //! else. A miss goes through the [`BlobFetcher`](crate::seams::BlobFetcher) —
-//! app peers' stores over the mesh, the public servers when reachable — and
-//! what comes back is **stored** before it is handed over. The second ask,
-//! from this or any napplet, is local; and a picture one phone fetched is a
-//! picture the whole room can now get over the mesh.
-//!
-//! That last sentence is also a privacy question, and an open one: the ask
-//! tells every app peer what you are looking at, and the keep makes you
-//! a host of it. See `docs/design/napplet/napplet-runtime.md` §7.11 before
-//! changing the fetch order or the keep rule.
+//! the public servers when reachable — and what comes back is **stored**
+//! before it is handed over. The second ask, from this or any napplet, is
+//! local. Other phones are not asked: a neighborhood's blobs are reached
+//! through its `neighborhood://` address. See
+//! `docs/design/napplet/napplet-runtime.md` §7.11 before changing the fetch
+//! order or the keep rule.
 //!
 //! ## `https:` — the internet, under policy
 //!
@@ -232,8 +229,7 @@ fn record(session: &Session, sha: &str) {
 }
 
 /// `resource.keep` — keep a blob this napplet was delivered in this device's
-/// own Blossom, where nothing evicts it and app peers can fetch it
-/// (NAP-LOCAL). Nothing is sent anywhere. Takes `url` (`blossom:sha256:…`) or
+/// own Blossom, where nothing evicts it (NAP-LOCAL). Nothing is sent anywhere. Takes `url` (`blossom:sha256:…`) or
 /// a bare `sha256`.
 async fn keep(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let sha = match (

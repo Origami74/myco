@@ -26,8 +26,8 @@ the same global network through it, whether or not they switched this on.
 
 - They become **routable from the internet** via this phone, and their mesh
   addresses spread in the global bloom filters. Anyone who knows one of their
-  npubs can tell it is reachable. The app peer gate still keeps their relay
-  and Blossom closed, and their link service refuses anyone without a link.
+  npubs can tell it is reachable. Their relay and Blossom are not on the
+  mesh at all, and their link service refuses anyone without a link.
 - The local spanning tree **joins the global one**. Its root becomes the
   global smallest `node_addr`, and every time this phone's uplink drops or
   returns, the local segment re-converges.
@@ -172,9 +172,8 @@ dial younger than 30 s counts toward the two links.
 
 ### When it stops
 
-- **Switch off, or mesh-only on**: every public node Myco dialled that is
-  not an app peer is disconnected (`disconnect` over the control socket).
-  An app peer who happens to run a public node keeps their link.
+- **Switch off, or mesh-only on**: every public node Myco dialled is
+  disconnected (`disconnect` over the control socket).
 - **Only Myco's own dials** are ever dropped. A peer that also advertises
   publicly but reached the phone another way (a LAN daemon, a radio) is left
   alone, on or off.
@@ -190,7 +189,7 @@ dial younger than 30 s counts toward the two links.
   dropping them would cost a handshake each to come back, and staying
   reachable in a pocket is the point.
 - A public node never replaces a radio path. It is a different peer from any
-  app peer, so an app peer reachable over BLE, Aware or the LAN keeps that
+  phone nearby, so a peer reachable over BLE, Aware or the LAN keeps that
   direct link.
 
 ## Diagnostics
@@ -216,8 +215,8 @@ in the peer list like any other direct peer.
 
 Host: `cargo test -p myco-core public_node` covers parsing and validation,
 selection deltas, the dial plan (target,
-backoff, background, mesh-only, breaker, switch-off, deselection, app peer
-exemption) and persistence.
+backoff, background, mesh-only, breaker, switch-off, deselection) and
+persistence.
 
 On device (the N10 exit criterion), with two phones that share a neighborhood, on different
 networks and no radio path between them (one on Wi-Fi, one on cellular,

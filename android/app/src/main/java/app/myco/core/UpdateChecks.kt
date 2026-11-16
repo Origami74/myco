@@ -32,7 +32,7 @@ object UpdateChecks {
 
     /**
      * The periodic interval. nsite and napplet updates are rare, deliberate
-     * publishes, and an app peer often forwards a new manifest before any
+     * publishes, and a neighborhood often shares a new manifest before any
      * check would find it; four background checks a day keep a long-running
      * process current without polling public relays from a phone in a pocket.
      */
@@ -41,7 +41,7 @@ object UpdateChecks {
     /**
      * How long after coming to the foreground the check is asked for. Lets the
      * mesh reconnect first — a check at the instant of a cold start finds no
-     * app peers to ask, and would hold the throttle shut for the next half
+     * neighbors to ask, and would hold the throttle shut for the next half
      * hour — and skips app switches that leave again straight away.
      */
     private const val FOREGROUND_DELAY_MS = 20_000L

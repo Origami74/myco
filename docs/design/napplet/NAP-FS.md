@@ -150,8 +150,9 @@ later. Not wired in this change:
   something that sends it on.
 - **NAP-UPLOAD** could accept a picked path instead of a `Blob`, so a large
   file never crosses the JSON channel as base64.
-- **Mesh file sharing** (`myco-core/src/file_transfer.rs`) could offer a
-  picked file to a peer the same way.
+- **Sending files between phones**, removed from Myco itself, is to return
+  as a napplet on NAP-FS and NAP-NEIGHBOR, offering a picked file to a
+  neighborhood the same way.
 
 ## Not built
 

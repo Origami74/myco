@@ -13,8 +13,6 @@
 //!   carried over links.
 //! - [`link`] — links: link keys, the one-time-secret setup, signed offers,
 //!   NIP-98 checks, `links.json`.
-//! - [`apps`] — app peers: linked devices sharing an extension with us,
-//!   which Myco fetches apps and updates from.
 //! - [`extensions`] — what a device shares proactively per neighborhood
 //!   (napplet updates, nsite updates, the Myco release).
 //! - [`updates`] — the update extensions: pushing a new version's manifest
@@ -24,7 +22,6 @@
 //!
 //! Neighborhoods are carried over links only.
 
-pub mod apps;
 pub mod data;
 pub mod extensions;
 pub mod host;

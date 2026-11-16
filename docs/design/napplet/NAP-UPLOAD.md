@@ -79,9 +79,10 @@ store `resource.keep` writes to). Kept means not cache: nothing evicts it.
   disk does not undo the upload.
 - **`blossom` that no server could take** (offline-only, no internet, no
   server, every one refused): `failed`, and a copy is kept anyway, for a
-  retry or an app peer. The napplet is not told: it can't share that copy
-  publicly. A napplet that wants it shared on the mesh uploads again with
-  `blossom-local` (the copy already here makes that free).
+  retry. The napplet is not told: it can't share that copy publicly. A
+  napplet that wants it shared with people nearby uploads it again
+  with a `neighborhood:` address as `destination` (the copy already here
+  makes that free).
 - **An upload that never ran keeps nothing:** unsigned for any reason (the
   signer said no, never answered, or isn't there) or refused because another
   upload is running. The napplet gets `failed` (`cancelled` for a "no") and
@@ -91,13 +92,12 @@ More:
 
 - It is the file exactly as the napplet sent it, so the hash is the same
   here and on the servers.
-- App peers ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)) can
-  fetch it by hash over the mesh, from `:24243`, the Blossom server that
-  admits only them. That server answers from the kept store and the cache
-  together.
+- Other phones cannot fetch it from this device's Blossom: that store is
+  served on no port. To share it, upload into a neighborhood, where linked
+  peers fetch it over the link service
+  ([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md#blobs)).
 - With a custom blob store set in Settings, "this device's Blossom" is that
-  store, and the phone runs no mesh Blossom server. Peers then cannot fetch
-  it from this phone.
+  store.
 - Kept without a server is always written to the kept store, even when the
   cache already has the file, so a `blossom:` URL can't be evicted. A full
   disk fails a `blossom-local` upload with `upload failed`.
@@ -265,8 +265,8 @@ Per napplet, the spec's three policies are:
 - Plain spec fields. `complete` because this device's store confirmed the
   bytes.
 - `url` is `blossom:sha256:<hex>`, which NAP-RESOURCE resolves (this device
-  first, then reachable app peers). It is not a link anyone on the web can open,
-  and few Nostr clients read `blossom:`, so it is for the mesh, not for a
+  first, then the internet). It is not a link anyone on the web can open,
+  and few Nostr clients read `blossom:`, so it is for this device, not for a
   public note.
 - No `fallbackUrls`. `dimensions` as for `blossom`.
 - Past the napplet's budget (see Budget): `failed`, `quota exceeded`.

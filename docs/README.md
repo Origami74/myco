@@ -47,8 +47,9 @@ The other person taps **Join** and:
 - opens the link you sent.
 
 You now share that neighborhood, and a link between your two phones carries
-it. Apps can flow in either direction between you while the neighborhood's
-**Apps** switch is on. Your name travels in the invitation only, never over
+it. Apps and updates can flow in either direction between you while the
+neighborhood's **Get** and **Share** switches under **Updates** are on (the
+default). Your name travels in the invitation only, never over
 Bluetooth. A neighborhood has no members list and no admin: posts travel link
 to link, so it is not private.
 
@@ -61,18 +62,18 @@ Four layers, top to bottom. Each one only knows the one below it.
 | Layer | What it is | Where |
 | --- | --- | --- |
 | **1. Apps** — nsites and napplets | The manifest and file model both share; the gateway that serves an nsite; the runtime that hosts a napplet and its capabilities (NAPs). | `nsite-deck`, `myco-napplet-runtime`, `NsiteActivity`, `NappletActivity` |
-| **2. Neighborhoods and links** | Who you share with. A link is set up on purpose from a one-time invitation, with its own link key; it carries neighborhoods — propagation channels with no members — and posts travel link to link. Linked devices sharing an update extension with you are *app peers*: the only devices that may read your relay and store or send you apps. | `myco-core/src/neighbor/`, `auth_service.rs` (the link service), `nap/neighbor/`, Android `neighbor/`, `nfc/`, `share/` |
-| **3. Relay and Blossom** | Your phone's own Nostr relay and blob store. Every app's data rests here; app peers sync from here and forward app updates. | `myco-relay`, `myco-blossom`, `mesh_relay.rs`, `gossip.rs`, `peer_relay.rs` |
+| **2. Neighborhoods and links** | Who you share with. A link is set up on purpose from a one-time invitation, with its own link key; it carries neighborhoods — propagation channels with no members — and posts travel link to link. Apps and updates travel the same way, as *extensions* with a Get and a Share switch per neighborhood. The link service on `:4873` is the only port open to other phones. | `myco-core/src/neighbor/`, `auth_service.rs` (the link service), `nap/neighbor/`, Android `neighbor/`, `nfc/`, `share/` |
+| **3. Relay and Blossom** | Your phone's own Nostr relay and blob store. Every app's data rests here. Loopback and in-process only: other phones never reach them. | `myco-relay`, `myco-blossom`, `myco-cache`, `tiered.rs` |
 | **4. FIPS** | The mesh. Encrypted links between phones over BLE, Wi-Fi Aware, LAN or the internet; IPv6 addresses derived from device keys; `<npub>.fips` names. | `reference/fips`, `ble/`, `aware/`, `ap/`, the TUN |
 
 **A link is not a FIPS peer.** Layer 4 will happily hold an encrypted
 connection to any phone running FIPS in range — that is a *peer*, and it says
 nothing about trust. Layer 2's *link* is a Myco decision made by two people:
-sharing an update extension, it is what lets a peer read your relay, pull your apps, and send
-you files. A phone can be a connected FIPS peer and a stranger at the same
-time; the content ports refuse it. A linked person can be out of range; the
-link stays. The docs use *peer* for layer 4 and *link* / *app peer* for layer
-2, and never swap them.
+it is what lets a peer reach the neighborhoods you share with it, and nothing
+else on the phone. A phone can be a connected FIPS peer and a stranger at the
+same time; the link service refuses it. A linked person can be out of range;
+the link stays. The docs use *peer* for layer 4 and *link* for layer 2, and
+never swap them.
 
 **Two keys, plus one per link.** The **device key** is the FIPS mesh key, layer 4's
 identity: the mesh address, the link authentication, the name of this phone's
@@ -103,7 +104,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [app-shell.md](./design/core/app-shell.md) | The launch model: the manager app versus each nsite/napplet as its own full-screen task; intents, Recents, home-screen pins, origin isolation. |
 | [deep-links.md](./design/core/deep-links.md) | `myco://app/<host>/<path>`: a link that names an app *and* a place inside it. |
 | [identity.md](./design/core/identity.md) | The device identity: one key, its derived forms, where it is stored. |
-| [security.md](./design/core/security.md) | Trust model: self-authenticating data, FIPS link crypto, links and the app peer gate, the nsite sandbox, the napplet sandbox and its grants. |
+| [security.md](./design/core/security.md) | Trust model: self-authenticating data, FIPS link crypto, links and what they authorize, the nsite sandbox, the napplet sandbox and its grants. |
 
 #### `nap-neighbor/` — neighborhoods
 
@@ -112,8 +113,8 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [README.md](./design/nap-neighbor/README.md) | Overview: what a neighborhood is, the three keys, files on the device, what the Circle's removal took with it. |
 | [links.md](./design/nap-neighbor/links.md) | Invitations (`myco://link/`), the setup proof, link keys, offers (kind 37516), NIP-98, the link service on `:4873`, presence. |
 | [data-plane.md](./design/nap-neighbor/data-plane.md) | The scoped store and blobs, the scoped relay, publish and subscribe, hops and dedup. |
+| [extensions.md](./design/nap-neighbor/extensions.md) | How apps and updates travel: `napplet-updates`, `nsite-updates`, `myco-release` with Get and Share per neighborhood; where a missing app is fetched from. |
 | [policy.md](./design/nap-neighbor/policy.md) | Per-neighborhood settings: reach presets, blob push hops, extensions. |
-| [app-peers.md](./design/nap-neighbor/app-peers.md) | Myco's own basics (apps, updates, release APK, files) to linked devices sharing an update extension; the `:4870` / `:24243` gate. |
 | [napplet-api.md](./design/nap-neighbor/napplet-api.md) | What NAP-NEIGHBOR gives napplets: `neighborhood://` addresses and how relay, outbox, resource and upload carry them. |
 | [ui.md](./design/nap-neighbor/ui.md) | The Neighbors tab, the neighborhood page, invite and join. |
 
@@ -121,10 +122,10 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 
 | Doc | Description |
 | --- | --- |
-| [nsite-layer.md](./design/nsite/nsite-layer.md) | The embedded relay, Blossom, and in-process gateway; the manifest/URL scheme; resolve→cache→serve; sync from an app peer. |
-| [propagation.md](./design/nsite/propagation.md) | How a site spreads: forward the signed manifest between app peers, pull blobs on demand, dedupe, retain. |
+| [nsite-layer.md](./design/nsite/nsite-layer.md) | The embedded relay, Blossom, and in-process gateway; the manifest/URL scheme; resolve→cache→serve; fetching a missing app. |
+| [propagation.md](./design/nsite/propagation.md) | How a site spreads: share the signed manifest into neighborhoods, pull blobs on demand, dedupe, retain. |
 | [nsite-updates.md](./design/nsite/nsite-updates.md) | How a site gets a new version: discovery, staged download, activation, mesh propagation. |
-| [nsite-permissions.md](./design/nsite/nsite-permissions.md) | Per-peer grants: what an app peer may do to this phone. (Per-app capabilities live in the napplet runtime.) |
+| [nsite-permissions.md](./design/nsite/nsite-permissions.md) | What another phone may do to this one (only the link service), and where per-app capabilities live. |
 
 #### `napplet/` — apps that are programs
 
@@ -155,7 +156,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 
 | Doc | Description |
 | --- | --- |
-| [ports.md](./reference/ports.md) | Relay `4870`, Blossom `24243`, link service `4873`, and how each is or is not exposed over the mesh — the mesh ports are deprecated. |
+| [ports.md](./reference/ports.md) | Relay `4870` (loopback only), link service `4873` (the only port open to other phones), Blossom (no port). |
 | [nostr-kinds.md](./reference/nostr-kinds.md) | Every event kind Myco reads, stores, publishes or replicates. |
 | [settings.md](./reference/settings.md) | What is persisted (`settings.json`, `neighborhoods.json`, `links.json`, …), and what is not. |
 | [ffi-surface.md](./reference/ffi-surface.md) | The Kotlin↔Rust contract: the JSON reducer, every action, the state snapshot, the napplet and radio entry points. |
