@@ -63,7 +63,7 @@ other phone: B joins over the mesh, so it needs a route to A.
 
 B sets up a link with A's link service (`<npubA>.fips:4873`). Both phones now
 list the neighborhood and each other under **People**, by the names from
-Step 1. Leave **Updates** (Get and Share) on for the neighborhood (the default):
+Step 1. Leave both update switches on for the neighborhood (the default):
 Step 5 fetches the app through it.
 
 ## Step 4 — Go fully offline

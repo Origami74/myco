@@ -48,8 +48,8 @@ The other person taps **Join** and:
 
 You now share that neighborhood, and a link between your two phones carries
 it. Apps and updates can flow in either direction between you while the
-neighborhood's **Get** and **Share** switches under **Updates** are on (the
-default). Your name travels in the invitation only, never over
+neighborhood's **Install updates from people here** and **Send my updates
+to people here** switches are on (the default). Your name travels in the invitation only, never over
 Bluetooth. A neighborhood has no members list and no admin: posts travel link
 to link, so it is not private.
 
