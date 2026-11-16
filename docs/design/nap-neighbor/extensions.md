@@ -37,8 +37,9 @@ and of the peers:
   neighborhood's publish hops, and devices in between pass it on by their
   own **pass on** setting ([policy.md](policy.md)), whatever their
   switches.
-- Shown on the neighborhood page under **Updates**: App updates, Site
-  updates and Myco updates, each with a **Get** and a **Share** chip.
+- Shown on the neighborhood page as two switches covering all three
+  kinds at once: **Install updates from people here** (Get) and **Send my
+  updates to people here** (Share). The per-kind setting stays in the core.
 
 ## napplet-updates
 

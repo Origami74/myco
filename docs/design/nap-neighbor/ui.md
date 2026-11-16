@@ -33,7 +33,7 @@ Apps · Neighbors · Settings · Dev.
 - **People** in it.
 - **Posts reach:** Close / Friends of friends / Wide
   ([policy.md](policy.md#reach-presets)).
-- **Updates**: App, Site and Myco updates, each with **Get** and **Share** chips ([extensions.md](extensions.md)).
+- **Install updates from people here** and **Send my updates to people here** switches, for apps, sites and Myco at once ([extensions.md](extensions.md)).
 - **Leave** and **Invite**.
 
 ## Invite

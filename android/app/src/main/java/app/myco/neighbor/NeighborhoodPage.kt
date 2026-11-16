@@ -21,10 +21,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
-import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.filled.Web
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Home
@@ -35,7 +34,6 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -82,7 +80,7 @@ private fun Reach.short(): String = when (this) {
 /**
  * One neighborhood, in the app sheet's style: tile, name and a status line;
  * an icon row (rename, reach, files); the people you're connected with as
- * faces; how far posts go as three icons; which updates are shared here as
+ * faces; how far posts go as three icons; updates in and out as two
  * switches; Leave as a red row; Invite pinned
  * at the bottom. Finer settings open in their own small sheets.
  */
@@ -178,41 +176,26 @@ fun NeighborhoodPage(id: String, state: AppState, client: AppCoreClient, onBack:
                     }
                 }
 
-                // Shared here: updates this phone passes on to the people here.
+                // Updates, both ways, for apps, sites and Myco at once. The core
+                // keeps a setting per kind; these set all three together.
                 Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
                     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        UpdatesSwitch(
+                            icon = Icons.Filled.Download,
+                            title = "Install updates from people here",
+                            on = EXTENSIONS.all { it in n.get },
+                        ) { on -> EXTENSIONS.forEach { client.dispatch(NativeActions.setNeighborhoodExtension(n.id, it, share = false, enabled = on)) } }
+                        UpdatesSwitch(
+                            icon = Icons.Filled.Upload,
+                            title = "Send my updates to people here",
+                            on = EXTENSIONS.all { it in n.share },
+                        ) { on -> EXTENSIONS.forEach { client.dispatch(NativeActions.setNeighborhoodExtension(n.id, it, share = true, enabled = on)) } }
                         Text(
-                            "Updates",
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp),
+                            "Apps, sites and Myco",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 52.dp, bottom = 8.dp),
                         )
-                        EXTENSIONS.forEach { (ext, icon, label) ->
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Spacer(Modifier.width(12.dp))
-                                Text(label, Modifier.weight(1f))
-                                // Getting and sharing are independent: take updates
-                                // without passing yours on, or the other way round.
-                                FilterChip(
-                                    selected = ext in n.get,
-                                    onClick = {
-                                        client.dispatch(NativeActions.setNeighborhoodExtension(n.id, ext, share = false, enabled = ext !in n.get))
-                                    },
-                                    label = { Text("Get") },
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                FilterChip(
-                                    selected = ext in n.share,
-                                    onClick = {
-                                        client.dispatch(NativeActions.setNeighborhoodExtension(n.id, ext, share = true, enabled = ext !in n.share))
-                                    },
-                                    label = { Text("Share") },
-                                )
-                            }
-                        }
                     }
                 }
 
@@ -374,9 +357,19 @@ private fun FilesSheet(n: NeighborhoodsState.Neighborhood, client: AppCoreClient
     }
 }
 
-/** The extensions a neighborhood can share, as the page lists them. */
-private val EXTENSIONS: List<Triple<String, ImageVector, String>> = listOf(
-    Triple("napplet-updates", Icons.Filled.Apps, "App updates"),
-    Triple("nsite-updates", Icons.Filled.Web, "Site updates"),
-    Triple("myco-release", Icons.Filled.SystemUpdate, "Myco updates"),
-)
+/** The update kinds the switches cover: napplets, nsites, Myco itself. */
+private val EXTENSIONS = listOf("napplet-updates", "nsite-updates", "myco-release")
+
+/** One updates switch: icon, a plain sentence, and the switch. */
+@Composable
+private fun UpdatesSwitch(icon: ImageVector, title: String, on: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(12.dp))
+        Text(title, Modifier.weight(1f))
+        Switch(checked = on, onCheckedChange = onChange)
+    }
+}
