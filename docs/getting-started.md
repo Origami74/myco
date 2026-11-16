@@ -48,7 +48,7 @@ code.
 compatible phone in range and calls it a *peer*. A **link** is set up on
 purpose, from a one-time invitation, and carries **neighborhoods**: channels
 ("Household", "Sports club") that posts travel along, link to link. Only
-linked devices in neighborhoods with **Apps** on — *app peers* — read your
+linked devices sharing an update extension with you — *app peers* — read your
 relay and store or get your files. A mesh peer can be a stranger; a linked
 person can be out of range. [nap-neighbor/](design/nap-neighbor/README.md).
 

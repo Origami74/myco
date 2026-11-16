@@ -287,12 +287,15 @@ impl Neighbors {
         });
     }
 
-    /// Turn Apps on or off for a neighborhood: whether Myco fetches apps and
-    /// updates from people here.
-    pub fn set_apps(&self, id: NeighborhoodId, on: bool) {
+    /// Turn an extension on or off for a neighborhood.
+    pub fn set_extension(&self, id: NeighborhoodId, extension: &str, on: bool) {
         self.change(|s| {
             if let Some(r) = s.get_mut(id) {
-                r.policy.apps = on;
+                if on {
+                    r.policy.extensions_off.remove(extension);
+                } else {
+                    r.policy.extensions_off.insert(extension.to_string());
+                }
             }
         });
     }

@@ -83,7 +83,30 @@ impl LinkService {
             write: false,
             own: false,
         });
-        OfferContent { services }
+        OfferContent {
+            services,
+            extensions: self.extensions(pk),
+        }
+    }
+
+    /// Per neighborhood the link with key `pk` carries, our extensions there.
+    fn extensions(&self, pk: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+        let Some(neighbors) = self.neighbors.get() else {
+            return Default::default();
+        };
+        let carried = self
+            .links
+            .all()
+            .into_iter()
+            .find(|l| l.own_pk() == pk)
+            .map(|l| l.neighborhoods)
+            .unwrap_or_default();
+        neighbors
+            .records()
+            .iter()
+            .filter(|r| carried.contains(&r.id))
+            .map(|r| (r.id.to_hex(), super::extensions::ours(r)))
+            .collect()
     }
 
     /// Start a link carrying `neighborhoods`, for a QR or link.

@@ -265,7 +265,7 @@ Read on:
   sends the APK through Quick Share, Bluetooth or a messenger.
 - **Updates:** Myco checks daily for publisher-signed stable releases, including
   while the UI is closed (turn it off in Settings → Software updates). It asks
-  your app peers (people in your neighborhoods with **Apps** on) and
+  your app peers (people sharing an update extension with you) and
   `wss://relay.zapstore.dev`, which sees your IP address and a
   query for Myco releases; no user identity or private signing key is sent. In
   mesh-only mode it asks only your app peers. Every phone keeps the newest signed

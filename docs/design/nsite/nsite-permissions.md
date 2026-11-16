@@ -55,7 +55,7 @@ Links are set up nowhere on the content path: link setup has its own service on
 
 ## 2. Per-peer permissions
 
-Who gets in is the **app peer** set: linked devices in neighborhoods with Apps on
+Who gets in is the **app peer** set: linked devices sharing an extension with us
 ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)), enforced by `AppPeerGate`.
 What an admitted peer may do is six flags (`PeerPerms` in `content.rs`). They are
 not persisted: every app peer gets the defaults, recomputed with the set.

@@ -63,7 +63,7 @@ other phone: B joins over the mesh, so it needs a route to A.
 
 B sets up a link with A's link service (`<npubA>.fips:4873`). Both phones now
 list the neighborhood and each other under **People**, by the names from
-Step 1. Leave **Apps** on for the neighborhood (the default): that makes each
+Step 1. Leave **Share updates** on for the neighborhood (the default): that makes each
 phone an *app peer* of the other, which Step 5 needs.
 
 ## Step 4 — Go fully offline
@@ -109,7 +109,7 @@ relay and Blossom.
 | --- | --- | --- |
 | The other phone missing from the mesh bar | BLE off after airplane mode; phones too far; one phone's radio rejected the L2CAP listener | Toggle Bluetooth on; bring within ~1 m; check the Dev tab's attempt log (`connect-timeout`, `pool-rejected`) |
 | Join fails ("refused" or no answer) | No mesh route to A yet; the invitation expired (15 min) or was already used | Wait for the mesh bar to show A, then make a fresh invitation |
-| Share scanned, but A refuses the pull | Apps is off in every neighborhood the phones share, so B is not an app peer | Turn **Apps** on for the neighborhood on A |
+| Share scanned, but A refuses the pull | Every **Share updates** switch is off in the neighborhoods the phones share, so B is not an app peer | Turn them on for the neighborhood on both phones |
 | Share scanned, ring never fills | No mesh route yet — the link came up after the pull started | Wait for the lane icon, then scan again; the pull retries the holder first |
 | "Couldn't find this app" on a napplet share | Same as above, or the sharer's link dropped mid-fetch | **Try again** on the sheet |
 | App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Permissions** |

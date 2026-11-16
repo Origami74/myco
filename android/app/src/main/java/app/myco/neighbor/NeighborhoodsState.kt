@@ -34,8 +34,8 @@ data class NeighborhoodsState(
         val backlogHops: Int,
         val blobHops: Int,
         val passOn: Boolean = true,
-        /** Fetch and serve apps, updates and files with the people here. */
-        val apps: Boolean = true,
+        /** Extensions on here: `napplet-updates`, `nsite-updates`, `myco-release`. */
+        val extensions: Set<String> = emptySet(),
     )
 
     data class Pending(val id: String, val name: String)
@@ -64,7 +64,9 @@ data class NeighborhoodsState(
                         backlogHops = it.optInt("backlogHops"),
                         blobHops = it.optInt("blobHops"),
                         passOn = it.optBoolean("passOn", true),
-                        apps = it.optBoolean("apps", true),
+                        extensions = it.optJSONArray("extensions")?.let { a ->
+                            (0 until a.length()).map { i -> a.optString(i) }.toSet()
+                        } ?: emptySet(),
                     )
                 },
                 links = o.optJSONArray("links").objects().map { l ->

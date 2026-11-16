@@ -293,7 +293,7 @@ data class RelayBackendHealth(
 )
 
 /**
- * An app peer: a linked device in a neighborhood with Apps on. Myco fetches and
+ * An app peer: a linked device sharing an update extension with us. Myco fetches and
  * serves apps, updates and file transfers with these.
  */
 data class AppPeer(
@@ -356,7 +356,7 @@ data class PeerDiagnostic(
     val srttMs: Double? = null,
     val rssi: Int?,
     val psm: Int,
-    /** A linked neighbor in a neighborhood with Apps on. */
+    /** A linked neighbor sharing an update extension with us. */
     val appPeer: Boolean,
     /** BLE role this device chose on the most recent recorded attempt:
      *  "central" | "peripheral" | "" when nothing has been recorded. Never a guess. */
@@ -1338,9 +1338,13 @@ object NativeActions {
     fun setNeighborhoodBlobHops(neighborhood: String, hops: Int): JSONObject =
         JSONObject().put("type", "set_neighborhood_blob_hops").put("neighborhood", neighborhood).put("hops", hops)
 
-    /** Fetch and serve apps, updates and files with the neighbors in [neighborhood]. */
-    fun setNeighborhoodApps(neighborhood: String, enabled: Boolean): JSONObject =
-        JSONObject().put("type", "set_neighborhood_apps").put("neighborhood", neighborhood).put("enabled", enabled)
+    /** Turn an [extension] (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in [neighborhood]. */
+    fun setNeighborhoodExtension(neighborhood: String, extension: String, enabled: Boolean): JSONObject =
+        JSONObject()
+            .put("type", "set_neighborhood_extension")
+            .put("neighborhood", neighborhood)
+            .put("extension", extension)
+            .put("enabled", enabled)
 
     /** Dev-menu speedtest: round-trip a payload through `npub`'s mesh Blossom. */
     fun speedtestPeer(npub: String): JSONObject =

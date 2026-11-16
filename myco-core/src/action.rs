@@ -262,8 +262,13 @@ pub enum NativeAppAction {
     EndLink { link_id: String },
     /// How far a neighborhood pushes uploaded blobs (0: not at all).
     SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
-    /// Whether Myco fetches apps and updates from a neighborhood's people.
-    SetNeighborhoodApps { neighborhood: String, enabled: bool },
+    /// Turn an extension (`napplet-updates`, `nsite-updates`,
+    /// `myco-release`) on or off in a neighborhood.
+    SetNeighborhoodExtension {
+        neighborhood: String,
+        extension: String,
+        enabled: bool,
+    },
     /// A neighborhood's reach: publish and backlog hops, and whether others'
     /// events are passed on.
     SetNeighborhoodPolicy {

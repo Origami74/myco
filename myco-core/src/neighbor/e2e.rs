@@ -276,3 +276,40 @@ async fn a_blob_outside_the_neighborhood_is_not_served() {
         "only the Club's own blobs cross the Club's link"
     );
 }
+
+/// Fetch the peer's current offer onto `dev`'s only link, as presence does.
+async fn refresh_offer(dev: &Device) -> super::link::Link {
+    let link = dev.svc.links.all().remove(0);
+    let resp = super::service::call(&link, reqwest::Method::GET, "offer", None)
+        .await
+        .unwrap();
+    let offer: nostr::Event = serde_json::from_slice(&resp.bytes().await.unwrap()).unwrap();
+    dev.svc.links.update_offer(&link.id, offer);
+    dev.svc.links.all().remove(0)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extensions_are_shared_when_on_at_both_ends() {
+    use super::extensions::{shared, NAPPLET_UPDATES, NSITE_UPDATES};
+    let (alice, bob, _, _) = linked_club().await;
+    let id = bob.neighbors.records()[0].id;
+
+    let link = refresh_offer(&bob).await;
+    let club = bob.neighbors.records()[0].clone();
+    assert!(shared(&club, &link, id, NAPPLET_UPDATES), "on by default");
+    assert!(shared(&club, &link, id, NSITE_UPDATES));
+
+    // Alice turns nsite updates off in the Club; Bob learns it from her offer.
+    alice.neighbors.set_extension(id, NSITE_UPDATES, false);
+    let link = refresh_offer(&bob).await;
+    assert!(!shared(&club, &link, id, NSITE_UPDATES), "off at her end");
+    assert!(
+        shared(&club, &link, id, NAPPLET_UPDATES),
+        "the rest stay on"
+    );
+
+    // Bob's own switch counts as much as hers.
+    bob.neighbors.set_extension(id, NAPPLET_UPDATES, false);
+    let club = bob.neighbors.records()[0].clone();
+    assert!(!shared(&club, &link, id, NAPPLET_UPDATES), "off at his end");
+}

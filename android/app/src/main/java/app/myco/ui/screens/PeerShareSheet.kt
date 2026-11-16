@@ -63,7 +63,7 @@ import app.myco.ui.transferStage
 /**
  * The in-app destination after someone chooses Myco in Android's Sharesheet.
  * It intentionally shows only app peers: a radio-nearby stranger is not a
- * valid file destination until you share a neighborhood with Apps on.
+ * valid file destination until you share an update extension in a neighborhood.
  *
  * The send never leaves this sheet. Picking a peer swaps the list for that
  * transfer's progress in place, so the whole flow — choose, send, watch, done —
@@ -304,7 +304,7 @@ private fun AppPeerPicker(
                 Text("No neighbors yet", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Invite someone to a neighborhood with Apps on. They will appear here as a share destination.",
+                    "Invite someone to a neighborhood. They will appear here as a share destination.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )

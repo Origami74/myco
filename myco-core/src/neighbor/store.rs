@@ -18,7 +18,7 @@ use super::id::{token, NeighborhoodId};
 pub const FILE: &str = "neighborhoods.json";
 
 /// How far traffic travels, per neighborhood. Myco settings, not NAP input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Policy {
     /// Hops a publish travels.
@@ -32,14 +32,17 @@ pub struct Policy {
     /// the user's own devices.
     #[serde(default)]
     pub blob_hops: u8,
-    /// Whether Myco fetches apps and updates from people here, and serves
-    /// them its own. On by default.
-    #[serde(default = "yes")]
-    pub apps: bool,
+    /// Extensions (see [`super::extensions`]) the user turned off here.
+    /// Every one is on unless listed, including ones a later build adds.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub extensions_off: BTreeSet<String>,
 }
 
-fn yes() -> bool {
-    true
+impl Policy {
+    /// Whether `extension` is on in this neighborhood.
+    pub fn has(&self, extension: &str) -> bool {
+        !self.extensions_off.contains(extension)
+    }
 }
 
 impl Default for Policy {
@@ -49,7 +52,7 @@ impl Default for Policy {
             backlog_hops: 2,
             pass_on: true,
             blob_hops: 0,
-            apps: true,
+            extensions_off: BTreeSet::new(),
         }
     }
 }

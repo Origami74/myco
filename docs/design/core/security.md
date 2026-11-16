@@ -161,7 +161,7 @@ What this means:
   write the neighborhoods both sides agreed to on that link, through the
   scoped relay. Nothing else.
 - **An app peer gets Myco's own basics.** A linked device in a neighborhood
-  with **Apps** on may read your mesh relay and Blossom, offer you apps and
+  sharing an extension with us may read your mesh relay and Blossom, offer you apps and
   updates, and send you files.
 - **Not conferred by a link:** reading your end-to-end payloads to others,
   forging or altering content, learning your identity from a passive BLE scan,
@@ -203,14 +203,14 @@ nothing about bootstrapping needs a hole in the relay.
 
 - **Admission is one predicate:** is this mesh address an app peer — a linked
   device, by the device npub in its offer's `.fips` URL, in a neighborhood
-  with Apps on (`AppPeerGate`)? The same question answers for relay and
+  sharing an extension with us (`AppPeerGate`)? The same question answers for relay and
   Blossom alike.
 - **It is checked at accept, not per frame.** Anyone else is refused
   **before** the WebSocket upgrade, with a plain `403`. A stranger costs a TCP
   accept and one small response rather than an upgrade and a round of frames,
   which matters on a BLE link.
 - **Revocation closes live connections.** The app peer set is consulted live,
-  so ending a link, leaving a neighborhood or turning Apps off drops the
+  so ending a link, leaving a neighborhood or turning its extensions off drops the
   connections a peer already holds rather than only blocking the next
   request.
 
@@ -251,7 +251,7 @@ link key for that link.
   today.
 
 The coarse knobs are ending a link, dropping a neighborhood from a link,
-turning Apps off, and the FIPS peer ACL ("block this peer", above).
+turning extensions off, and the FIPS peer ACL ("block this peer", above).
 
 ## 4. Link trust: an invitation handed over in person
 

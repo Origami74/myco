@@ -61,14 +61,14 @@ Four layers, top to bottom. Each one only knows the one below it.
 | Layer | What it is | Where |
 | --- | --- | --- |
 | **1. Apps** — nsites and napplets | The manifest and file model both share; the gateway that serves an nsite; the runtime that hosts a napplet and its capabilities (NAPs). | `nsite-deck`, `myco-napplet-runtime`, `NsiteActivity`, `NappletActivity` |
-| **2. Neighborhoods and links** | Who you share with. A link is set up on purpose from a one-time invitation, with its own link key; it carries neighborhoods — propagation channels with no members — and posts travel link to link. Linked devices in neighborhoods with Apps on are *app peers*: the only devices that may read your relay and store or send you apps. | `myco-core/src/neighbor/`, `auth_service.rs` (the link service), `nap/neighbor/`, Android `neighbor/`, `nfc/`, `share/` |
+| **2. Neighborhoods and links** | Who you share with. A link is set up on purpose from a one-time invitation, with its own link key; it carries neighborhoods — propagation channels with no members — and posts travel link to link. Linked devices sharing an update extension with you are *app peers*: the only devices that may read your relay and store or send you apps. | `myco-core/src/neighbor/`, `auth_service.rs` (the link service), `nap/neighbor/`, Android `neighbor/`, `nfc/`, `share/` |
 | **3. Relay and Blossom** | Your phone's own Nostr relay and blob store. Every app's data rests here; app peers sync from here and forward app updates. | `myco-relay`, `myco-blossom`, `mesh_relay.rs`, `gossip.rs`, `peer_relay.rs` |
 | **4. FIPS** | The mesh. Encrypted links between phones over BLE, Wi-Fi Aware, LAN or the internet; IPv6 addresses derived from device keys; `<npub>.fips` names. | `reference/fips`, `ble/`, `aware/`, `ap/`, the TUN |
 
 **A link is not a FIPS peer.** Layer 4 will happily hold an encrypted
 connection to any phone running FIPS in range — that is a *peer*, and it says
 nothing about trust. Layer 2's *link* is a Myco decision made by two people:
-with Apps on, it is what lets a peer read your relay, pull your apps, and send
+sharing an update extension, it is what lets a peer read your relay, pull your apps, and send
 you files. A phone can be a connected FIPS peer and a stranger at the same
 time; the content ports refuse it. A linked person can be out of range; the
 link stays. The docs use *peer* for layer 4 and *link* / *app peer* for layer
@@ -112,8 +112,8 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [README.md](./design/nap-neighbor/README.md) | Overview: what a neighborhood is, the three keys, files on the device, what the Circle's removal took with it. |
 | [links.md](./design/nap-neighbor/links.md) | Invitations (`myco://link/`), the setup proof, link keys, offers (kind 37516), NIP-98, the link service on `:4873`, presence. |
 | [data-plane.md](./design/nap-neighbor/data-plane.md) | The scoped store and blobs, the scoped relay, publish and subscribe, hops and dedup. |
-| [policy.md](./design/nap-neighbor/policy.md) | Per-neighborhood settings: reach presets, blob push hops, Apps. |
-| [app-peers.md](./design/nap-neighbor/app-peers.md) | Myco's own basics (apps, updates, release APK, files) over neighborhoods with Apps on; the `:4870` / `:24243` gate. |
+| [policy.md](./design/nap-neighbor/policy.md) | Per-neighborhood settings: reach presets, blob push hops, extensions. |
+| [app-peers.md](./design/nap-neighbor/app-peers.md) | Myco's own basics (apps, updates, release APK, files) to linked devices sharing an update extension; the `:4870` / `:24243` gate. |
 | [napplet-api.md](./design/nap-neighbor/napplet-api.md) | What NAP-NEIGHBOR gives napplets: `neighborhood://` addresses and how relay, outbox, resource and upload carry them. |
 | [ui.md](./design/nap-neighbor/ui.md) | The Neighbors tab, the neighborhood page, invite and join. |
 

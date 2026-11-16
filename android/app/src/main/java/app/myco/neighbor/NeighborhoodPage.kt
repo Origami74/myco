@@ -22,6 +22,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Web
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Groups
@@ -79,8 +81,8 @@ private fun Reach.short(): String = when (this) {
 /**
  * One neighborhood, in the app sheet's style: tile, name and a status line;
  * an icon row (rename, reach, files); the people you're connected with as
- * faces; how far posts go as three icons; whether apps come from here as a
- * switch; Leave as a red row; Invite pinned
+ * faces; how far posts go as three icons; which updates are shared here as
+ * switches; Leave as a red row; Invite pinned
  * at the bottom. Finer settings open in their own small sheets.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -175,26 +177,30 @@ fun NeighborhoodPage(id: String, state: AppState, client: AppCoreClient, onBack:
                     }
                 }
 
-                // Apps: fetch and serve apps, updates and files with the people here.
+                // Shared here: updates this phone passes on to the people here.
                 Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Filled.Apps, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("Apps", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "Get apps and updates from people here",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Switch(
-                            checked = n.apps,
-                            onCheckedChange = { client.dispatch(NativeActions.setNeighborhoodApps(n.id, it)) },
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        Text(
+                            "Share updates",
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp),
                         )
+                        EXTENSIONS.forEach { (ext, icon, label) ->
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.width(12.dp))
+                                Text(label, Modifier.weight(1f))
+                                Switch(
+                                    checked = ext in n.extensions,
+                                    onCheckedChange = {
+                                        client.dispatch(NativeActions.setNeighborhoodExtension(n.id, ext, it))
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -355,3 +361,10 @@ private fun FilesSheet(n: NeighborhoodsState.Neighborhood, client: AppCoreClient
         }
     }
 }
+
+/** The extensions a neighborhood can share, as the page lists them. */
+private val EXTENSIONS: List<Triple<String, ImageVector, String>> = listOf(
+    Triple("napplet-updates", Icons.Filled.Apps, "App updates"),
+    Triple("nsite-updates", Icons.Filled.Web, "Site updates"),
+    Triple("myco-release", Icons.Filled.SystemUpdate, "Myco updates"),
+)

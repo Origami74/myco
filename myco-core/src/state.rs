@@ -58,7 +58,7 @@ pub struct AppState {
     pub napplet_domains: Vec<String>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
-    /// App peers: linked devices in neighborhoods with Apps on, which this
+    /// App peers: linked devices sharing an extension with us, which this
     /// device fetches apps and updates from and serves its own to.
     pub app_peers: Vec<crate::content::AppPeer>,
     /// App peers we currently hold a live mesh relay connection to. This

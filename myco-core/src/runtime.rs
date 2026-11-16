@@ -529,7 +529,7 @@ impl AppRuntime {
             let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
             // Restrict mesh access to app peers — linked devices in
-            // neighborhoods with Apps on. Loopback (the in-app WebView) always
+            // sharing an extension with us. Loopback (the in-app WebView) always
             // bypasses the gate.
             let gate: Arc<dyn crate::mesh_relay::PeerGate> =
                 Arc::new(crate::content::AppPeerGate::new(content.clone()));
@@ -1468,15 +1468,16 @@ impl AppRuntime {
                 self.refresh_app_peers();
                 self.rev += 1;
             }
-            NativeAppAction::SetNeighborhoodApps {
+            NativeAppAction::SetNeighborhoodExtension {
                 neighborhood,
+                extension,
                 enabled,
             } => {
                 if let (Some(n), Some(id)) = (
                     self.neighbors(),
                     crate::neighbor::NeighborhoodId::from_hex(&neighborhood),
                 ) {
-                    n.set_apps(id, enabled);
+                    n.set_extension(id, &extension, enabled);
                 }
                 self.refresh_app_peers();
                 self.rev += 1;

@@ -25,10 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Friends of friends, Wide). The **Neighbors** tab replaces the Circle tab.
   Napplets reach neighborhoods through NAP-NEIGHBOR
   ([napplet/naps#146](https://github.com/napplet/naps/pull/146)).
-- **Apps switch per neighborhood.** On by default: Myco fetches apps,
-  app updates, release APKs and files from people in that neighborhood, and
-  serves them its own. Only these devices can reach this phone's relay and
-  Blossom on the mesh.
+- **Share updates, per neighborhood.** App updates, Site updates and Myco
+  updates switches, all on by default. Something is shared with a linked
+  person only when both of you have that switch on. Only devices sharing
+  one with you can reach this phone's relay and Blossom on the mesh.
+- **Neighborhood files cross links.** A file posted in a neighborhood can be
+  fetched by the people linked to you there, and only that neighborhood's
+  files are reachable this way.
 - **An app can recommend the app it wants to open, and Myco offers to
   install it.** A napplet opening a role (NAP-INTENT) can name an app with
   `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default

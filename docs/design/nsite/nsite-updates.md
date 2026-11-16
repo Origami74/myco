@@ -11,7 +11,7 @@
 > link.
 >
 > **Who the mesh is.** Updates travel between **app peers**: linked devices in
-> neighborhoods with Apps on ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
+> neighborhoods sharing an update extension ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
 > General event gossip is gone; manifests are the one kind of event Myco still
 > forwards on its own.
 

@@ -28,16 +28,16 @@ pub fn device_npub(url: &str) -> Option<String> {
     Some(npub.to_string())
 }
 
-/// Every linked device in a neighborhood with Apps on, once each.
+/// Every linked device sharing an extension with us somewhere, once each.
 pub fn app_peers(records: &[Record], links: &Links) -> Vec<AppPeer> {
-    let apps: Vec<_> = records
-        .iter()
-        .filter(|r| r.policy.apps)
-        .map(|r| r.id)
-        .collect();
     let mut out: Vec<AppPeer> = Vec::new();
     for link in links.all() {
-        if !link.neighborhoods.iter().any(|id| apps.contains(id)) {
+        let shares = records.iter().any(|r| {
+            super::extensions::KNOWN
+                .iter()
+                .any(|e| super::extensions::shared(r, &link, r.id, e))
+        });
+        if !shares {
             continue;
         }
         let Some(npub) = link.services().iter().find_map(|s| device_npub(&s.url)) else {

@@ -35,7 +35,7 @@ branch; see the CHANGELOG's `[Unreleased]`):
   invitations (`myco://link/…` by QR, share link or NFC), a link key per
   link, signed offers, the link service on `:4873`, traffic scoped per
   neighborhood and passed on link to link, per-neighborhood reach and an
-  **Apps** switch. App peers (linked devices in neighborhoods with Apps on)
+  **Apps** switch. App peers (linked devices sharing an extension with us)
   take over what the Circle did for apps, updates and files —
   [nap-neighbor/](design/nap-neighbor/README.md).
 - **NAP-NEIGHBOR** for napplets

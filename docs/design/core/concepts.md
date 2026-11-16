@@ -27,7 +27,7 @@ Two confusions the layering exists to prevent:
 
 - **A FIPS peer is not a link.** Layer 4 connects to any FIPS node in range
   and calls it a *peer*. Layer 2 sets up a *link* between two people, from a
-  one-time invitation. Only linked devices in a neighborhood with Apps on
+  one-time invitation. Only linked devices sharing an extension with us
   (*app peers*) may read your relay and Blossom over the mesh. A FIPS peer can
   be connected and a stranger; a linked person can be out of range. See
   [Neighborhoods and links](#layer-2--neighborhoods-and-links).
@@ -92,7 +92,7 @@ other links in that neighborhood, within local limits.
 The link service runs on the auth plane, `<npub>.fips:4873/nh/…`. It is the
 only port a stranger can reach.
 
-An **app peer** is a linked device in a neighborhood with **Apps** on (the
+An **app peer** is a linked device sharing an extension with us ([extensions.md](extensions.md)) (the
 default). App peers are who Myco fetches apps, updates and the release APK
 from, and the only devices the mesh relay and Blossom admit (the **app peer
 gate**).
@@ -224,7 +224,7 @@ is opened. Design: [../nsite/propagation.md](../nsite/propagation.md).
 | **link key** | a keypair made for one link; neither the device key nor the user key |
 | **invitation** | a one-time `myco://link/…` payload (QR, share link, NFC) that sets up a link |
 | **offer** | a link-key-signed event (kind `37516`) listing what a device serves on a link |
-| **app peer** | a linked device in a neighborhood with Apps on; Myco fetches apps and updates from it |
+| **app peer** | a linked device sharing an extension with us; Myco fetches apps and updates from it |
 | **app peer gate** | the check on every mesh connection to the relay or Blossom: app peer, or refused |
 | **peer** | a FIPS node this phone has a transport link to; says nothing about trust |
 | **Circle, pairing** | removed; replaced by neighborhoods and links |

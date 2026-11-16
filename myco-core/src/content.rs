@@ -265,9 +265,9 @@ impl NappletGrants {
 }
 
 /// A peer this device shares apps with: the device behind a neighborhood
-/// link, in a neighborhood with **Apps** on. Not persisted — the runtime
+/// link, sharing an extension with us (`crate::neighbor::extensions`). Not persisted — the runtime
 /// derives the set from the links and the neighborhoods' settings
-/// ([`Content::set_app_peers`]), so leaving a neighborhood or turning Apps
+/// ([`Content::set_app_peers`]), so leaving a neighborhood or turning extensions
 /// off takes the peer out at once.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -391,7 +391,7 @@ pub(crate) const INTERNET_DOWN_FOR: std::time::Duration = std::time::Duration::f
 
 /// The mesh access gate backing the relay + Blossom servers: content (reads,
 /// manifests, blobs) is restricted to app peers — linked devices in
-/// neighborhoods with Apps on — and what one may do is its [`PeerPerms`].
+/// sharing an extension with us — and what one may do is its [`PeerPerms`].
 ///
 /// Holds the [`Content`] so the live set is consulted per request: a peer
 /// leaving a neighborhood, or Apps turned off, takes effect immediately.
@@ -539,7 +539,7 @@ pub struct Content {
     /// catalog is the Library, so a write may change what an archetype
     /// resolves to. One waiter; a write while nobody waits leaves a permit.
     library_changed: Arc<tokio::sync::Notify>,
-    /// App peers: linked devices in neighborhoods with Apps on. Set by the
+    /// App peers: linked devices sharing an extension with us. Set by the
     /// runtime from the links, never persisted.
     app_peers: Mutex<Vec<AppPeer>>,
     /// npubs of currently-connected mesh peers, refreshed by the runtime each poll.
@@ -1925,7 +1925,7 @@ impl Content {
         out
     }
 
-    // --- app peers (linked devices in neighborhoods with Apps on) ---
+    // --- app peers (linked devices sharing an extension with us) ---
 
     /// Replace the app peers. A peer new to the set gets its dial backoff
     /// cleared, so the next keepwarm tick reaches it at once.

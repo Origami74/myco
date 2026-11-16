@@ -2,7 +2,7 @@
 
 > Status: built, with differences from the first draft noted inline. What
 > shipped: manifests are forwarded between **app peers** (linked devices in
-> neighborhoods with Apps on, see
+> neighborhoods sharing an update extension, see
 > [nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)) with a 3-hop budget
 > (not 5), the seen-set is the loop guard, and blobs stay pull-only
 > ([nsite-updates.md §4](./nsite-updates.md)). Negentropy / NIP-77 reconcile
@@ -162,7 +162,7 @@ pairing graph (the Circle). Pairing is gone.
 Now:
 
 - **App peers.** Manifests go to, and blobs are pulled from, app peers: devices
-  this one has a link with, in a neighborhood with Apps on
+  this one has a link with, in a neighborhood sharing an update extension
   ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
 - **Reach past one link** comes from the hop budget: an app peer forwards to its
   own app peers, up to 3 hops. No peer list is polled.

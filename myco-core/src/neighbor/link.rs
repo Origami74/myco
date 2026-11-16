@@ -131,6 +131,9 @@ fn is_false(b: &bool) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OfferContent {
     pub services: Vec<Service>,
+    /// Per neighborhood (id hex), the extensions this side has on there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, Vec<String>>,
 }
 
 // --- crypto -------------------------------------------------------------------
@@ -285,6 +288,16 @@ impl Link {
 
     pub fn own_pk(&self) -> String {
         self.keys().public_key().to_hex()
+    }
+
+    /// The extensions the other side has on in `n`, from their verified
+    /// offer. None from a peer whose offer predates extensions.
+    pub fn peer_extensions(&self, n: NeighborhoodId) -> Vec<String> {
+        self.peer_offer
+            .as_ref()
+            .and_then(|e| read_offer(e, &self.peer))
+            .and_then(|(c, _)| c.extensions.get(&n.to_hex()).cloned())
+            .unwrap_or_default()
     }
 
     /// The other side's services, from their verified offer.
@@ -683,6 +696,7 @@ mod tests {
                 write: true,
                 own: false,
             }],
+            extensions: BTreeMap::new(),
         }
     }
 

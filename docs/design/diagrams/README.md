@@ -42,6 +42,6 @@ Two images, redrawn around the ideas a newcomer has to get.
   `*.nsite` interception.
 - Propagation is hybrid: forward the signed manifest, pull blobs on demand.
   *Moved:* the edges are **app peers** (linked devices in neighborhoods with
-  Apps on), not "connected peers" — see
+  an update extension on), not "connected peers" — see
   [nap-neighbor/](../nap-neighbor/README.md).
 - The two-device demo is the check every mesh change still has to pass.

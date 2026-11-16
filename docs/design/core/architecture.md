@@ -91,7 +91,7 @@ data plane. `auth_service.rs` serves the link service on `:4873`, under
 ending a link, and the scoped relay that carries neighborhood traffic.
 Design: [nap-neighbor/](../nap-neighbor/README.md), [security.md](./security.md).
 
-**App peers** are linked devices in neighborhoods with Apps on
+**App peers** are linked devices sharing an extension with us
 (`neighbor/apps.rs`, `Content::set_app_peers`). The **app peer gate**
 (`AppPeerGate`, a `PeerGate`) is consulted by the relay proxy and the Blossom
 server on every mesh connection; loopback bypasses it.

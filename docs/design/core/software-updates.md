@@ -20,7 +20,7 @@ is sent to the relay.
 
 Every check keeps the newest verified announcement in the device's own relay,
 so the device answers its app peers' next check. App peers are linked devices
-in neighborhoods with Apps on ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
+sharing the `myco-release` extension with us ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
 One phone that reaches Zapstore is enough for the room: a mesh-only phone asks
 its app peers, and each of them keeps the answer for its own app peers. A peer can withhold a release but cannot forge or
 alter one; the event is verified against the pinned key as if it came from

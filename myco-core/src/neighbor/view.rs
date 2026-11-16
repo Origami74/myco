@@ -46,8 +46,8 @@ pub struct NeighborhoodView {
     pub backlog_hops: u8,
     pub blob_hops: u8,
     pub pass_on: bool,
-    /// Whether Myco fetches apps and updates from people here.
-    pub apps: bool,
+    /// Extensions on here (see [`super::extensions`]).
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,7 +99,7 @@ pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
                 backlog_hops: r.policy.backlog_hops,
                 blob_hops: r.policy.blob_hops,
                 pass_on: r.policy.pass_on,
-                apps: r.policy.apps,
+                extensions: super::extensions::ours(r),
             })
             .collect(),
         links: all

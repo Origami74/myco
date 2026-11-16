@@ -1,6 +1,6 @@
 # App peers
 
-Myco's own basics ride neighborhoods with **Apps** on.
+Myco's own basics go to linked devices sharing an extension with us ([extensions.md](extensions.md)).
 
 Code: `myco-core/src/neighbor/apps.rs`, `Content::set_app_peers` and
 `AppPeerGate` in `myco-core/src/content.rs`.
@@ -15,10 +15,10 @@ Code: `myco-core/src/neighbor/apps.rs`, `Content::set_app_peers` and
 
 ## Who is an app peer
 
-- Every linked device in a neighborhood with Apps on, once each.
+- Every linked device that shares at least one extension with us (on at both ends) in some neighborhood, once each.
 - Identified by the device npub in its offer's `.fips` URL.
-- Recomputed every 5 s, and at once on every join, leave or Apps toggle.
-- Turning Apps off for every shared neighborhood stops that device being an
+- Recomputed every 5 s, and at once on every join, leave or extension toggle.
+- Turning every extension off in every shared neighborhood stops that device being an
   app peer.
 
 ## The gate

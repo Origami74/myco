@@ -20,7 +20,7 @@ start".
 | `user-signer.json` | a signer-app login (NIP-55): the user's pubkey and the signer's package — no secret | `user_key.rs` |
 | `settings.json` | the persisted settings below | `settings_store.rs` |
 | `library.json` | the Apps grid: every installed nsite and napplet, with `kind`, `pinned`, a napplet's `granted` capabilities and the `pointer` it was added by | `content.rs` (`LibraryItem`) |
-| `neighborhoods.json` | the neighborhoods this device carries: id, local name, policy (publish / backlog hops, pass on, blob push hops, Apps), offer, muted authors, napplet grants, and each napplet's address tokens | `neighbor/store.rs` |
+| `neighborhoods.json` | the neighborhoods this device carries: id, local name, policy (publish / backlog hops, pass on, blob push hops, extensions turned off), offer, muted authors, napplet grants, and each napplet's address tokens | `neighbor/store.rs` |
 | `links.json` | links: this side's link key, the peer's link key, the neighborhoods carried, the peer's last offer and name, pending additions; plus open invitations | `neighbor/link.rs` |
 | `neighborhood-relay/`, `neighborhood-blobs/`, `neighborhood-scopes.json` | neighborhood events and blobs, kept apart from the user's own relay, and which neighborhoods each belongs to | `neighbor/data.rs` |
 | `active.json` | which version of each nsite is active (staged updates) | `content.rs`, [nsite-updates.md](../design/nsite/nsite-updates.md) |
@@ -57,7 +57,7 @@ Kept in `neighborhoods.json`, edited on each Neighborhood page. Defaults:
 | --- | --- | --- |
 | Publish hops / backlog hops / pass on | 3 / 2 / on (**Wide**) | `SetNeighborhoodPolicy` (Posts reach) |
 | Blob push hops | 0 | `SetNeighborhoodBlobHops` (Files) |
-| Apps | on | `SetNeighborhoodApps` |
+| Extensions | all on | `SetNeighborhoodExtension` |
 
 The old global **App reach** setting (`nappletMeshPublishTtl`,
 `nappletMeshSubscribeTtl`) is gone with NAP-MESH. See
