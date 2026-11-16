@@ -547,3 +547,34 @@ async fn a_napplet_held_but_never_pushed_is_exposed_where_updates_are_sent() {
         .any(|e| e.id == held.manifest.id));
     assert_eq!(alice.neighbors.link_blob(id, &sha).await, None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn whether_a_neighbor_has_a_blob_is_asked_without_fetching_it() {
+    let (alice, bob, alice_addr, bob_addr) = linked_club().await;
+    let bytes = b"poster".to_vec();
+    let sha = sha256_hex(&bytes);
+    alice
+        .neighbors
+        .upload(&app(), &alice_addr, bytes, &sha)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bob.neighbors.has(&app(), &bob_addr, &sha).await.unwrap(),
+        Some(true),
+        "Alice has it"
+    );
+    let id = bob.neighbors.records()[0].id;
+    assert!(
+        !bob.neighbors.link_has(id, &sha).await,
+        "and asking did not fetch it"
+    );
+    assert_eq!(
+        bob.neighbors
+            .has(&app(), &bob_addr, &sha256_hex(b"nobody"))
+            .await
+            .unwrap(),
+        Some(false),
+        "nobody has this one"
+    );
+}

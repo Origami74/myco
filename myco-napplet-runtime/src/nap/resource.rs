@@ -105,6 +105,7 @@ pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> 
         "bytes" => vec![bytes(ctx, session, message).await],
         "bytesMany" => vec![bytes_many(ctx, session, message).await],
         "keep" => vec![keep(ctx, session, message).await],
+        "check" => vec![check(ctx, session, message).await],
         // A fetch here is bounded and has no partial state to abandon; the
         // shim drops a late result for a cancelled id on its own.
         "cancel" => Vec::new(),
@@ -129,6 +130,7 @@ fn info(message: &Envelope) -> Envelope {
             ],
             "maxBytes": MAX_BYTES,
             "maxUrls": MAX_URLS,
+            "check": true,
             "maxTotalBytes": MAX_TOTAL_BYTES,
         }),
     )
@@ -211,6 +213,119 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
         items.push(item);
     }
     message.to_result().with_field("items", items)
+}
+
+/// `resource.check` — whether each URL's bytes could be delivered now,
+/// without delivering them (local extension; not in NAP-RESOURCE yet).
+///
+/// Same scheme dispatch and policy as `bytes`, so it never reveals what
+/// `bytes` would refuse. Nothing is transferred, stored, or marked kept.
+/// `available` is `"yes"`, `"no"` or `"unknown"`, a report at this moment.
+async fn check(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
+    let urls: Vec<String> = match message.field("urls").and_then(|v| v.as_array()) {
+        Some(items) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(url) => out.push(url.to_string()),
+                    None => {
+                        return error_for(message, "invalid-request", Some("urls must be strings"))
+                    }
+                }
+            }
+            out
+        }
+        _ => return error_for(message, "invalid-request", Some("check needs urls")),
+    };
+    if urls.len() > MAX_URLS {
+        return error_for(
+            message,
+            "too-large",
+            Some(&format!("at most {MAX_URLS} urls per request")),
+        );
+    }
+    let mut items = Vec::with_capacity(urls.len());
+    for url in urls {
+        let item = match check_one(ctx, session, &url).await {
+            Ok((available, size)) => {
+                let mut item = serde_json::json!({ "url": url, "available": available });
+                if let Some(size) = size {
+                    item["size"] = serde_json::json!(size);
+                }
+                item
+            }
+            Err(e) => {
+                let mut item =
+                    serde_json::json!({ "url": url, "available": "no", "error": e.code });
+                if let Some(m) = e.message {
+                    item["message"] = serde_json::Value::String(m);
+                }
+                item
+            }
+        };
+        items.push(item);
+    }
+    message.to_result().with_field("items", items)
+}
+
+/// One URL for [`check`]: availability and, when known, size.
+async fn check_one(
+    ctx: &NapContext,
+    session: &Session,
+    url: &str,
+) -> Result<(&'static str, Option<u64>), Failure> {
+    let scheme = scheme_of(url);
+    if scheme.eq_ignore_ascii_case("https") {
+        // Judged as `bytes` would; whether the server has it is not asked.
+        validate_https_url(url).map_err(|r| Failure::new(r.code(), r.reason()))?;
+        return Ok(("unknown", None));
+    }
+    let (sha, _hints) = parse_blossom_url(url)?;
+    if let Some(size) = ctx
+        .blobs
+        .size(&sha)
+        .await
+        .map_err(|e| Failure::new("network-error", format!("local store: {e}")))?
+    {
+        if size > MAX_BYTES as u64 {
+            return Err(Failure::new(
+                "too-large",
+                format!("{size} bytes, cap is {MAX_BYTES}"),
+            ));
+        }
+        // Held here: what `bytes` would sniff and refuse, refused here too.
+        if let Ok(Some(raw)) = ctx.blobs.get(&sha).await {
+            if sniff_mime(&raw) == "image/svg+xml" {
+                return Err(Failure::new(
+                    "blocked-by-policy",
+                    "SVG is not delivered raw by this runtime",
+                ));
+            }
+        }
+        return Ok(("yes", Some(size)));
+    }
+    let addresses = neighborhood_hints(url);
+    if !addresses.is_empty() {
+        let granted = session.is_granted("neighbor");
+        return Ok(
+            match crate::nap::neighbor::route::has(
+                ctx,
+                session.identity(),
+                granted,
+                &addresses,
+                &sha,
+            )
+            .await
+            {
+                Some(true) => ("yes", None),
+                Some(false) => ("no", None),
+                None => ("unknown", None),
+            },
+        );
+    }
+    // Servers named by hints could be asked with a Blossom HEAD; this
+    // runtime does not yet, and says so.
+    Ok(("unknown", None))
 }
 
 /// One delivered resource, now in the store: the sniffed type, the size, and
@@ -1253,6 +1368,42 @@ mod tests {
         )
         .await;
         assert_eq!(r["error"], "blocked-by-policy");
+    }
+
+    /// `check` says whether bytes could be delivered, without delivering:
+    /// held here is "yes" with its size, unknown elsewhere is "unknown", and
+    /// what `bytes` would refuse is refused the same way.
+    #[tokio::test]
+    async fn check_reports_without_delivering() {
+        let (ctx, _fetcher) = test_context_with_fetcher();
+        let held = b"<!doctype html><p>hi</p>".to_vec();
+        let sha = ctx.blobs.put(&held).await.unwrap();
+        let svg = ctx
+            .blobs
+            .put(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+            .await
+            .unwrap();
+        let missing = "0".repeat(64);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.check").with_id("c1").with_field(
+                "urls",
+                serde_json::json!([
+                    format!("blossom:{sha}"),
+                    format!("blossom:{missing}"),
+                    format!("blossom:{svg}"),
+                    "ftp://nope",
+                ]),
+            ),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.check.result");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[0]["available"], "yes");
+        assert_eq!(items[0]["size"], held.len());
+        assert_eq!(items[1]["available"], "unknown");
+        assert_eq!(items[2]["error"], "blocked-by-policy");
+        assert!(items[3]["error"].is_string(), "a bad URL is refused");
     }
 
     /// An HTML page with inline SVG icons is HTML, and delivered: the

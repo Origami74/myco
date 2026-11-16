@@ -156,6 +156,19 @@ pub trait NeighborData: Send + Sync {
         let _ = (napplet, address, sha256);
         Err(NeighborError::NotFound)
     }
+
+    /// Whether the scope `address` names could supply a blob, without
+    /// transferring it: `Some(true)`/`Some(false)`, or `None` when it can't
+    /// be told (peers did not answer). The default can't tell.
+    async fn has(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        sha256: &str,
+    ) -> Result<Option<bool>, NeighborError> {
+        let _ = (napplet, address, sha256);
+        Ok(None)
+    }
 }
 
 /// A device with no neighborhoods: no features, nothing listed. What a host

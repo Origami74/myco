@@ -140,6 +140,34 @@ pub async fn blob(
     None
 }
 
+/// Whether any of `addresses` could supply a blob, without transferring it:
+/// `Some(true)` if one can, `Some(false)` if every one said no, `None` when
+/// none could tell.
+pub async fn has(
+    ctx: &NapContext,
+    napplet: &NappletIdentity,
+    granted: bool,
+    addresses: &[String],
+    sha256: &str,
+) -> Option<bool> {
+    if !granted {
+        return Some(false);
+    }
+    let mut unknown = false;
+    for addr in addresses {
+        match ctx.neighbor.has(napplet, addr, sha256).await {
+            Ok(Some(true)) => return Some(true),
+            Ok(Some(false)) | Err(_) => {}
+            Ok(None) => unknown = true,
+        }
+    }
+    if unknown {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 /// Split `urls` into neighborhood addresses and everything else.
 pub fn split(urls: Vec<String>) -> (Vec<String>, Vec<String>) {
     urls.into_iter().partition(|u| address::is_address(u))

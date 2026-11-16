@@ -96,6 +96,26 @@ impl Scoped {
         }
     }
 
+    /// Whether a blob in neighborhood `id`'s scope is here, without reading it.
+    pub(super) async fn has_blob(&self, id: NeighborhoodId, sha256: &str) -> bool {
+        let scoped = self
+            .scopes
+            .lock()
+            .unwrap()
+            .get(&format!("blob:{sha256}"))
+            .is_some_and(|s| s.contains(&id));
+        if !scoped {
+            return false;
+        }
+        if self.blobs.has(sha256).await {
+            return true;
+        }
+        match self.kept.get() {
+            Some(kept) => kept.has(sha256).await,
+            None => false,
+        }
+    }
+
     /// Put files already kept on the device into neighborhood `id`'s scope,
     /// without copying them: they are read from [`Scoped::kept`].
     pub(super) fn share_kept(&self, id: NeighborhoodId, sha256s: &[String]) -> anyhow::Result<()> {
@@ -217,6 +237,73 @@ impl Neighbors {
             }
         }
         None
+    }
+
+    /// Whether a linked peer asking in `n` could get a blob: what
+    /// [`Neighbors::link_blob`] would serve, without reading it.
+    pub async fn link_has(&self, n: NeighborhoodId, sha256: &str) -> bool {
+        let Some(record) = self.record(n) else {
+            return false;
+        };
+        if !record.offer.blob_read {
+            return false;
+        }
+        if self.scoped.has_blob(n, sha256).await {
+            return true;
+        }
+        record.policy.shares(super::extensions::NAPPLET_UPDATES)
+            && match self.held.get() {
+                Some(held) => held.has_file(sha256).await,
+                None => false,
+            }
+    }
+
+    /// Whether `n` (or only `peer` in it) could supply a blob, without
+    /// transferring it: here first, then a `HEAD` to every link carrying it
+    /// at once, each bounded. `Some(true)` as soon as one has it,
+    /// `Some(false)` when all said no (or there is nobody to ask), `None`
+    /// when some could not be asked.
+    async fn has_in(&self, n: NeighborhoodId, sha256: &str, peer: Option<&str>) -> Option<bool> {
+        if peer.is_none() && self.scoped.has_blob(n, sha256).await {
+            return Some(true);
+        }
+        let Some(links) = &self.links else {
+            return Some(false);
+        };
+        let rest = format!("blob/{sha256}?n={}", n.to_hex());
+        let mut asks = futures_util::stream::FuturesUnordered::new();
+        for link in links.carrying(n) {
+            if peer.is_some_and(|p| p != link.peer) {
+                continue;
+            }
+            let rest = rest.clone();
+            asks.push(async move {
+                let answer = tokio::time::timeout(
+                    HAS_TIMEOUT,
+                    super::service::call(&link, reqwest::Method::HEAD, &rest, None),
+                )
+                .await;
+                match answer {
+                    Ok(Ok(resp)) if resp.status().is_success() => Some(true),
+                    Ok(Ok(resp)) if resp.status().is_client_error() => Some(false),
+                    _ => None,
+                }
+            });
+        }
+        use futures_util::StreamExt as _;
+        let mut unknown = false;
+        while let Some(answer) = asks.next().await {
+            match answer {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => unknown = true,
+            }
+        }
+        if unknown {
+            None
+        } else {
+            Some(false)
+        }
     }
 
     /// Ask the links carrying `n` (or only `peer`'s) for a blob, one after
@@ -364,8 +451,9 @@ impl Neighbors {
             .unwrap_or_default()
     }
 
-    /// Ask every link carrying `n` for what matches; what comes back is kept
-    /// in `n` and reaches live subscribers. Not passed on.
+    /// Ask every link carrying `n` for what matches; each event is kept in
+    /// `n` and reaches live subscribers as it arrives, not when the peer is
+    /// done. Not passed on.
     fn pull_links(&self, n: NeighborhoodId, filters: Vec<Filter>) {
         let Some(links) = &self.links else {
             return;
@@ -374,22 +462,26 @@ impl Neighbors {
             let filters = filters.clone();
             let scoped = self.scoped.clone();
             let links = links.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
             tokio::spawn(async move {
-                match super::wire::pull(&link, n, &filters).await {
-                    Ok(events) => {
-                        links.mark_seen(&link.id);
-                        for event in events {
-                            if !scoped.has(n, &event) {
-                                let _ = scoped.add(n, event).await;
-                            }
-                        }
+                while let Some(event) = rx.recv().await {
+                    if !scoped.has(n, &event) {
+                        let _ = scoped.add(n, event).await;
                     }
+                }
+            });
+            tokio::spawn(async move {
+                match super::wire::pull_into(&link, n, &filters, tx).await {
+                    Ok(_) => links.mark_seen(&link.id),
                     Err(e) => tracing::debug!(link = %link.id, error = %e, "pull failed"),
                 }
             });
         }
     }
 }
+
+/// How long a peer may take to say whether it has a blob.
+const HAS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// The largest blob taken from a link.
 const MAX_LINK_BLOB: u64 = 64 * 1024 * 1024;
@@ -501,6 +593,16 @@ impl NeighborData for Neighbors {
         Ok(self
             .blob_from_links(record.id, sha256, target.peer.as_deref())
             .await)
+    }
+
+    async fn has(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        sha256: &str,
+    ) -> Result<Option<bool>, NeighborError> {
+        let (target, record) = self.target(napplet, address)?;
+        Ok(self.has_in(record.id, sha256, target.peer.as_deref()).await)
     }
 
     /// Kept here in the neighborhood's scope.

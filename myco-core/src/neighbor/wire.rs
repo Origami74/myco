@@ -130,6 +130,23 @@ pub async fn pull(
     n: NeighborhoodId,
     filters: &[Filter],
 ) -> anyhow::Result<Vec<Event>> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    pull_into(link, n, filters, tx).await?;
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// As [`pull`], streaming: each verified event goes to `tx` the moment it
+/// arrives, not at `EOSE`. Returns how many were sent.
+pub async fn pull_into(
+    link: &Link,
+    n: NeighborhoodId,
+    filters: &[Filter],
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+) -> anyhow::Result<usize> {
     let mut last = anyhow::anyhow!("the peer offers no relay");
     for url in relay_urls(link) {
         let attempt = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
@@ -142,7 +159,7 @@ pub async fn pull(
             );
             ws.send(Message::text(serde_json::Value::Array(req).to_string()))
                 .await?;
-            let mut events = Vec::new();
+            let mut sent = 0usize;
             while let Some(frame) = ws.next().await {
                 let Message::Text(text) = frame? else {
                     continue;
@@ -151,8 +168,8 @@ pub async fn pull(
                 match v[0].as_str() {
                     Some("EVENT") => {
                         if let Ok(e) = serde_json::from_value::<Event>(v[2].clone()) {
-                            if e.verify().is_ok() {
-                                events.push(e);
+                            if e.verify().is_ok() && tx.send(e).is_ok() {
+                                sent += 1;
                             }
                         }
                     }
@@ -161,11 +178,11 @@ pub async fn pull(
                 }
             }
             let _ = ws.close(None).await;
-            anyhow::Ok(events)
+            anyhow::Ok(sent)
         })
         .await;
         match attempt {
-            Ok(Ok(events)) => return Ok(events),
+            Ok(Ok(sent)) => return Ok(sent),
             Ok(Err(e)) => last = e,
             Err(_) => last = anyhow::anyhow!("{url}: timed out"),
         }

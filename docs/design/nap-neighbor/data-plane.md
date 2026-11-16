@@ -61,6 +61,28 @@ GET /nh/{pk}/blob/{sha256}?n=<id>   NIP-98 by the link key
   keeps them in `n`'s scope, so the next read is local and it can serve
   them in turn.
 - One hop: a peer that doesn't hold the blob does not ask its own links.
+- Pulls stream: each event a peer sends is kept and reaches subscribers as
+  it arrives, not when the peer is done.
+
+**Without fetching.** `HEAD` on the same route answers 200 or 404 with no
+body: whether the `GET` would serve it. A napplet asks through
+`resource.check` (below); Myco asks every link carrying `n` at once, each
+bounded at 8 s, and answers `yes` as soon as one has it.
+
+```text
+HEAD /nh/{pk}/blob/{sha256}?n=<id>  NIP-98 (method HEAD)  -> 200 | 404 | 403
+```
+
+## `resource.check` (local NAP-RESOURCE extension)
+
+Not in NAP-RESOURCE yet. `window.napplet.resource.check(urls)` resolves one
+item per URL, `{ url, available: "yes" | "no" | "unknown", size?, error? }`,
+without transferring anything:
+
+- held on this phone: `yes` with its size (or the error `bytes` would give,
+  e.g. raw SVG);
+- `blossom:` with a `neighborhood:` `xs`: asked of that neighborhood as above;
+- anything else: `unknown`.
 
 Blobs are not pushed. **Blob push hops** ([policy.md](policy.md)) is stored
 but pushes nothing yet.

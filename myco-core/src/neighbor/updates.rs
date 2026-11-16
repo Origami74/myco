@@ -167,19 +167,28 @@ impl HeldNapplets {
 
     /// A file of a napplet held here: its `index.html` or icon.
     pub async fn file(&self, sha256: &str) -> Option<Vec<u8>> {
+        if !self.names(sha256).await {
+            return None;
+        }
+        self.blobs.get(sha256).await.ok().flatten()
+    }
+
+    /// Whether a file of a napplet held here is in storage, without reading it.
+    pub async fn has_file(&self, sha256: &str) -> bool {
+        self.names(sha256).await && self.blobs.has(sha256).await
+    }
+
+    /// Whether some held napplet's manifest names `sha256` as its entry or
+    /// icon.
+    async fn names(&self, sha256: &str) -> bool {
         let all = [nostr::Filter::new().kinds(napplet_kinds())];
-        let named = self
-            .relay
+        self.relay
             .query(&all)
             .await
             .unwrap_or_default()
             .into_iter()
             .filter_map(|e| myco_napplet_runtime::NappletManifest::from_event(e).ok())
-            .any(|m| m.artifact == sha256 || m.icon.as_ref().is_some_and(|i| i.sha256 == sha256));
-        if !named {
-            return None;
-        }
-        self.blobs.get(sha256).await.ok().flatten()
+            .any(|m| m.artifact == sha256 || m.icon.as_ref().is_some_and(|i| i.sha256 == sha256))
     }
 }
 

@@ -117,7 +117,7 @@ pub fn routes(service: LinkService) -> Router {
         .route("/nh/{pk}/neighborhoods", post(neighborhoods))
         .route("/nh/{pk}/end", post(end))
         .route("/nh/{pk}/relay", get(relay))
-        .route("/nh/{pk}/blob/{sha256}", get(blob))
+        .route("/nh/{pk}/blob/{sha256}", get(blob).head(blob_head))
         .with_state(service)
 }
 
@@ -349,6 +349,35 @@ async fn blob(
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `HEAD /nh/{pk}/blob/{sha256}?n=…`: whether [`blob`] would serve it, with
+/// no body. Signed (NIP-98, method `HEAD`) over the full URL.
+async fn blob_head(
+    State(svc): State<LinkService>,
+    Path((pk, sha256)): Path<(String, String)>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    axum::extract::Query(scope): axum::extract::Query<BlobScope>,
+    headers: HeaderMap,
+) -> Response {
+    let rest = format!("blob/{sha256}?{}", query.unwrap_or_default());
+    let Some(link) = svc.authorized(&headers, "HEAD", &pk, &rest) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Some(n) = NeighborhoodId::from_hex(&scope.n) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Some(neighbors) = svc.neighbors.get().cloned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if !link.neighborhoods.contains(&n) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if neighbors.link_has(n, &sha256).await {
+        StatusCode::OK.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 

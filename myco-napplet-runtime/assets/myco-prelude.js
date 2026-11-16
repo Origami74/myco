@@ -14,6 +14,8 @@
 //   Myco's keep-on-this-device domain, filtered out for the same reason; and
 //   `window.napplet.resource.keep`, its blob half, added to the vendored
 //   `resource` object.
+// - `window.napplet.resource.check` — whether URLs could be delivered,
+//   without delivering them (a local extension to NAP-RESOURCE).
 // - `window.napplet.outbox.publish` — replaced, same wire and same result
 //   shape, only to wait longer. The vendored one gives up after 30 s, and a
 //   publish is signed first: with a signer app (NIP-55) that is a human
@@ -45,6 +47,8 @@ var MycoPrelude = (function () {
   "use strict";
 
   var REQUEST_TIMEOUT_MS = 30000;
+  // A check asks peers in each neighborhood, each bounded on the runtime side.
+  var CHECK_TIMEOUT_MS = 30000;
 
   // How long a request that is signed before it is answered may wait: the
   // publishes. The runtime bounds the signing itself (the signer app gets
@@ -74,6 +78,7 @@ var MycoPrelude = (function () {
     if (domains.has("neighbor")) installNeighbor(napplet, routers);
     if (domains.has("local")) installLocal(napplet, routers);
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
+    if (domains.has("resource") && napplet.resource) installResourceCheck(napplet, routers);
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
     if (domains.has("fs") && napplet.fs) installFsPick(napplet, routers);
     if (domains.has("intent")) installIntent(napplet, routers);
@@ -801,6 +806,27 @@ var MycoPrelude = (function () {
           resolve(true);
         }
       });
+    };
+  }
+
+  // `resource.check(urls)` — for each URL, whether its bytes could be
+  // delivered now, without transferring them. Resolves the runtime's items:
+  // `{ url, available: "yes" | "no" | "unknown", size?, error? }`, in order.
+  function installResourceCheck(napplet, routers) {
+    if (typeof napplet.resource.check === "function") return;
+    if (Object.isFrozen(napplet.resource)) {
+      console.warn("myco: resource is frozen; resource.check is unavailable");
+      return;
+    }
+    var request = requester(routers, ["resource.check.result", "resource.check.error"]);
+    napplet.resource.check = function check(urls) {
+      return request({ type: "resource.check", urls: urls }, function (msg, resolve, reject) {
+        if (msg.type === "resource.check.error") {
+          reject(new Error(msg.message || msg.error || "resource.check refused"));
+        } else {
+          resolve(Array.isArray(msg.items) ? msg.items : []);
+        }
+      }, CHECK_TIMEOUT_MS);
     };
   }
 
