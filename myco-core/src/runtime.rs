@@ -1471,13 +1471,14 @@ impl AppRuntime {
             NativeAppAction::SetNeighborhoodExtension {
                 neighborhood,
                 extension,
+                share,
                 enabled,
             } => {
                 if let (Some(n), Some(id)) = (
                     self.neighbors(),
                     crate::neighbor::NeighborhoodId::from_hex(&neighborhood),
                 ) {
-                    n.set_extension(id, &extension, enabled);
+                    n.set_extension(id, &extension, share, enabled);
                 }
                 self.refresh_app_peers();
                 self.rev += 1;

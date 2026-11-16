@@ -291,14 +291,20 @@ impl Neighbors {
         });
     }
 
-    /// Turn an extension on or off for a neighborhood.
-    pub fn set_extension(&self, id: NeighborhoodId, extension: &str, on: bool) {
+    /// Turn sharing (`share`) or taking (`!share`) an extension's updates
+    /// on or off for a neighborhood. The two are independent.
+    pub fn set_extension(&self, id: NeighborhoodId, extension: &str, share: bool, on: bool) {
         self.change(|s| {
             if let Some(r) = s.get_mut(id) {
-                if on {
-                    r.policy.extensions_off.remove(extension);
+                let off = if share {
+                    &mut r.policy.share_off
                 } else {
-                    r.policy.extensions_off.insert(extension.to_string());
+                    &mut r.policy.get_off
+                };
+                if on {
+                    off.remove(extension);
+                } else {
+                    off.insert(extension.to_string());
                 }
             }
         });

@@ -262,11 +262,13 @@ pub enum NativeAppAction {
     EndLink { link_id: String },
     /// How far a neighborhood pushes uploaded blobs (0: not at all).
     SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
-    /// Turn an extension (`napplet-updates`, `nsite-updates`,
+    /// Turn sharing (`share: true`) or getting (`share: false`) an
+    /// extension's updates (`napplet-updates`, `nsite-updates`,
     /// `myco-release`) on or off in a neighborhood.
     SetNeighborhoodExtension {
         neighborhood: String,
         extension: String,
+        share: bool,
         enabled: bool,
     },
     /// A neighborhood's reach: publish and backlog hops, and whether others'

@@ -277,41 +277,77 @@ async fn a_blob_outside_the_neighborhood_is_not_served() {
     );
 }
 
-/// Fetch the peer's current offer onto `dev`'s only link, as presence does.
-async fn refresh_offer(dev: &Device) -> super::link::Link {
-    let link = dev.svc.links.all().remove(0);
-    let resp = super::service::call(&link, reqwest::Method::GET, "offer", None)
-        .await
-        .unwrap();
-    let offer: nostr::Event = serde_json::from_slice(&resp.bytes().await.unwrap()).unwrap();
-    dev.svc.links.update_offer(&link.id, offer);
-    dev.svc.links.all().remove(0)
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn extensions_are_shared_when_on_at_both_ends() {
-    use super::extensions::{shared, NAPPLET_UPDATES, NSITE_UPDATES};
+async fn sharing_and_getting_are_each_sides_own_choice() {
+    use super::extensions::NAPPLET_UPDATES;
     let (alice, bob, _, _) = linked_club().await;
     let id = bob.neighbors.records()[0].id;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    bob.neighbors.on_update(Arc::new(move |_n, _ext, ev| {
+        let _ = tx.send(ev.id);
+    }));
+    let update = || {
+        EventBuilder::new(Kind::from(myco_napplet_runtime::KIND_NAMED), "")
+            .tags([nostr::Tag::identifier("chat")])
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    };
 
-    let link = refresh_offer(&bob).await;
-    let club = bob.neighbors.records()[0].clone();
-    assert!(shared(&club, &link, id, NAPPLET_UPDATES), "on by default");
-    assert!(shared(&club, &link, id, NSITE_UPDATES));
-
-    // Alice turns nsite updates off in the Club; Bob learns it from her offer.
-    alice.neighbors.set_extension(id, NSITE_UPDATES, false);
-    let link = refresh_offer(&bob).await;
-    assert!(!shared(&club, &link, id, NSITE_UPDATES), "off at her end");
-    assert!(
-        shared(&club, &link, id, NAPPLET_UPDATES),
-        "the rest stay on"
+    // Alice doesn't share: nothing leaves her phone.
+    alice
+        .neighbors
+        .set_extension(id, NAPPLET_UPDATES, true, false);
+    assert_eq!(
+        alice
+            .neighbors
+            .share_update(NAPPLET_UPDATES, update(), &[])
+            .await,
+        0
     );
 
-    // Bob's own switch counts as much as hers.
-    bob.neighbors.set_extension(id, NAPPLET_UPDATES, false);
-    let club = bob.neighbors.records()[0].clone();
-    assert!(!shared(&club, &link, id, NAPPLET_UPDATES), "off at his end");
+    // Alice shares, Bob doesn't get: it reaches his Club, but he doesn't act.
+    alice
+        .neighbors
+        .set_extension(id, NAPPLET_UPDATES, true, true);
+    bob.neighbors
+        .set_extension(id, NAPPLET_UPDATES, false, false);
+    let ignored = update();
+    alice
+        .neighbors
+        .share_update(NAPPLET_UPDATES, ignored.clone(), &[])
+        .await;
+    assert!(
+        arrived_event(&bob.neighbors, id, &ignored).await,
+        "kept in the neighborhood"
+    );
+    assert!(rx.try_recv().is_err(), "but not applied");
+
+    // Bob gets again, without sharing himself: one-way is fine.
+    bob.neighbors
+        .set_extension(id, NAPPLET_UPDATES, false, true);
+    bob.neighbors
+        .set_extension(id, NAPPLET_UPDATES, true, false);
+    let taken = update();
+    alice
+        .neighbors
+        .share_update(NAPPLET_UPDATES, taken.clone(), &[])
+        .await;
+    let got = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("Bob was told")
+        .unwrap();
+    assert_eq!(got, taken.id);
+}
+
+async fn arrived_event(n: &Neighbors, id: super::id::NeighborhoodId, event: &nostr::Event) -> bool {
+    let filter = vec![Filter::new().id(event.id)];
+    for _ in 0..100 {
+        if !n.link_backlog(id, &filter).await.is_empty() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -319,9 +355,6 @@ async fn a_napplet_update_is_pushed_and_its_files_fetched_over_the_link() {
     use super::extensions::NAPPLET_UPDATES;
     use nsite_deck::{BlobStore as _, PeerSource as _};
     let (alice, bob, _, _) = linked_club().await;
-    // Both learn the other's extensions, as presence would.
-    refresh_offer(&alice).await;
-    refresh_offer(&bob).await;
     let id = bob.neighbors.records()[0].id;
 
     // Alice holds the new version's file in her own store, not the
@@ -348,7 +381,7 @@ async fn a_napplet_update_is_pushed_and_its_files_fetched_over_the_link() {
             std::slice::from_ref(&sha),
         )
         .await;
-    assert_eq!(sent, 1, "pushed to Bob's link");
+    assert_eq!(sent, 1, "published in the Club");
 
     let (n, got) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
@@ -368,31 +401,9 @@ async fn a_napplet_update_is_pushed_and_its_files_fetched_over_the_link() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_update_is_pushed_where_the_peer_has_the_extension_off() {
-    use super::extensions::NAPPLET_UPDATES;
-    let (alice, bob, _, _) = linked_club().await;
-    let id = bob.neighbors.records()[0].id;
-    bob.neighbors.set_extension(id, NAPPLET_UPDATES, false);
-    refresh_offer(&alice).await;
-    let manifest = EventBuilder::new(Kind::from(myco_napplet_runtime::KIND_NAMED), "")
-        .tags([nostr::Tag::identifier("chat")])
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    assert_eq!(
-        alice
-            .neighbors
-            .share_update(NAPPLET_UPDATES, manifest, &[])
-            .await,
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn an_nsite_update_travels_under_nsite_updates() {
     use super::extensions::NSITE_UPDATES;
     let (alice, bob, _, _) = linked_club().await;
-    refresh_offer(&alice).await;
-    refresh_offer(&bob).await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     bob.neighbors.on_update(Arc::new(move |_n, ext, ev| {
         let _ = tx.send((ext, ev.id));

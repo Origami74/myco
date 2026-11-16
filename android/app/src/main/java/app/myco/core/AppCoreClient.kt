@@ -1338,12 +1338,16 @@ object NativeActions {
     fun setNeighborhoodBlobHops(neighborhood: String, hops: Int): JSONObject =
         JSONObject().put("type", "set_neighborhood_blob_hops").put("neighborhood", neighborhood).put("hops", hops)
 
-    /** Turn an [extension] (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in [neighborhood]. */
-    fun setNeighborhoodExtension(neighborhood: String, extension: String, enabled: Boolean): JSONObject =
+    /**
+     * Turn sharing ([share]) or getting (not [share]) an [extension]'s updates
+     * (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in [neighborhood].
+     */
+    fun setNeighborhoodExtension(neighborhood: String, extension: String, share: Boolean, enabled: Boolean): JSONObject =
         JSONObject()
             .put("type", "set_neighborhood_extension")
             .put("neighborhood", neighborhood)
             .put("extension", extension)
+            .put("share", share)
             .put("enabled", enabled)
 
     /** Dev-menu speedtest: round-trip a payload through `npub`'s mesh Blossom. */

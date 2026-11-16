@@ -7,13 +7,13 @@
 //! - [`NSITE_UPDATES`] — Myco's: the same for nsites in the Library.
 //! - [`MYCO_RELEASE`] — Myco's: the signed Myco release APK.
 //!
-//! Each is a switch per neighborhood, on unless the user turns it off. A
-//! device lists the ones it has on in its offer for each neighborhood
-//! ([`super::link::OfferContent::extensions`]); something is shared over a
-//! link only when both sides have that extension on there.
+//! Each has two switches per neighborhood, both on unless the user turns
+//! them off: **share** (push this device's updates there) and **get** (apply
+//! updates that arrive there). They are independent, and nothing is agreed
+//! with peers: an update is an ordinary neighborhood event, travelling the
+//! neighborhood's publish hops, and each device decides for itself whether
+//! to act on one.
 
-use super::id::NeighborhoodId;
-use super::link::Link;
 use super::store::Record;
 
 pub const NAPPLET_UPDATES: &str = "napplet-updates";
@@ -23,18 +23,20 @@ pub const MYCO_RELEASE: &str = "myco-release";
 /// Every extension this build knows, in the order the UI lists them.
 pub const KNOWN: [&str; 3] = [NAPPLET_UPDATES, NSITE_UPDATES, MYCO_RELEASE];
 
-/// The extensions this device has on in `record`.
-pub fn ours(record: &Record) -> Vec<String> {
+/// The extensions this device shares in `record`.
+pub fn shared(record: &Record) -> Vec<String> {
     KNOWN
         .iter()
-        .filter(|e| record.policy.has(e))
+        .filter(|e| record.policy.shares(e))
         .map(|e| e.to_string())
         .collect()
 }
 
-/// Whether `extension` is on at both ends of `link` in `n`.
-pub fn shared(record: &Record, link: &Link, n: NeighborhoodId, extension: &str) -> bool {
-    record.policy.has(extension)
-        && link.neighborhoods.contains(&n)
-        && link.peer_extensions(n).iter().any(|e| e == extension)
+/// The extensions this device takes updates of in `record`.
+pub fn got(record: &Record) -> Vec<String> {
+    KNOWN
+        .iter()
+        .filter(|e| record.policy.gets(e))
+        .map(|e| e.to_string())
+        .collect()
 }

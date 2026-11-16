@@ -14,7 +14,7 @@ Code: `Policy` in `myco-core/src/neighbor/store.rs`, stored in
 | Backlog hops | 2 | How far a history request travels |
 | Pass on | on | Whether others' posts are passed on |
 | Blob push hops | 0 | How far an upload is pushed (0: stays here) |
-| Extensions | all on | What this device shares proactively here ([extensions.md](extensions.md)) |
+| Extensions: Get / Share | all on | Which updates are applied from here, and which this device pushes here ([extensions.md](extensions.md)) |
 
 ## Reach presets
 

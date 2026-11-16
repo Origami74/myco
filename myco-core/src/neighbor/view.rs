@@ -46,8 +46,11 @@ pub struct NeighborhoodView {
     pub backlog_hops: u8,
     pub blob_hops: u8,
     pub pass_on: bool,
-    /// Extensions on here (see [`super::extensions`]).
-    pub extensions: Vec<String>,
+    /// Extensions this device shares updates of here (see
+    /// [`super::extensions`]).
+    pub share: Vec<String>,
+    /// Extensions this device takes updates of from here.
+    pub get: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,7 +102,8 @@ pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
                 backlog_hops: r.policy.backlog_hops,
                 blob_hops: r.policy.blob_hops,
                 pass_on: r.policy.pass_on,
-                extensions: super::extensions::ours(r),
+                share: super::extensions::shared(r),
+                get: super::extensions::got(r),
             })
             .collect(),
         links: all

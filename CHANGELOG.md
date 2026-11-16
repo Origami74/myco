@@ -25,10 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Friends of friends, Wide). The **Neighbors** tab replaces the Circle tab.
   Napplets reach neighborhoods through NAP-NEIGHBOR
   ([napplet/naps#146](https://github.com/napplet/naps/pull/146)).
-- **Share updates, per neighborhood.** App updates, Site updates and Myco
-  updates switches, all on by default. Something is shared with a linked
-  person only when both of you have that switch on. Only devices sharing
-  one with you can reach this phone's relay and Blossom on the mesh.
+- **Updates, per neighborhood.** App, Site and Myco updates each have a
+  Get and a Share switch, all on by default and independent: take updates
+  without passing yours on, or the other way round. Shared updates travel
+  the neighborhood like posts, with their files.
 - **Neighborhood files cross links.** A file posted in a neighborhood can be
   fetched by the people linked to you there, and only that neighborhood's
   files are reachable this way.

@@ -32,16 +32,25 @@ pub struct Policy {
     /// the user's own devices.
     #[serde(default)]
     pub blob_hops: u8,
-    /// Extensions (see [`super::extensions`]) the user turned off here.
-    /// Every one is on unless listed, including ones a later build adds.
+    /// Extensions (see [`super::extensions`]) this device does not share
+    /// here. Every one is shared unless listed, including ones a later
+    /// build adds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub extensions_off: BTreeSet<String>,
+    pub share_off: BTreeSet<String>,
+    /// Extensions whose updates this device does not take from here.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub get_off: BTreeSet<String>,
 }
 
 impl Policy {
-    /// Whether `extension` is on in this neighborhood.
-    pub fn has(&self, extension: &str) -> bool {
-        !self.extensions_off.contains(extension)
+    /// Whether this device shares `extension`'s updates here.
+    pub fn shares(&self, extension: &str) -> bool {
+        !self.share_off.contains(extension)
+    }
+
+    /// Whether this device takes `extension`'s updates from here.
+    pub fn gets(&self, extension: &str) -> bool {
+        !self.get_off.contains(extension)
     }
 }
 
@@ -52,7 +61,8 @@ impl Default for Policy {
             backlog_hops: 2,
             pass_on: true,
             blob_hops: 0,
-            extensions_off: BTreeSet::new(),
+            share_off: BTreeSet::new(),
+            get_off: BTreeSet::new(),
         }
     }
 }

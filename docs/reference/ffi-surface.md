@@ -82,7 +82,7 @@ dispatch(actionJson) → stateJson
 | `drop_from_link` | `linkId`: String, `neighborhood`: String | Stop carrying one neighborhood on one link, telling the peer. |
 | `set_neighborhood_policy` | `neighborhood`: String, `publishHops`: u8, `backlogHops`: u8, `passOn`: bool | A neighborhood's reach (the Posts reach presets). |
 | `set_neighborhood_blob_hops` | `neighborhood`: String, `hops`: u8 | How far a neighborhood pushes uploaded blobs (0: not at all). |
-| `set_neighborhood_extension` | `neighborhood`: String, `extension`: String, `enabled`: bool | Turn an extension (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in a neighborhood. |
+| `set_neighborhood_extension` | `neighborhood`: String, `extension`: String, `share`: bool, `enabled`: bool | Turn sharing (`share: true`) or getting (`share: false`) an extension's updates (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in a neighborhood. |
 | `rename_neighborhood` | `neighborhood`: String, `name`: String | The user's local name for a neighborhood. |
 | `leave_neighborhood` | `neighborhood`: String | Stop carrying a neighborhood on every link, and forget it. |
 | `share_file` | `path`: String, `name`: String, `mime`: String, `peerNpub`: String | Encrypt a local file and send a private offer to an app peer. |
@@ -105,7 +105,7 @@ big fields, by layer:
 | `rev`, `error`, `appVersion`, `multipathCore` | — | bookkeeping; `error` is empty when healthy |
 | `identity` | 4 | `ownNpub`, `ownPubkeyHex`, `nodeAddrHex`, `fipsAddr`, the mesh ULA |
 | `node`, `ble`, `bleAdverts`, `blePeers`, `wifiAware`, `peers` | 4 | node status; per-lane radio status; the merged per-peer diagnostics rows (state, transport, every multi-path link, RTT, attempts) |
-| `neighborhoods` | 2 | `list` (each neighborhood: id, name, `autoAccept`, how many links carry it, its policy and `extensions` on), `links` (each link: peer name, neighborhoods carried, pending additions), `peers` (linked people with `reachable` and their neighborhoods), the open `invite`, and the last link action's `status` |
+| `neighborhoods` | 2 | `list` (each neighborhood: id, name, `autoAccept`, how many links carry it, its policy, and the extensions it gets (`get`) and shares (`share`)), `links` (each link: peer name, neighborhoods carried, pending additions), `peers` (linked people with `reachable` and their neighborhoods), the open `invite`, and the last link action's `status` |
 | `appPeers`, `reachableNpubs` | 2 | linked devices sharing an extension with us; those with a live mesh relay connection right now |
 | `sites`, `library`, `updateCheck` | 1 | per-nsite sync state (`syncing` / `ready` / `unreachable` / `incomplete`, files pulled/total, staged update); every installed app with `kind`, `granted`, `pointer` |
 | `nappletReview`, `nappletDomains` | 1 | a fetched napplet awaiting install review (loading / installing / added / requires / grants / error / holder; `added` once the download landed — the sheet stays up offering Open until dismissed; `installed` when it is already in the Library, `ready` when its files are on this phone too, and `unreviewed` — what an installed copy's update would add that was never reviewed; Add is offered when not installed or `unreviewed` is non-empty, "Download again" when installed but not `ready`, and neither otherwise); every grantable NAP |

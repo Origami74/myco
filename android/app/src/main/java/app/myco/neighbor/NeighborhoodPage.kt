@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -181,23 +182,34 @@ fun NeighborhoodPage(id: String, state: AppState, client: AppCoreClient, onBack:
                 Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
                     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                         Text(
-                            "Share updates",
+                            "Updates",
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp),
                         )
                         EXTENSIONS.forEach { (ext, icon, label) ->
                             Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.width(12.dp))
                                 Text(label, Modifier.weight(1f))
-                                Switch(
-                                    checked = ext in n.extensions,
-                                    onCheckedChange = {
-                                        client.dispatch(NativeActions.setNeighborhoodExtension(n.id, ext, it))
+                                // Getting and sharing are independent: take updates
+                                // without passing yours on, or the other way round.
+                                FilterChip(
+                                    selected = ext in n.get,
+                                    onClick = {
+                                        client.dispatch(NativeActions.setNeighborhoodExtension(n.id, ext, share = false, enabled = ext !in n.get))
                                     },
+                                    label = { Text("Get") },
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                FilterChip(
+                                    selected = ext in n.share,
+                                    onClick = {
+                                        client.dispatch(NativeActions.setNeighborhoodExtension(n.id, ext, share = true, enabled = ext !in n.share))
+                                    },
+                                    label = { Text("Share") },
                                 )
                             }
                         }

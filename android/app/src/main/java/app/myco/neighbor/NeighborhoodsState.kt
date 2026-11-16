@@ -34,8 +34,10 @@ data class NeighborhoodsState(
         val backlogHops: Int,
         val blobHops: Int,
         val passOn: Boolean = true,
-        /** Extensions on here: `napplet-updates`, `nsite-updates`, `myco-release`. */
-        val extensions: Set<String> = emptySet(),
+        /** Extensions whose updates this phone takes from here (`napplet-updates`, `nsite-updates`, `myco-release`). */
+        val get: Set<String> = emptySet(),
+        /** Extensions whose updates this phone passes on here. */
+        val share: Set<String> = emptySet(),
     )
 
     data class Pending(val id: String, val name: String)
@@ -64,9 +66,8 @@ data class NeighborhoodsState(
                         backlogHops = it.optInt("backlogHops"),
                         blobHops = it.optInt("blobHops"),
                         passOn = it.optBoolean("passOn", true),
-                        extensions = it.optJSONArray("extensions")?.let { a ->
-                            (0 until a.length()).map { i -> a.optString(i) }.toSet()
-                        } ?: emptySet(),
+                        get = it.optJSONArray("get").strings().toSet(),
+                        share = it.optJSONArray("share").strings().toSet(),
                     )
                 },
                 links = o.optJSONArray("links").objects().map { l ->

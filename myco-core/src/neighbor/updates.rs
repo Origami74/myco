@@ -7,13 +7,14 @@
 //!
 //! **Pushing.** When this device moves an installed napplet to a newer
 //! version, the runtime calls [`Neighbors::share_update`]: in every
-//! neighborhood with `napplet-updates` on, the manifest is kept in scope, the
-//! version's files are put in scope (read from the device's own store, not
-//! copied), and the manifest is sent with no hops left to each link where
-//! the peer has the extension on too.
+//! neighborhood it shares `napplet-updates` in, the manifest is kept in
+//! scope, the version's files are put in scope (read from the device's own
+//! store, not copied), and the manifest is published like any neighborhood
+//! event, travelling the neighborhood's publish hops.
 //!
-//! **Receiving.** A napplet manifest arriving on such a link is kept like any
-//! neighborhood event, and handed to the runtime's [`UpdateSink`]. If the
+//! **Receiving.** A napplet manifest arriving in a neighborhood is kept and
+//! passed on like any neighborhood event. Where this device gets
+//! `napplet-updates`, it is also handed to the runtime's [`UpdateSink`]. If the
 //! napplet is installed here and the version is newer, the runtime fetches
 //! the files from that neighborhood's links ([`NeighborhoodSource`]); once
 //! pinned, this device shares it onward in turn. A device that doesn't have
@@ -26,7 +27,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nostr::{Event, PublicKey};
 
-use super::extensions::{shared, MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
+use super::extensions::{MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
 use super::id::NeighborhoodId;
 use super::store::Record;
 use super::Neighbors;
@@ -65,14 +66,15 @@ impl Neighbors {
         let _ = self.scoped.kept.set(kept);
     }
 
-    /// Share a new version under `extension`: in every neighborhood with it
-    /// on, keep the manifest and `files` in scope, and send the manifest to
-    /// each link whose peer has it on too. Returns how many links were sent
-    /// to.
+    /// Share a new version under `extension`: in every neighborhood this
+    /// device shares it in, keep the manifest and `files` in scope and
+    /// publish the manifest like any neighborhood event — to every link
+    /// carrying it, with the neighborhood's publish hops. Returns in how
+    /// many neighborhoods it was sent.
     pub async fn share_update(&self, extension: &str, manifest: Event, files: &[String]) -> usize {
         let mut sent = 0;
         for record in self.records() {
-            if !record.policy.has(extension) {
+            if !record.policy.shares(extension) {
                 continue;
             }
             let n = record.id;
@@ -86,53 +88,26 @@ impl Neighbors {
                     continue;
                 }
             }
-            let Some(links) = &self.links else {
-                continue;
-            };
-            for link in links.carrying(n) {
-                if !shared(&record, &link, n, extension) {
-                    continue;
-                }
+            let hops = record.policy.publish_hops;
+            if hops > 0 {
+                self.forward(n, manifest.clone(), None, hops - 1);
                 sent += 1;
-                let manifest = manifest.clone();
-                let links = links.clone();
-                tokio::spawn(async move {
-                    match super::wire::send(&link, n, 0, &manifest).await {
-                        Ok(_) => links.mark_seen(&link.id),
-                        Err(e) => {
-                            tracing::debug!(link = %link.id, error = %e, "update push failed")
-                        }
-                    }
-                });
             }
         }
-        tracing::info!(event = %manifest.id, extension, links = sent, "update shared");
+        tracing::info!(event = %manifest.id, extension, neighborhoods = sent, "update shared");
         sent
     }
 
-    /// A neighborhood event just kept from `from_link`: if it is an update
-    /// under an extension shared on that link, hand it to the runtime.
-    pub(super) fn offer_update(
-        &self,
-        record: &Record,
-        n: NeighborhoodId,
-        from_link: &str,
-        event: &Event,
-    ) {
+    /// A neighborhood event just kept: if it is an update under an extension
+    /// this device gets in `n`, hand it to the runtime.
+    pub(super) fn offer_update(&self, record: &Record, n: NeighborhoodId, event: &Event) {
         let Some(extension) = extension_for(event.kind.as_u16()) else {
             return;
         };
         let Some(sink) = self.on_update.get() else {
             return;
         };
-        let Some(link) = self
-            .links
-            .as_ref()
-            .and_then(|l| l.all().into_iter().find(|l| l.id == from_link))
-        else {
-            return;
-        };
-        if shared(record, &link, n, extension) {
+        if record.policy.gets(extension) {
             sink(n, extension, event.clone());
         }
     }
@@ -197,7 +172,7 @@ impl nsite_deck::PeerSource for ExtensionSource {
             return Ok(None);
         };
         for record in neighbors.records() {
-            if !record.policy.has(self.extension) {
+            if !record.policy.gets(self.extension) {
                 continue;
             }
             if let Some(bytes) = neighbors.link_blob(record.id, sha256_hex).await {

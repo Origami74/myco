@@ -279,7 +279,7 @@ impl Neighbors {
         if self.scoped.add(n, event.clone()).await.is_err() {
             return false;
         }
-        self.offer_update(&record, n, from_link, &event);
+        self.offer_update(&record, n, &event);
         if ttl > 0 && record.policy.pass_on {
             let hops = (ttl - 1).min(record.policy.publish_hops);
             self.forward(n, event, Some(from_link), hops);
@@ -289,7 +289,7 @@ impl Neighbors {
 
     /// Send `event` into `n` on every link carrying it but `except`, each
     /// peer allowed `ttl` more hops. Spawned: a slow peer holds up nobody.
-    fn forward(&self, n: NeighborhoodId, event: Event, except: Option<&str>, ttl: u8) {
+    pub(super) fn forward(&self, n: NeighborhoodId, event: Event, except: Option<&str>, ttl: u8) {
         let Some(links) = &self.links else {
             return;
         };
