@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use myco_napplet_runtime::nap::neighbor::{
-    address, CreateRequest, Feature, NeighborError, NeighborHost, NeighborInfo, Neighborhood,
-    Offer, Peer,
+    address, CreateRequest, Feature, LinkClass, NeighborError, NeighborHost, NeighborInfo,
+    Neighborhood, Offer, Peer,
 };
 use myco_napplet_runtime::NappletIdentity;
 
@@ -20,6 +20,9 @@ pub struct PeerView {
     pub key: String,
     pub name: Option<String>,
     pub reachable: bool,
+    /// How the peer is reached, when known: set for peers on an ephemeral
+    /// (nearby) link.
+    pub link: Option<LinkClass>,
 }
 
 /// Who carries which neighborhood: the links it was agreed on.
@@ -106,7 +109,8 @@ impl Neighbors {
     pub fn open(data_dir: &std::path::Path, seams: Seams) -> Self {
         let file = store::path(data_dir);
         let mut s = store::load(&file);
-        if s.drop_everyone() {
+        let dropped = s.drop_everyone();
+        if dropped | keep_nearby(&mut s) {
             if let Err(e) = store::save(&file, &s) {
                 tracing::warn!(error = %e, "could not save neighborhoods");
             }
@@ -218,6 +222,37 @@ impl Neighbors {
         })
     }
 
+    /// Whether Nearby is on: the `nearby` neighborhood is carried.
+    pub fn nearby_on(&self) -> bool {
+        !self.store.lock().unwrap().nearby_off
+    }
+
+    /// Turn Nearby on or off. Off forgets the `nearby` neighborhood; on
+    /// brings it back, under the same id. Ending the ephemeral links is the
+    /// link service's (see [`super::nearby::end_all`]).
+    pub fn set_nearby(&self, on: bool) {
+        self.change(|s| {
+            s.nearby_off = !on;
+            keep_nearby(s);
+        });
+    }
+
+    /// The auto-accepted neighborhoods carried here: what an ephemeral link
+    /// may carry.
+    pub fn auto_accepted(&self) -> Vec<super::link::Shared> {
+        self.store
+            .lock()
+            .unwrap()
+            .neighborhoods
+            .iter()
+            .filter(|r| r.auto_accept)
+            .map(|r| super::link::Shared {
+                id: r.id,
+                name: r.name.clone(),
+            })
+            .collect()
+    }
+
     /// Start or join a neighborhood from the shell's own UI: the user is
     /// already the one asking, so no prompt. Granted to no napplet.
     pub fn create_local(&self, name: &str, auto_accept: bool) -> Record {
@@ -228,6 +263,14 @@ impl Neighbors {
             } else {
                 NeighborhoodId::random()
             };
+            // `nearby` is the runtime's, there while Nearby is on: joining
+            // it by name would bring it back behind the setting's back.
+            if id == super::nearby::id() {
+                return s
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| Record::new(id, &name, auto_accept));
+            }
             if s.get(id).is_none() {
                 s.neighborhoods.push(Record::new(id, &name, auto_accept));
             }
@@ -267,7 +310,8 @@ impl Neighbors {
     /// it, are unchanged.
     pub fn rename(&self, id: NeighborhoodId, name: &str) {
         let name = name.trim();
-        if name.is_empty() {
+        // `nearby` keeps its name: it is the same for everyone.
+        if name.is_empty() || id == super::nearby::id() {
             return;
         }
         self.change(|s| {
@@ -277,8 +321,12 @@ impl Neighbors {
         });
     }
 
-    /// Forget a neighborhood. Returns whether it was known.
+    /// Forget a neighborhood. Returns whether it was known. Not `nearby`:
+    /// that is turned off, not left ([`Neighbors::set_nearby`]).
     pub fn forget(&self, id: NeighborhoodId) -> bool {
+        if id == super::nearby::id() {
+            return false;
+        }
         self.change(|s| {
             let before = s.neighborhoods.len();
             s.neighborhoods.retain(|r| r.id != id);
@@ -320,6 +368,23 @@ impl Neighbors {
     }
 }
 
+/// Make the store's `nearby` record match the setting: there, first, while
+/// on; gone while off. Returns whether anything changed.
+fn keep_nearby(s: &mut Store) -> bool {
+    let id = super::nearby::id();
+    let here = s.get(id).is_some();
+    if s.nearby_off && here {
+        s.neighborhoods.retain(|r| r.id != id);
+        true
+    } else if !s.nearby_off && !here {
+        s.neighborhoods
+            .insert(0, Record::new(id, super::nearby::NAME, true));
+        true
+    } else {
+        false
+    }
+}
+
 /// Whether `new` offers anything `old` doesn't.
 fn widens(old: &Offer, new: &Offer) -> bool {
     let flags = |o: &Offer| {
@@ -339,17 +404,20 @@ fn widens(old: &Offer, new: &Offer) -> bool {
 #[async_trait]
 impl NeighborHost for Neighbors {
     async fn info(&self) -> NeighborInfo {
+        // `invite` is not offered to napplets: the shell itself does
+        // invitations (over links).
+        let mut features = vec![
+            Feature::Create,
+            Feature::Leave,
+            Feature::Offer,
+            Feature::Mute,
+            Feature::NappletUpdates,
+        ];
+        if self.nearby_on() {
+            features.push(Feature::Nearby);
+        }
         NeighborInfo {
-            // `invite` and `nearby` are not offered to napplets: the shell
-            // itself does invitations (over links), and nothing yet exposes
-            // either through NAP-NEIGHBOR.
-            features: vec![
-                Feature::Create,
-                Feature::Leave,
-                Feature::Offer,
-                Feature::Mute,
-                Feature::NappletUpdates,
-            ],
+            features,
             services: vec!["relay".into(), "blossom".into()],
         }
     }
@@ -379,7 +447,7 @@ impl NeighborHost for Neighbors {
                     id: t,
                     name: p.name,
                     reachable: p.reachable,
-                    link: None,
+                    link: p.link,
                     services: services(&record.offer),
                 }
             })
@@ -393,6 +461,10 @@ impl NeighborHost for Neighbors {
     ) -> Result<Neighborhood, NeighborError> {
         let key = napplet_key(napplet);
         let name = request.name.trim().to_string();
+        // `nearby` is the runtime's: present while the user has Nearby on.
+        if request.auto_accept && NeighborhoodId::from_name(&name) == super::nearby::id() {
+            return Err(NeighborError::Unsupported);
+        }
         let ask = Ask::Create {
             napplet: key.clone(),
             name: name.clone(),
@@ -423,6 +495,10 @@ impl NeighborHost for Neighbors {
     ) -> Result<(), NeighborError> {
         let key = napplet_key(napplet);
         let record = self.granted(&key, neighborhood)?;
+        // The user turns Nearby off in the shell; a napplet can't.
+        if record.id == super::nearby::id() {
+            return Err(NeighborError::Unsupported);
+        }
         let ask = Ask::Leave {
             napplet: key,
             name: record.name.clone(),
@@ -442,6 +518,10 @@ impl NeighborHost for Neighbors {
     ) -> Result<Offer, NeighborError> {
         let key = napplet_key(napplet);
         let record = self.granted(&key, neighborhood)?;
+        // What `nearby` offers is the runtime's, the same to everyone in reach.
+        if record.id == super::nearby::id() {
+            return Err(NeighborError::Unsupported);
+        }
         if widens(&record.offer, &offer) {
             let ask = Ask::WidenOffer {
                 napplet: key,
@@ -513,6 +593,12 @@ impl PeerDirectory for LinkPeers {
             .into_iter()
             .map(|l| PeerView {
                 reachable: links.reachable(&l.id),
+                // A nearby peer's path is how it was last in reach.
+                link: l
+                    .ephemeral
+                    .as_ref()
+                    .and_then(|_| links.last_direct(&l.id))
+                    .map(|(_, reach)| reach.link_class()),
                 key: l.peer,
                 name: l.name,
             })
@@ -566,14 +652,19 @@ mod tests {
                 key: "npub1bob".into(),
                 name: Some("Bob".into()),
                 reachable: true,
+                link: None,
             },
             PeerView {
                 key: "npub1carol".into(),
                 name: None,
                 reachable: false,
+                link: None,
             },
         ]));
-        (Neighbors::open(&d, seams(peers, asker.clone())), asker, d)
+        let n = Neighbors::open(&d, seams(peers, asker.clone()));
+        // Most tests are about neighborhoods the user makes.
+        n.set_nearby(false);
+        (n, asker, d)
     }
 
     fn app(d: &str) -> NappletIdentity {
@@ -629,6 +720,7 @@ mod tests {
         let club = Record::new(NeighborhoodId::random(), "Club", false);
         let s = Store {
             neighborhoods: vec![old, club.clone()],
+            nearby_off: true,
             ..Store::default()
         };
         store::save(&store::path(&d), &s).unwrap();
@@ -776,5 +868,82 @@ mod tests {
         assert_eq!(n.records()[0].policy.blob_hops, 0, "0 by default");
         n.set_blob_hops(id, 2);
         assert_eq!(n.records()[0].policy.blob_hops, 2);
+    }
+
+    #[tokio::test]
+    async fn nearby_is_there_by_default_for_existing_installs_too() {
+        let d = dir();
+        // A file written before Nearby existed.
+        let club = Record::new(NeighborhoodId::random(), "Club", false);
+        let old = serde_json::json!({ "neighborhoods": [club] });
+        std::fs::write(store::path(&d), old.to_string()).unwrap();
+        let asker = Arc::new(Answer(AtomicBool::new(true), Mutex::new(Vec::new())));
+        let n = Neighbors::open(&d, seams(Arc::new(Fixed(Vec::new())), asker));
+        assert!(n.nearby_on());
+        let records = n.records();
+        assert_eq!(records[0].id, super::super::nearby::id());
+        assert_eq!(records[0].name, "nearby");
+        assert!(records[0].auto_accept);
+        assert_eq!(records[1], club);
+        assert!(n.info().await.features.contains(&Feature::Nearby));
+        let listed = n.list(&app("chat")).await;
+        assert_eq!(listed[0].name, "nearby", "every napplet sees it");
+    }
+
+    #[tokio::test]
+    async fn turning_nearby_off_forgets_it_and_the_setting_is_kept() {
+        let (n, _, d) = open(true);
+        n.set_nearby(true);
+        assert_eq!(n.records().len(), 1);
+        n.set_nearby(false);
+        assert!(n.records().is_empty());
+        assert!(!n.info().await.features.contains(&Feature::Nearby));
+        let asker = Arc::new(Answer(AtomicBool::new(true), Mutex::new(Vec::new())));
+        let again = Neighbors::open(&d, seams(Arc::new(Fixed(Vec::new())), asker));
+        assert!(!again.nearby_on(), "off survives a restart");
+        assert!(again.records().is_empty());
+        // Joining it by name from the shell doesn't bring it back.
+        again.create_local("Nearby", true);
+        assert!(again.records().is_empty());
+        again.set_nearby(true);
+        assert_eq!(again.records()[0].id, super::super::nearby::id());
+    }
+
+    #[tokio::test]
+    async fn a_napplet_cannot_create_invite_set_the_offer_of_or_leave_nearby() {
+        let (n, asker, _) = open(true);
+        n.set_nearby(true);
+        let nearby = n.list(&app("chat")).await.remove(0);
+        assert_eq!(nearby.name, "nearby");
+        assert_eq!(
+            n.create(&app("chat"), new(" Nearby ", true))
+                .await
+                .unwrap_err(),
+            NeighborError::Unsupported
+        );
+        assert_eq!(
+            n.invite(&app("chat"), &nearby.id, Vec::new())
+                .await
+                .unwrap_err(),
+            NeighborError::Unsupported
+        );
+        assert_eq!(
+            n.set_offer(&app("chat"), &nearby.id, Offer::default())
+                .await
+                .unwrap_err(),
+            NeighborError::Unsupported
+        );
+        assert_eq!(
+            n.leave(&app("chat"), &nearby.id).await.unwrap_err(),
+            NeighborError::Unsupported
+        );
+        assert!(asker.1.lock().unwrap().is_empty(), "nobody was asked");
+        assert!(n.nearby_on());
+        // Nor the shell's leave or rename.
+        assert!(!n.forget(super::super::nearby::id()));
+        n.rename(super::super::nearby::id(), "Party");
+        assert_eq!(n.records()[0].name, "nearby");
+        // A neighborhood the user made called "nearby" is just a neighborhood.
+        assert!(n.create(&app("chat"), new("nearby", false)).await.is_ok());
     }
 }

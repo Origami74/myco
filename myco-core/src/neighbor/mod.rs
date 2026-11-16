@@ -17,6 +17,8 @@
 //!   (napplet updates, nsite updates, the Myco release).
 //! - [`updates`] — the update extensions: pushing a new version's manifest
 //!   to linked peers, and fetching one they pushed.
+//! - [`nearby`] — the proximity extension: the `nearby` neighborhood on
+//!   ephemeral links to devices directly in reach.
 //! - [`host`] — [`Neighbors`], the [`NeighborHost`](myco_napplet_runtime::NeighborHost)
 //!   napplets talk to, and the seams it reaches peers and the user through.
 //!
@@ -27,6 +29,7 @@ pub mod extensions;
 pub mod host;
 pub mod id;
 pub mod link;
+pub mod nearby;
 pub mod service;
 pub mod store;
 pub mod updates;

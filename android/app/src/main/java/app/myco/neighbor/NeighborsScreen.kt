@@ -82,7 +82,9 @@ fun NeighborsScreen(
     var joining by remember { mutableStateOf(false) }
 
     val here = nh.hereNow()
-    val groups = nh.list
+    // Nearby has its own row, with its switch, whether on or off.
+    val groups = nh.list.filter { !it.nearby }
+    val nearby = nh.list.firstOrNull { it.nearby }
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
@@ -149,13 +151,24 @@ fun NeighborsScreen(
             item {
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Label("YOUR NEIGHBORHOODS", Modifier.weight(1f))
-                    if (groups.isNotEmpty()) {
+                    if (nh.list.isNotEmpty()) {
                         TextButton(onClick = { showMap = !showMap }) { Text(if (showMap) "List" else "Map") }
                     }
                 }
             }
 
-            if (groups.isEmpty()) {
+            if (!showMap) {
+                item(key = "nearby") {
+                    NearbyCard(
+                        nh = nh,
+                        neighborhood = nearby,
+                        onToggle = { on -> client.dispatch(NativeActions.setNearby(on)) },
+                        onOpen = { nearby?.let { onOpenNeighborhood(it.id) } },
+                    )
+                }
+            }
+
+            if (groups.isEmpty() && !showMap) {
                 item {
                     Banner(
                         title = "Start your first neighborhood",
@@ -244,6 +257,45 @@ private fun Banner(title: String, body: String, action: String, onAction: () -> 
     }
 }
 
+/**
+ * Nearby's row: people in reach right now, with the switch for it on the
+ * card itself. Off, the row stays so it can be turned back on.
+ */
+@Composable
+private fun NearbyCard(
+    nh: NeighborhoodsState,
+    neighborhood: NeighborhoodsState.Neighborhood?,
+    onToggle: (Boolean) -> Unit,
+    onOpen: () -> Unit,
+) {
+    val on = nh.nearby.on
+    val people = if (on) nh.peopleIn(nh.nearby.id) else emptyList()
+    val hereCount = people.count { it.reachable }
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().clickable(enabled = on && neighborhood != null, onClick = onOpen),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val stripe = neighborhood?.let { bubbleColor(it) } ?: MaterialTheme.colorScheme.outline
+            Box(Modifier.width(6.dp).height(76.dp).background(if (on) stripe else stripe.copy(alpha = 0.3f)))
+            Column(Modifier.weight(1f).padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text("Nearby", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    when {
+                        !on -> "Off — phones around you can't see you"
+                        hereCount > 0 -> (withNames(people) ?: "") + " · $hereCount here now"
+                        else -> "People around you appear here"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = on, onCheckedChange = onToggle, modifier = Modifier.padding(end = 16.dp))
+        }
+    }
+}
+
 @Composable
 private fun NeighborhoodCard(n: NeighborhoodsState.Neighborhood, nh: NeighborhoodsState, onOpen: () -> Unit) {
     val people = nh.peopleIn(n.id)
@@ -315,11 +367,15 @@ internal fun PersonSheet(
                 for (id in p.neighborhoods) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(nh.nameOf(id), Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                        TextButton(onClick = { client.dispatch(NativeActions.dropFromLink(linkId, id)) }) { Text("Remove") }
+                        if (id != nh.nearby.id) {
+                            TextButton(onClick = { client.dispatch(NativeActions.dropFromLink(linkId, id)) }) { Text("Remove") }
+                        }
                     }
                 }
-                val others = nh.list.filter { it.id !in p.neighborhoods }
-                if (others.isNotEmpty()) {
+                // Nearby comes and goes with being in reach; it isn't added by hand.
+                val others = nh.list.filter { it.id !in p.neighborhoods && !it.nearby }
+                // A nearby link carries open neighborhoods only, and adds them by itself.
+                if (others.isNotEmpty() && !p.nearby) {
                     Label("ADD TO")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for (n in others.take(4)) {

@@ -120,7 +120,7 @@ fun NeighborMap(
         for (n in hoods) {
             val b = bubbles[n.id] ?: continue
             val color = bubbleColor(n)
-            if (n.name.equals("nearby", ignoreCase = true)) {
+            if (n.nearby) {
                 drawCircle(color.copy(alpha = 0.25f * (1 - pulse)), b.radius * (1 + 0.35f * pulse), b.center)
             }
             drawCircle(color.copy(alpha = 0.22f), b.radius, b.center)

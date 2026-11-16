@@ -130,9 +130,19 @@ fun NeighborhoodPage(id: String, state: AppState, client: AppCoreClient, onBack:
                     }
                 }
 
-                // Actions as icons.
+                if (n.nearby) {
+                    Text(
+                        "Phones in reach join by themselves and leave when they go. Turn Nearby off on the Neighbors tab.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                // Actions as icons. Nearby has the same name for everyone.
                 Row(Modifier.fillMaxWidth()) {
-                    SheetIconAction(Icons.Filled.Edit, "Rename", Modifier.weight(1f)) { sheet = "rename" }
+                    if (!n.nearby) {
+                        SheetIconAction(Icons.Filled.Edit, "Rename", Modifier.weight(1f)) { sheet = "rename" }
+                    }
                     SheetIconAction(Icons.Filled.Tune, "Reach", Modifier.weight(1f)) { sheet = "reach" }
                     SheetIconAction(Icons.Filled.Folder, "Files", Modifier.weight(1f)) { sheet = "files" }
                 }
@@ -199,22 +209,27 @@ fun NeighborhoodPage(id: String, state: AppState, client: AppCoreClient, onBack:
                     }
                 }
 
-                SheetAction(
-                    Icons.AutoMirrored.Filled.ExitToApp,
-                    "Leave neighborhood",
-                    tint = MaterialTheme.colorScheme.error,
-                ) { leaving = true }
+                if (!n.nearby) {
+                    SheetAction(
+                        Icons.AutoMirrored.Filled.ExitToApp,
+                        "Leave neighborhood",
+                        tint = MaterialTheme.colorScheme.error,
+                    ) { leaving = true }
+                }
             }
         }
 
-        // Invite, pinned where Home has it.
-        Button(
-            onClick = { inviting = true },
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(20.dp).height(56.dp),
-        ) {
-            Icon(Icons.Filled.PersonAdd, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("Invite", maxLines = 1)
+        // Invite, pinned where Home has it. Nobody is invited to Nearby:
+        // being in reach is the invitation.
+        if (!n.nearby) {
+            Button(
+                onClick = { inviting = true },
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(20.dp).height(56.dp),
+            ) {
+                Icon(Icons.Filled.PersonAdd, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Invite", maxLines = 1)
+            }
         }
     }
 

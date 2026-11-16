@@ -648,6 +648,7 @@ mod tests {
                 key: "npub1bob".into(),
                 name: None,
                 reachable: true,
+                link: None,
             }]
         }
     }
@@ -655,7 +656,7 @@ mod tests {
     fn open() -> Neighbors {
         let d = std::env::temp_dir().join(format!("myco-nb-data-{}", super::super::id::token()));
         std::fs::create_dir_all(&d).unwrap();
-        Neighbors::open(
+        let n = Neighbors::open(
             &d,
             Seams {
                 peers: Arc::new(Bob),
@@ -664,7 +665,9 @@ mod tests {
                 scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
                 links: None,
             },
-        )
+        );
+        n.set_nearby(false);
+        n
     }
 
     fn app() -> NappletIdentity {

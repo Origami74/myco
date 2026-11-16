@@ -17,6 +17,7 @@ transport-independent Nostr protocol. It is not a NIP yet.
 | [extensions.md](extensions.md) | What a device shares proactively: napplet updates, nsite updates, the Myco release; how a missing app is fetched | `myco-core/src/neighbor/{extensions,updates}.rs` |
 | [policy.md](policy.md) | Per-neighborhood settings: reach presets, blob push hops, extensions | `myco-core/src/neighbor/store.rs` |
 | [napplet-api.md](napplet-api.md) | What NAP-NEIGHBOR exposes, `neighborhood://` addresses, how other NAPs carry them | `myco-napplet-runtime/src/nap/neighbor/`, `myco-core/src/neighbor/host.rs` |
+| [proximity.md](proximity.md) | The `nearby` neighborhood: who counts as in reach, ephemeral links, `POST /nh/nearby` | `myco-core/src/neighbor/nearby.rs` |
 | [ui.md](ui.md) | Neighbors tab, neighborhood page, invite and join | `myco-core/src/neighbor/view.rs`, `android/…/app/myco/neighbor/` |
 
 ## Words
@@ -72,9 +73,10 @@ See [../core/identity.md](../core/identity.md) for the device key.
 
 ## Proximity (optional extension)
 
-NAP-NEIGHBOR makes proximity optional. The planned extension adds an
-auto-accepted `nearby` neighborhood on short-lived links to devices in
-radio range. It is not built.
+NAP-NEIGHBOR makes proximity optional. Myco implements it: an
+auto-accepted `nearby` neighborhood, on by default, carried on ephemeral
+links to devices directly in reach (BLE, Wi-Fi Aware, USB, the same local
+network). See [proximity.md](proximity.md).
 
 ## Removed with the Circle
 

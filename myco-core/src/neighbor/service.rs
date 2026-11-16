@@ -6,7 +6,11 @@
 //! GET  /nh/{pk}/offer          -> our offer for this link         (NIP-98, link key)
 //! POST /nh/{pk}/neighborhoods  {add, remove} -> {n, pending}      (NIP-98, link key)
 //! POST /nh/{pk}/end            -> 204                             (NIP-98, link key)
+//! POST /nh/nearby              NearbyRequest -> NearbyResponse    (NIP-98; direct peers only)
 //! ```
+//!
+//! `/nh/nearby` sets up an ephemeral link with no secret, for a device
+//! directly in reach; see [`super::nearby`].
 //!
 //! `{pk}` is this side's link public key for the link (or invitation) in
 //! question, so each link has its own URL and the URL a proof or signature
@@ -43,6 +47,8 @@ pub struct LinkService {
     /// This device's bases, e.g. `http://<npub>.fips:4873`. The first is the
     /// one invitations name first.
     pub bases: Vec<String>,
+    /// Nearby: who is in reach, and the name nearby offers carry.
+    pub nearby: Arc<super::nearby::Nearby>,
 }
 
 impl LinkService {
@@ -112,6 +118,7 @@ impl LinkService {
 
 pub fn routes(service: LinkService) -> Router {
     Router::new()
+        .route("/nh/nearby", post(nearby))
         .route("/nh/{pk}/setup", post(setup))
         .route("/nh/{pk}/offer", get(offer))
         .route("/nh/{pk}/neighborhoods", post(neighborhoods))
@@ -127,6 +134,34 @@ fn refused() -> Response {
         axum::Json(serde_json::json!({ "error": "refused" })),
     )
         .into_response()
+}
+
+/// `POST /nh/nearby`: an ephemeral link with a device directly in reach.
+/// The source address is the check, so it is read from the connection
+/// (present when served with connect info, as the auth plane is).
+async fn nearby(State(svc): State<LinkService>, request: axum::extract::Request) -> Response {
+    let source = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    let auth = request
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string);
+    let Ok(body) = axum::body::to_bytes(request.into_body(), 1 << 16).await else {
+        return refused();
+    };
+    match super::nearby::answer(
+        &svc,
+        source,
+        auth.as_deref(),
+        &body,
+        std::time::Instant::now(),
+    ) {
+        Some(response) => axum::Json(response).into_response(),
+        None => refused(),
+    }
 }
 
 async fn setup(State(svc): State<LinkService>, Path(pk): Path<String>, body: Bytes) -> Response {
@@ -159,7 +194,15 @@ async fn offer(
     let Some(link) = svc.authorized(&headers, "GET", &pk, "offer") else {
         return refused();
     };
-    axum::Json(super::link::sign_offer(&link.keys(), &svc.offer(&pk), None)).into_response()
+    // A nearby peer knows us only by what the offer says, so its offer
+    // keeps carrying our name; other links got it in the invitation.
+    let name = link.ephemeral.as_ref().and_then(|_| svc.nearby.name());
+    axum::Json(super::link::sign_offer(
+        &link.keys(),
+        &svc.offer(&pk),
+        name.as_deref(),
+    ))
+    .into_response()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -193,6 +236,33 @@ async fn neighborhoods(
     let Ok(change) = serde_json::from_slice::<Change>(&body) else {
         return refused();
     };
+    // An ephemeral link carries auto-accepted neighborhoods only, and those
+    // need no one's yes: what both carry is added at once, the rest ignored.
+    if link.ephemeral.is_some() {
+        let ours: Vec<NeighborhoodId> = svc
+            .neighbors
+            .get()
+            .map(|n| n.auto_accepted().into_iter().map(|s| s.id).collect())
+            .unwrap_or_default();
+        let add: Vec<NeighborhoodId> = change
+            .add
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| ours.contains(id))
+            .collect();
+        let now = svc
+            .links
+            .set_neighborhoods(&link.id, &add, &change.remove)
+            .unwrap_or_default();
+        if now.is_empty() {
+            svc.links.end(&link.id);
+        }
+        return axum::Json(Changed {
+            n: now.into_iter().collect(),
+            pending: Vec::new(),
+        })
+        .into_response();
+    }
     let now = svc
         .links
         .set_neighborhoods(&link.id, &[], &change.remove)
@@ -423,7 +493,7 @@ pub async fn keep_in_touch(links: Arc<Links>) {
 
 /// The client a URL is reached with: the mesh for `.fips`, the internet
 /// otherwise.
-fn client_for(url: &str) -> crate::http::HttpClient {
+pub(super) fn client_for(url: &str) -> crate::http::HttpClient {
     let host = reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
@@ -532,6 +602,7 @@ mod tests {
             links: Arc::new(Links::open(&d)),
             neighbors: Arc::default(),
             bases: vec![BASE.into()],
+            nearby: Arc::default(),
         }
     }
 

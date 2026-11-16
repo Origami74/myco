@@ -19,6 +19,19 @@ pub struct NeighborhoodsView {
     /// The peers the user is linked with, with the neighborhoods each
     /// carries: the map's nodes.
     pub peers: Vec<PeerNode>,
+    /// The Nearby switch. Its row shows whether on or off; while on, the
+    /// `nearby` neighborhood is also in `list`.
+    pub nearby: NearbyView,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NearbyView {
+    pub on: bool,
+    /// The `nearby` neighborhood's id, on or off.
+    pub id: String,
+    /// Peers in reach on an ephemeral link now.
+    pub peers: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,6 +45,8 @@ pub struct PeerNode {
     /// The link this peer is reached over.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_id: Option<String>,
+    /// On an ephemeral link: someone in reach, for now.
+    pub nearby: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +55,8 @@ pub struct NeighborhoodView {
     pub id: String,
     pub name: String,
     pub auto_accept: bool,
+    /// The runtime's `nearby` neighborhood: switched, not left or renamed.
+    pub nearby: bool,
     /// Links carrying it.
     pub links: usize,
     pub publish_hops: u8,
@@ -62,6 +79,8 @@ pub struct LinkView {
     pub neighborhoods: Vec<String>,
     /// Shares waiting for the user.
     pub pending: Vec<PendingView>,
+    /// An ephemeral (nearby) link.
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,8 +90,9 @@ pub struct PendingView {
     pub name: String,
 }
 
-pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
+pub fn build(records: &[Record], links: &Links, nearby_on: bool) -> NeighborhoodsView {
     let all = links.all();
+    let nearby_id = super::nearby::id();
     let peers = all
         .iter()
         .map(|l| PeerNode {
@@ -84,6 +104,7 @@ pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
             reachable: links.reachable(&l.id),
             neighborhoods: l.neighborhoods.iter().map(|id| id.to_hex()).collect(),
             link_id: Some(l.id.clone()),
+            nearby: l.ephemeral.is_some(),
         })
         .collect();
     NeighborhoodsView {
@@ -94,6 +115,7 @@ pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
                 id: r.id.to_hex(),
                 name: r.name.clone(),
                 auto_accept: r.auto_accept,
+                nearby: r.id == nearby_id,
                 links: all
                     .iter()
                     .filter(|l| l.neighborhoods.contains(&r.id))
@@ -123,8 +145,14 @@ pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
                         name: p.name.clone(),
                     })
                     .collect(),
+                ephemeral: l.ephemeral.is_some(),
             })
             .collect(),
+        nearby: NearbyView {
+            on: nearby_on,
+            id: nearby_id.to_hex(),
+            peers: all.iter().filter(|l| l.ephemeral.is_some()).count(),
+        },
         invite: None,
         status: String::new(),
     }

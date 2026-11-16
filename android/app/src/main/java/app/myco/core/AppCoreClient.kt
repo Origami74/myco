@@ -1196,6 +1196,17 @@ object NativeActions {
     fun createNeighborhood(name: String, autoAccept: Boolean): JSONObject =
         JSONObject().put("type", "create_neighborhood").put("name", name).put("autoAccept", autoAccept)
 
+    /** Turn Nearby on or off: the `nearby` neighborhood and its links to phones in reach. */
+    fun setNearby(enabled: Boolean): JSONObject =
+        JSONObject().put("type", "set_nearby").put("enabled", enabled)
+
+    /**
+     * The name phones in reach see, inside this phone's offer on a nearby
+     * link. Never put in a radio advert. Sent on every start and rename.
+     */
+    fun setNearbyName(name: String): JSONObject =
+        JSONObject().put("type", "set_nearby_name").put("name", name)
+
     fun createLinkInvite(neighborhoods: List<String>, from: String): JSONObject =
         JSONObject().put("type", "create_link_invite")
             .put("neighborhoods", org.json.JSONArray(neighborhoods)).put("from", from)

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Friends of friends, Wide). The **Neighbors** tab replaces the Circle tab.
   Napplets reach neighborhoods through NAP-NEIGHBOR
   ([napplet/naps#146](https://github.com/napplet/naps/pull/146)).
+- **Nearby.** A neighborhood of the people around you, with no invitation:
+  phones in reach over Bluetooth, Wi-Fi Aware, USB or the same Wi-Fi link up
+  by themselves and drop off a few minutes after they leave. On by default,
+  with a switch on its card in the Neighbors tab. Apps see it as `nearby`
+  (NAP-NEIGHBOR's proximity extension). Your chosen name goes to them inside
+  the link, never over Bluetooth.
 - **Updates, per neighborhood.** Two switches, both on by default and
   independent: *Install updates from people here* and *Send my updates to
   people here*, for apps, sites and Myco. Sent updates travel the

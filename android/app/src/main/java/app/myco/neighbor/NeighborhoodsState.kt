@@ -14,7 +14,22 @@ data class NeighborhoodsState(
     val status: String = "",
     /** Everyone the user is connected to: the map's nodes. */
     val peers: List<PeerNode> = emptyList(),
+    /** The Nearby switch, on or off. */
+    val nearby: Nearby = Nearby(),
 ) {
+    /**
+     * Nearby: the `nearby` neighborhood, carried on short-lived links to
+     * phones in reach. While [on] it is also in [list] (flagged
+     * [Neighborhood.nearby]); off, only this is left, so it can be turned
+     * back on.
+     */
+    data class Nearby(
+        val on: Boolean = false,
+        val id: String = "",
+        /** People in reach on a nearby link now. */
+        val peers: Int = 0,
+    )
+
     data class PeerNode(
         val key: String,
         val name: String,
@@ -22,6 +37,8 @@ data class NeighborhoodsState(
         val neighborhoods: List<String>,
         /** The link this peer is on; null when the core reports none. */
         val linkId: String?,
+        /** On a nearby link: in reach for now, not someone you invited. */
+        val nearby: Boolean = false,
     )
 
     data class Neighborhood(
@@ -29,6 +46,8 @@ data class NeighborhoodsState(
         val name: String,
         val autoAccept: Boolean,
         val everyone: Boolean,
+        /** The runtime's `nearby` neighborhood: switched on and off, not left, renamed or invited to. */
+        val nearby: Boolean = false,
         val links: Int,
         val publishHops: Int,
         val backlogHops: Int,
@@ -47,6 +66,8 @@ data class NeighborhoodsState(
         val name: String,
         val neighborhoods: List<String>,
         val pending: List<Pending>,
+        /** A nearby link. */
+        val ephemeral: Boolean = false,
     )
 
     fun nameOf(id: String): String = list.firstOrNull { it.id == id }?.name ?: id.take(8)
@@ -61,6 +82,7 @@ data class NeighborhoodsState(
                         name = it.optString("name"),
                         autoAccept = it.optBoolean("autoAccept"),
                         everyone = it.optBoolean("everyone"),
+                        nearby = it.optBoolean("nearby"),
                         links = it.optInt("links"),
                         publishHops = it.optInt("publishHops"),
                         backlogHops = it.optInt("backlogHops"),
@@ -78,6 +100,7 @@ data class NeighborhoodsState(
                         pending = l.optJSONArray("pending").objects().map {
                             Pending(it.optString("id"), it.optString("name"))
                         },
+                        ephemeral = l.optBoolean("ephemeral"),
                     )
                 },
                 invite = o.optString("invite").takeIf { it.isNotEmpty() },
@@ -88,6 +111,14 @@ data class NeighborhoodsState(
                         reachable = it.optBoolean("reachable"),
                         neighborhoods = it.optJSONArray("neighborhoods").strings(),
                         linkId = it.optString("linkId").takeIf { s -> s.isNotEmpty() },
+                        nearby = it.optBoolean("nearby"),
+                    )
+                },
+                nearby = o.optJSONObject("nearby").let { n ->
+                    Nearby(
+                        on = n?.optBoolean("on") ?: false,
+                        id = n?.optString("id").orEmpty(),
+                        peers = n?.optInt("peers") ?: 0,
                     )
                 },
                 status = o.optString("status"),

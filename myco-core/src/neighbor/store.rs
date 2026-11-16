@@ -162,6 +162,15 @@ pub struct Store {
     /// Napplet key → its tokens.
     #[serde(default)]
     pub tokens: BTreeMap<String, Tokens>,
+    /// The user turned Nearby off (see [`super::nearby`]). Stored as "off"
+    /// so a missing flag — every file written before Nearby existed —
+    /// reads as on, which is the default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nearby_off: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Store {

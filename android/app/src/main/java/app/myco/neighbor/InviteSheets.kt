@@ -75,7 +75,8 @@ fun InviteSheet(
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("neighbors", android.content.Context.MODE_PRIVATE) }
     val from = remember(state.ownNpub) { DeviceName.current(context, state.ownNpub) }
-    val choices = state.neighborhoods.list
+    // Nearby travels on its own links, never in an invitation.
+    val choices = state.neighborhoods.list.filter { !it.nearby }
     val picked = remember {
         mutableStateListOf<String>().also { l ->
             val last = prefs.getString("last_invite", null)?.split(',').orEmpty()

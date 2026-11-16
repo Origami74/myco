@@ -372,6 +372,7 @@ impl AppRuntime {
                     "http://{npub}.fips:{}",
                     crate::auth_service::AUTH_PORT
                 )],
+                nearby: Arc::default(),
             }
         };
         // Myco's own sockets reach the mesh through a userspace stack on the
@@ -487,6 +488,23 @@ impl AppRuntime {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let peer_feed: Arc<std::sync::Mutex<PeerFeedHealth>> =
             Arc::new(std::sync::Mutex::new(PeerFeedHealth::default()));
+        // Nearby reads who is in reach off the same snapshot, with the
+        // radios' lane record to tell Wi-Fi Aware from plain UDP.
+        link_service
+            .nearby
+            .set_direct(Arc::new(crate::neighbor::nearby::SnapshotPeers {
+                peers: peer_cache.clone(),
+                lanes: Box::new(|| {
+                    #[cfg(target_os = "android")]
+                    {
+                        crate::lane_observation::snapshot()
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        std::collections::HashMap::new()
+                    }
+                }),
+            }));
         let node_live = Arc::new(AtomicBool::new(false));
         let public_nodes = Arc::new(crate::public_nodes::PublicNodes::new(
             data_dir,
@@ -548,6 +566,11 @@ impl AppRuntime {
             // Neighborhood links: check on each peer so "here now" is true.
             rt.spawn(crate::neighbor::service::keep_in_touch(
                 link_service.links.clone(),
+            ));
+            // Nearby: ephemeral links with whoever is directly in reach.
+            rt.spawn(crate::neighbor::nearby::keep_nearby(
+                link_service.clone(),
+                identity.own_npub.clone(),
             ));
             let port = crate::auth_service::AUTH_PORT;
             let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
@@ -1344,6 +1367,16 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::SetNearby { enabled } => {
+                self.set_nearby(enabled);
+                self.rev += 1;
+            }
+            NativeAppAction::SetNearbyName { name } => {
+                if let Some(svc) = &self.link_service {
+                    svc.nearby.set_name(Some(name));
+                }
+                // Nothing on screen changes.
+            }
             NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
                 if let (Some(n), Some(id)) = (
                     self.neighbors(),
@@ -1367,22 +1400,44 @@ impl AppRuntime {
         self.neighbors.clone()
     }
 
+    /// Turn Nearby on or off. Off forgets the `nearby` neighborhood and
+    /// ends every ephemeral link, telling the peers when they can be reached.
+    fn set_nearby(&mut self, on: bool) {
+        let (Some(svc), Some(n)) = (self.link_service.clone(), self.neighbors()) else {
+            return;
+        };
+        n.set_nearby(on);
+        if on {
+            return;
+        }
+        let ended = crate::neighbor::nearby::end_all(&svc);
+        if let Some(rt) = self.rt.as_ref() {
+            for link in ended {
+                rt.spawn(async move {
+                    let _ =
+                        crate::neighbor::service::call(&link, reqwest::Method::POST, "end", None)
+                            .await;
+                });
+            }
+        }
+    }
+
     fn neighborhoods_view(&self) -> crate::neighbor::view::NeighborhoodsView {
         let Some(svc) = &self.link_service else {
             return Default::default();
         };
-        let records = match &self.neighbors {
-            Some(n) => n.records(),
+        let (records, nearby_on) = match &self.neighbors {
+            Some(n) => (n.records(), n.nearby_on()),
             // Not built yet: read what is on disk rather than build it from a
             // state read.
             None => {
-                crate::neighbor::store::load(&crate::neighbor::store::path(Path::new(
+                let s = crate::neighbor::store::load(&crate::neighbor::store::path(Path::new(
                     &self.data_dir,
-                )))
-                .neighborhoods
+                )));
+                (s.neighborhoods, !s.nearby_off)
             }
         };
-        let mut view = crate::neighbor::view::build(&records, &svc.links);
+        let mut view = crate::neighbor::view::build(&records, &svc.links, nearby_on);
         let ui = self.link_ui.lock().unwrap();
         view.invite = ui.invite.clone();
         view.status = ui.status.clone();
@@ -1398,9 +1453,11 @@ impl AppRuntime {
             return;
         };
         let records = n.records();
+        // `nearby` travels on ephemeral links only, never in an invitation.
         let shared: Vec<crate::neighbor::link::Shared> = ids
             .iter()
             .filter_map(|h| crate::neighbor::NeighborhoodId::from_hex(h))
+            .filter(|id| *id != crate::neighbor::nearby::id())
             .filter_map(|id| records.iter().find(|r| r.id == id))
             .map(|r| crate::neighbor::link::Shared {
                 id: r.id,
@@ -1491,6 +1548,9 @@ impl AppRuntime {
         let Some(id) = crate::neighbor::NeighborhoodId::from_hex(&neighborhood) else {
             return;
         };
+        if id == crate::neighbor::nearby::id() {
+            return;
+        }
         let Some(record) = n.records().into_iter().find(|r| r.id == id) else {
             return;
         };
@@ -1535,6 +1595,10 @@ impl AppRuntime {
         ) else {
             return;
         };
+        // `nearby` is turned off, not left: the Nearby switch does that.
+        if id == crate::neighbor::nearby::id() {
+            return;
+        }
         let carrying: Vec<String> = svc.links.carrying(id).into_iter().map(|l| l.id).collect();
         for link_id in carrying {
             self.drop_from_link(link_id, neighborhood.to_string());

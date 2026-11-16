@@ -58,13 +58,14 @@ another endpoint or with another key. Every refusal says only `refused`.
 
 Names travel only in invitations and setup, to the one person they are
 for: the inviter's `from` in the invitation, the joiner's name in its setup
-request. Nothing advertises a name over Bluetooth any more. Names older
+request. On an ephemeral (nearby) link each side's offer carries its name. Nothing advertises a name over Bluetooth any more. Names older
 builds still advertise are read, never sent.
 
 ## Changing and ending a link
 
 - **Adding a neighborhood** to a link (`POST /neighborhoods`) needs the
-  other user's yes. Until then it is pending on their side.
+  other user's yes. Until then it is pending on their side. On an ephemeral
+  link, auto-accepted ones both carry are added at once and others ignored.
 - **Removing** one takes effect at once.
 - **Ending a link** ("Disconnect") stops every neighborhood with that
   person and tells them (`POST /end`). What was received stays on the phone.
@@ -96,6 +97,7 @@ The auth plane on `:4873` carries the link service. `{pk}` is this side's
 link key for the link, so each link has its own URL.
 
 ```text
+POST /nh/nearby              NIP-98, direct peers only -> offer, ids on the link
 POST /nh/{pk}/setup          one-time secret proof     -> offer, ids on the link
 GET  /nh/{pk}/offer          NIP-98                    -> current offer
 POST /nh/{pk}/neighborhoods  NIP-98  {add, remove}     -> ids, pending
@@ -107,6 +109,8 @@ GET  /nh/{pk}/blob/{sha256}?n=  NIP-98               -> a blob in n's scope
 - **Auth.** Everything after setup carries a NIP-98 `Authorization` header
   signed by the caller's link key (kind 27235, ±60 s). The signer must be a
   link this device holds, on the `{pk}` named.
+- **`/nh/nearby`** sets up an ephemeral link with no secret, only from a
+  device directly in reach. See [proximity.md](proximity.md).
 - **Body limit.** 8 KiB.
 - The relay route is described in [data-plane.md](data-plane.md).
 

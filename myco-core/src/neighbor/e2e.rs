@@ -12,23 +12,16 @@ use myco_napplet_runtime::NappletIdentity;
 use nostr::{EventBuilder, Filter, Keys, Kind};
 use tower::ServiceExt as _;
 
-use super::host::{Ask, Asker, Neighbors, PeerDirectory, PeerView, Seams};
+use super::host::{Ask, Asker, Neighbors, Seams};
 use super::link::{Links, SetupResponse, Shared};
+use super::nearby::{DirectPeer, DirectPeers, Nearby, Reach};
 use super::service::{routes, LinkService};
-use super::store::Record;
 
 struct Yes;
 #[async_trait::async_trait]
 impl Asker for Yes {
     async fn confirm(&self, _: Ask) -> bool {
         true
-    }
-}
-
-struct Nobody;
-impl PeerDirectory for Nobody {
-    fn peers(&self, _: &Record) -> Vec<PeerView> {
-        Vec::new()
     }
 }
 
@@ -40,6 +33,39 @@ struct Device {
 }
 
 async fn device() -> Device {
+    let dev = device_with(Arc::new(Fake::default()), false).await;
+    dev.neighbors.set_nearby(false);
+    dev
+}
+
+/// Who a device's fake radio sees in reach. Requests arrive from loopback,
+/// which no FIPS address maps to, so the fake maps loopback to the first
+/// peer it sees.
+#[derive(Default)]
+struct Fake(std::sync::Mutex<Vec<DirectPeer>>);
+
+impl Fake {
+    fn see(&self, peers: Vec<DirectPeer>) {
+        *self.0.lock().unwrap() = peers;
+    }
+}
+
+impl DirectPeers for Fake {
+    fn direct(&self) -> Vec<DirectPeer> {
+        self.0.lock().unwrap().clone()
+    }
+    fn who(&self, source: std::net::IpAddr) -> Option<DirectPeer> {
+        if source.is_loopback() {
+            self.direct().into_iter().next()
+        } else {
+            None
+        }
+    }
+}
+
+/// One device whose link service sees connection sources, as the auth
+/// plane does; `direct` is its radio.
+async fn device_with(direct: Arc<dyn DirectPeers>, connect_info: bool) -> Device {
     let d = std::env::temp_dir().join(format!("myco-e2e-{}", super::id::token()));
     std::fs::create_dir_all(&d).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -48,7 +74,7 @@ async fn device() -> Device {
     let neighbors = Arc::new(Neighbors::open(
         &d,
         Seams {
-            peers: Arc::new(Nobody),
+            peers: Arc::new(super::LinkPeers(Some(links.clone()))),
             asker: Arc::new(Yes),
             scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
             scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
@@ -59,11 +85,21 @@ async fn device() -> Device {
         links,
         neighbors: Arc::default(),
         bases: vec![base],
+        nearby: Arc::new(Nearby::with(direct)),
     };
     let _ = svc.neighbors.set(neighbors.clone());
     let app = routes(svc.clone());
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        if connect_info {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        } else {
+            axum::serve(listener, app).await.unwrap();
+        }
     });
     Device { svc, neighbors }
 }
@@ -577,4 +613,221 @@ async fn whether_a_neighbor_has_a_blob_is_asked_without_fetching_it() {
         Some(false),
         "nobody has this one"
     );
+}
+
+// --- Nearby -------------------------------------------------------------------
+
+/// Two phones in reach of each other, Nearby on, with their fake radios;
+/// `alice` has the lower device npub, so she dials.
+struct Pair {
+    alice: Device,
+    bob: Device,
+    alice_radio: Arc<Fake>,
+    bob_radio: Arc<Fake>,
+}
+
+const ALICE: &str = "npub1alice";
+const BOB: &str = "npub1bob";
+
+async fn pair() -> Pair {
+    let (alice_radio, bob_radio) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
+    let alice = device_with(alice_radio.clone(), true).await;
+    let bob = device_with(bob_radio.clone(), true).await;
+    alice.svc.nearby.set_name(Some("Alice".into()));
+    bob.svc.nearby.set_name(Some("Bob".into()));
+    Pair {
+        alice,
+        bob,
+        alice_radio,
+        bob_radio,
+    }
+}
+
+fn direct(npub: &str) -> DirectPeer {
+    DirectPeer {
+        npub: npub.into(),
+        reach: Reach::Radio,
+    }
+}
+
+impl Pair {
+    /// Each radio sees the other.
+    fn in_reach(&self) {
+        self.alice_radio.see(vec![direct(BOB)]);
+        self.bob_radio.see(vec![direct(ALICE)]);
+    }
+
+    /// Alice's tick, dialing Bob's loopback service.
+    async fn alice_tick(&self) {
+        let base = self.bob.svc.bases[0].clone();
+        super::nearby::tick(
+            &self.alice.svc,
+            ALICE,
+            &move |_| base.clone(),
+            std::time::Instant::now(),
+        )
+        .await;
+    }
+
+    async fn bob_tick(&self) {
+        let base = self.alice.svc.bases[0].clone();
+        super::nearby::tick(
+            &self.bob.svc,
+            BOB,
+            &move |_| base.clone(),
+            std::time::Instant::now(),
+        )
+        .await;
+    }
+}
+
+fn join(d: &Device, name: &str, auto_accept: bool) -> super::id::NeighborhoodId {
+    d.neighbors.create_local(name, auto_accept).id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_in_reach_link_and_carry_only_the_auto_accepted_neighborhoods_both_have() {
+    let p = pair().await;
+    let lowlands = join(&p.alice, "Lowlands", true);
+    join(&p.alice, "Club", false);
+    join(&p.bob, "Lowlands", true);
+    join(&p.bob, "Other", true);
+    p.in_reach();
+
+    // Bob has the higher npub: he waits for Alice.
+    p.bob_tick().await;
+    assert!(
+        p.bob.svc.links.all().is_empty(),
+        "the higher npub never dials"
+    );
+
+    p.alice_tick().await;
+    let (a, b) = (p.alice.svc.links.all(), p.bob.svc.links.all());
+    assert_eq!((a.len(), b.len()), (1, 1), "one link, both sides");
+    let both = std::collections::BTreeSet::from([super::nearby::id(), lowlands]);
+    assert_eq!(a[0].neighborhoods, both);
+    assert_eq!(b[0].neighborhoods, both, "not Club, not Other");
+    assert_eq!(a[0].ephemeral.as_ref().unwrap().device, BOB);
+    assert_eq!(b[0].ephemeral.as_ref().unwrap().device, ALICE);
+    assert_eq!(a[0].name.as_deref(), Some("Bob"), "names come in the offer");
+    assert_eq!(b[0].name.as_deref(), Some("Alice"));
+
+    // A second tick links nobody twice.
+    p.alice_tick().await;
+    p.bob_tick().await;
+    assert_eq!(p.alice.svc.links.all().len(), 1);
+    assert_eq!(p.bob.svc.links.all().len(), 1);
+
+    // Napplets see Bob in nearby, on a proximity path.
+    let nearby = p
+        .alice
+        .neighbors
+        .list(&app())
+        .await
+        .into_iter()
+        .find(|n| n.name == "nearby")
+        .unwrap();
+    let peers = p.alice.neighbors.peers(&app(), &nearby.id).await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].name.as_deref(), Some("Bob"));
+    assert_eq!(
+        peers[0].link,
+        Some(myco_napplet_runtime::nap::neighbor::LinkClass::Proximity)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nearby_setup_from_a_device_not_in_reach_is_refused() {
+    let p = pair().await;
+    // Alice's radio sees Bob; Bob's sees nobody, so Alice isn't direct to him.
+    p.alice_radio.see(vec![direct(BOB)]);
+    p.alice_tick().await;
+    assert!(p.alice.svc.links.all().is_empty());
+    assert!(p.bob.svc.links.all().is_empty(), "refused");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nearby_setup_without_the_source_address_is_refused() {
+    // Served without connect info, Bob can't tell where a request came from.
+    let alice_radio = Arc::new(Fake::default());
+    let alice = device_with(alice_radio.clone(), true).await;
+    let bob_radio = Arc::new(Fake::default());
+    let bob = device_with(bob_radio.clone(), false).await;
+    alice_radio.see(vec![direct(BOB)]);
+    bob_radio.see(vec![direct(ALICE)]);
+    let base = bob.svc.bases[0].clone();
+    super::nearby::tick(
+        &alice.svc,
+        ALICE,
+        &move |_| base.clone(),
+        std::time::Instant::now(),
+    )
+    .await;
+    assert!(bob.svc.links.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_auto_accepted_neighborhood_joined_later_is_added_to_the_link() {
+    let p = pair().await;
+    p.in_reach();
+    p.alice_tick().await;
+    assert_eq!(p.alice.svc.links.all()[0].neighborhoods.len(), 1);
+
+    let fest = join(&p.alice, "Festival", true);
+    p.alice_tick().await;
+    assert!(
+        !p.alice.svc.links.all()[0].neighborhoods.contains(&fest),
+        "Bob doesn't carry it yet"
+    );
+    // Bob joins it too; his tick offers it, and Alice takes it.
+    join(&p.bob, "Festival", true);
+    p.bob_tick().await;
+    assert!(p.bob.svc.links.all()[0].neighborhoods.contains(&fest));
+    assert!(p.alice.svc.links.all()[0].neighborhoods.contains(&fest));
+
+    // A neighborhood Bob doesn't carry is never taken, even when offered.
+    let mine = join(&p.alice, "Mine only", true);
+    p.alice_tick().await;
+    assert!(!p.bob.svc.links.all()[0].neighborhoods.contains(&mine));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turning_nearby_off_removes_the_neighborhood_and_ends_its_links() {
+    let p = pair().await;
+    p.in_reach();
+    p.alice_tick().await;
+    assert_eq!(p.bob.svc.links.all().len(), 1);
+
+    p.bob.neighbors.set_nearby(false);
+    p.bob_tick().await;
+    assert!(p.bob.svc.links.all().is_empty(), "its links ended");
+    assert!(!p
+        .bob
+        .neighbors
+        .records()
+        .iter()
+        .any(|r| r.id == super::nearby::id()));
+    // And while off, Bob refuses new ones.
+    for l in p.alice.svc.links.all() {
+        p.alice.svc.links.end(&l.id);
+    }
+    p.alice_tick().await;
+    assert!(p.alice.svc.links.all().is_empty());
+    assert!(p.bob.svc.links.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nearby_peer_gone_past_the_grace_period_is_dropped_on_both_sides() {
+    let p = pair().await;
+    p.in_reach();
+    p.alice_tick().await;
+    p.alice_radio.see(Vec::new());
+    p.bob_radio.see(Vec::new());
+    let later = std::time::Instant::now() + super::nearby::GRACE + Duration::from_secs(1);
+    let base = p.bob.svc.bases[0].clone();
+    super::nearby::tick(&p.alice.svc, ALICE, &move |_| base.clone(), later).await;
+    let base = p.alice.svc.bases[0].clone();
+    super::nearby::tick(&p.bob.svc, BOB, &move |_| base.clone(), later).await;
+    assert!(p.alice.svc.links.all().is_empty());
+    assert!(p.bob.svc.links.all().is_empty());
 }

@@ -84,6 +84,8 @@ dispatch(actionJson) → stateJson
 | `set_neighborhood_extension` | `neighborhood`: String, `extension`: String, `share`: bool, `enabled`: bool | Turn sharing (`share: true`) or getting (`share: false`) an extension's updates (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in a neighborhood. |
 | `rename_neighborhood` | `neighborhood`: String, `name`: String | The user's local name for a neighborhood. |
 | `leave_neighborhood` | `neighborhood`: String | Stop carrying a neighborhood on every link, and forget it. |
+| `set_nearby` | `enabled`: bool | Turn Nearby on or off: the `nearby` neighborhood and the ephemeral links to devices in reach. Off ends those links. Kept in `neighborhoods.json`; shown as `neighborhoods.nearby`. |
+| `set_nearby_name` | `name`: String | The name this phone's offer carries on nearby links. Not persisted; the shell sends it on every start and rename. |
 
 `Option<String>` fields are omitted when absent. `link` for an nsite is a
 pasted link or a bare `<host>` label; `pointer` for a napplet is an `naddr…` or

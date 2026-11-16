@@ -306,6 +306,21 @@ pub struct Link {
     /// Neighborhoods the peer asked to add, waiting for this side's user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<Shared>,
+    /// Set on an ephemeral link: one set up without a secret because the
+    /// peer's device was directly in reach (see [`super::nearby`]). Such a
+    /// link carries auto-accepted neighborhoods only and never outlives the
+    /// encounter, or this run of the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<Ephemeral>,
+}
+
+/// What an ephemeral link remembers about its encounter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ephemeral {
+    /// The peer's device npub: the FIPS node that was in reach. Its FIPS
+    /// session authenticated this key, which is what stood in for the
+    /// one-time secret.
+    pub device: String,
 }
 
 impl Link {
@@ -389,6 +404,9 @@ pub struct Links {
     saved: Mutex<Saved>,
     /// When each link last answered or called, this run only.
     seen: Mutex<BTreeMap<String, std::time::Instant>>,
+    /// When each ephemeral link's device was last directly in reach, and
+    /// over what. This run only, like the links themselves.
+    direct: Mutex<BTreeMap<String, (std::time::Instant, super::nearby::Reach)>>,
 }
 
 /// How long after the last exchange a link still counts as reachable.
@@ -397,15 +415,29 @@ pub const REACHABLE_FOR: std::time::Duration = std::time::Duration::from_secs(12
 impl Links {
     pub fn open(data_dir: &Path) -> Self {
         let file = data_dir.join(FILE);
-        let saved = std::fs::read(&file)
+        let saved: Saved = std::fs::read(&file)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Self {
+        let links = Self {
             file,
             saved: Mutex::new(saved),
             seen: Mutex::default(),
+            direct: Mutex::default(),
+        };
+        // Ephemeral links belong to an encounter, and the encounter ended
+        // with the last run: whoever is still in reach links afresh.
+        let stale = links
+            .saved
+            .lock()
+            .unwrap()
+            .links
+            .iter()
+            .any(|l| l.ephemeral.is_some());
+        if stale {
+            links.change(|saved| saved.links.retain(|l| l.ephemeral.is_none()));
         }
+        links
     }
 
     fn change<T>(&self, f: impl FnOnce(&mut Saved) -> T) -> T {
@@ -548,6 +580,7 @@ impl Links {
                 name,
                 created: now(),
                 pending: Vec::new(),
+                ephemeral: None,
             };
             saved.links.push(link.clone());
             let response = SetupResponse {
@@ -616,9 +649,73 @@ impl Links {
             name,
             created: now(),
             pending: Vec::new(),
+            ephemeral: None,
         };
         self.change(|saved| saved.links.push(link.clone()));
         Ok(link)
+    }
+
+    /// Store an ephemeral link (see [`super::nearby`]): set up without a
+    /// secret, with `device` directly in reach. `keys` is this side's fresh
+    /// link key, `peer_offer` the other side's checked offer.
+    pub fn add_ephemeral(
+        &self,
+        keys: &Keys,
+        peer_offer: Event,
+        neighborhoods: BTreeSet<NeighborhoodId>,
+        device: &str,
+    ) -> Option<Link> {
+        let peer = peer_offer.pubkey.to_hex();
+        let (_, name) = read_offer(&peer_offer, &peer)?;
+        let link = Link {
+            id: token(),
+            secret: keys.secret_key().to_secret_hex(),
+            peer,
+            neighborhoods,
+            peer_offer: Some(peer_offer),
+            name,
+            created: now(),
+            pending: Vec::new(),
+            ephemeral: Some(Ephemeral {
+                device: device.to_string(),
+            }),
+        };
+        self.change(|saved| saved.links.push(link.clone()));
+        self.mark_seen(&link.id);
+        Some(link)
+    }
+
+    /// The ephemeral links.
+    pub fn ephemeral(&self) -> Vec<Link> {
+        self.all()
+            .into_iter()
+            .filter(|l| l.ephemeral.is_some())
+            .collect()
+    }
+
+    /// The ephemeral link with `device`, if there is one.
+    pub fn ephemeral_with(&self, device: &str) -> Option<Link> {
+        self.ephemeral()
+            .into_iter()
+            .find(|l| l.ephemeral.as_ref().is_some_and(|e| e.device == device))
+    }
+
+    /// Record that an ephemeral link's device is directly in reach, and how.
+    pub fn mark_direct(&self, link_id: &str, reach: super::nearby::Reach, at: std::time::Instant) {
+        self.direct
+            .lock()
+            .unwrap()
+            .insert(link_id.to_string(), (at, reach));
+    }
+
+    /// When an ephemeral link's device was last directly in reach, and how.
+    pub fn last_direct(&self, link_id: &str) -> Option<(std::time::Instant, super::nearby::Reach)> {
+        self.direct.lock().unwrap().get(link_id).copied()
+    }
+
+    /// When `link_id` last answered or called, this run.
+    pub fn last_seen(&self, link_id: &str) -> Option<std::time::Instant> {
+        self.seen.lock().unwrap().get(link_id).copied()
     }
 
     /// Add and remove neighborhoods on a link. Returns what it carries now.
@@ -701,6 +798,7 @@ impl Links {
 
     /// Drop a link.
     pub fn end(&self, link_id: &str) -> bool {
+        self.direct.lock().unwrap().remove(link_id);
         self.change(|saved| {
             let before = saved.links.len();
             saved.links.retain(|l| l.id != link_id);
