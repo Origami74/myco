@@ -72,6 +72,9 @@ pub struct Neighbors {
     pub(super) scoped: Arc<super::data::Scoped>,
     /// Links, which carry the neighborhoods.
     pub(super) links: Option<Arc<super::link::Links>>,
+    /// Told of an update manifest a linked peer shared under an extension
+    /// both ends have on (see [`super::updates`]).
+    pub(super) on_update: std::sync::OnceLock<super::updates::UpdateSink>,
 }
 
 /// What [`Neighbors::open`] reaches the world through.
@@ -116,6 +119,7 @@ impl Neighbors {
                 seams.scoped_blobs,
             )),
             links: seams.links,
+            on_update: std::sync::OnceLock::new(),
         }
     }
 

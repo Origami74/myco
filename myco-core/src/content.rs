@@ -539,6 +539,8 @@ pub struct Content {
     /// catalog is the Library, so a write may change what an archetype
     /// resolves to. One waiter; a write while nobody waits leaves a permit.
     library_changed: Arc<tokio::sync::Notify>,
+    /// Napplet updates as they are pinned ([`Content::napplet_updates`]).
+    napplet_updates: tokio::sync::broadcast::Sender<Event>,
     /// App peers: linked devices sharing an extension with us. Set by the
     /// runtime from the links, never persisted.
     app_peers: Mutex<Vec<AppPeer>>,
@@ -899,6 +901,7 @@ impl Content {
             library_path,
             library_changed: Arc::new(tokio::sync::Notify::new()),
             app_peers: Mutex::new(Vec::new()),
+            napplet_updates: tokio::sync::broadcast::channel(32).0,
             connected_peers: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
             forgotten: Mutex::new(std::collections::HashSet::new()),
@@ -3960,18 +3963,29 @@ impl Content {
             &manifest.pubkey,
             event_d_tag(manifest).as_deref(),
         );
-        let snapshot = {
+        let (snapshot, updated) = {
             let mut m = self.active_manifests.lock().unwrap();
-            if m.get(&key)
-                .is_some_and(|cur| cur.created_at > manifest.created_at)
-            {
+            let previous = m.get(&key).map(|cur| cur.created_at);
+            if previous.is_some_and(|cur| cur > manifest.created_at) {
                 return false;
             }
             m.insert(key, manifest.clone());
-            m.values().cloned().collect::<Vec<_>>()
+            let updated = previous.is_some_and(|cur| cur < manifest.created_at);
+            (m.values().cloned().collect::<Vec<_>>(), updated)
         };
         save_active(&self.active_path, &snapshot);
+        // A newer version replaced an older one: an update, which the
+        // `napplet-updates` extension shares with neighbors.
+        if updated {
+            let _ = self.napplet_updates.send(manifest.clone());
+        }
         true
+    }
+
+    /// Napplet manifests as they are pinned over an older version — updates
+    /// this device now holds the files of.
+    pub fn napplet_updates(&self) -> tokio::sync::broadcast::Receiver<Event> {
+        self.napplet_updates.subscribe()
     }
 
     /// Fan a manifest to connected app peers over the push plane (carrying a

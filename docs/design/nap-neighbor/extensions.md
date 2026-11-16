@@ -41,9 +41,35 @@ extension on in that neighborhood. An offer without `extensions` (an older
 build) counts as none on. A peer learns a change at its next presence check
 (every 30 s), when it fetches the offer again.
 
+## napplet-updates
+
+Code: `myco-core/src/neighbor/updates.rs`.
+
+**Pushing.** When an installed napplet is pinned at a newer version (the
+update check, or a push), the device, in every neighborhood with
+`napplet-updates` on:
+
+1. puts the version's files (`index.html` and the icon) in the
+   neighborhood's scope — read from the device's own store, not copied;
+2. keeps the manifest there as a neighborhood event;
+3. sends it, with no hops left, to each link where the peer has the
+   extension on too.
+
+**Receiving.** A napplet manifest from such a link is kept in the
+neighborhood like any event. Then:
+
+- **Installed here and newer:** the files are fetched from that
+  neighborhood (its scope, then its links; see
+  [data-plane.md](data-plane.md#blobs)), verified and pinned. Pinned, it is
+  shared onward by the same push.
+- **Not installed, or not newer:** nothing is fetched or passed on. The
+  manifest stays in the neighborhood, so an app store reading it sees that
+  someone around holds that napplet.
+
+Only the files of versions this device pushed are reachable this way.
+
 ## Status
 
-The switches and the offer field are built. What each extension pushes is
-being built next; until then Myco's own updates still travel to app peers
-([app-peers.md](app-peers.md)), which are the devices sharing at least one
-extension with us.
+`napplet-updates` is built. `nsite-updates` and `myco-release` have their
+switches and agreement but push nothing yet; Myco's own nsite and release
+updates still travel to app peers ([app-peers.md](app-peers.md)).

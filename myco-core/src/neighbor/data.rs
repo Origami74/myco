@@ -28,6 +28,9 @@ use super::store::Record;
 pub struct Scoped {
     pub store: Arc<dyn RelayBackend>,
     pub blobs: Arc<dyn nsite_deck::BlobStore>,
+    /// The device's own kept blobs, for files an extension shares without
+    /// copying them (see [`super::updates`]). Set once by the runtime.
+    pub kept: std::sync::OnceLock<Arc<dyn nsite_deck::BlobStore>>,
     file: PathBuf,
     /// Event id (hex), or `blob:<sha256>` → the neighborhoods it was
     /// published or received in.
@@ -52,6 +55,7 @@ impl Scoped {
         Self {
             store,
             blobs,
+            kept: std::sync::OnceLock::new(),
             file,
             scopes: Mutex::new(scopes),
             live: broadcast::channel(256).0,
@@ -80,7 +84,26 @@ impl Scoped {
         if !scoped {
             return Ok(None);
         }
-        self.blobs.get(sha256).await
+        if let Some(bytes) = self.blobs.get(sha256).await? {
+            return Ok(Some(bytes));
+        }
+        match self.kept.get() {
+            Some(kept) => kept.get(sha256).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Put files already kept on the device into neighborhood `id`'s scope,
+    /// without copying them: they are read from [`Scoped::kept`].
+    pub(super) fn share_kept(&self, id: NeighborhoodId, sha256s: &[String]) -> anyhow::Result<()> {
+        for sha in sha256s {
+            self.scope(id, format!("blob:{sha}"))?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn add_shared(&self, id: NeighborhoodId, event: Event) -> anyhow::Result<()> {
+        self.add(id, event).await
     }
 
     fn scope(&self, id: NeighborhoodId, key: String) -> anyhow::Result<()> {
@@ -188,7 +211,7 @@ impl Neighbors {
     /// Ask the links carrying `n` (or only `peer`'s) for a blob, one after
     /// another, until one has it. What comes back must hash to `sha256`; it
     /// is then kept in `n`'s scope here, so the next ask is local.
-    async fn blob_from_links(
+    pub(super) async fn blob_from_links(
         &self,
         n: NeighborhoodId,
         sha256: &str,
@@ -256,6 +279,7 @@ impl Neighbors {
         if self.scoped.add(n, event.clone()).await.is_err() {
             return false;
         }
+        self.offer_update(&record, n, from_link, &event);
         if ttl > 0 && record.policy.pass_on {
             let hops = (ttl - 1).min(record.policy.publish_hops);
             self.forward(n, event, Some(from_link), hops);

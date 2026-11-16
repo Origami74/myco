@@ -313,3 +313,72 @@ async fn extensions_are_shared_when_on_at_both_ends() {
     let club = bob.neighbors.records()[0].clone();
     assert!(!shared(&club, &link, id, NAPPLET_UPDATES), "off at his end");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_napplet_update_is_pushed_and_its_files_fetched_over_the_link() {
+    use super::extensions::NAPPLET_UPDATES;
+    use nsite_deck::{BlobStore as _, PeerSource as _};
+    let (alice, bob, _, _) = linked_club().await;
+    // Both learn the other's extensions, as presence would.
+    refresh_offer(&alice).await;
+    refresh_offer(&bob).await;
+    let id = bob.neighbors.records()[0].id;
+
+    // Alice holds the new version's file in her own store, not the
+    // neighborhood's.
+    let kept = Arc::new(nsite_deck::testing::MemBlobs::new());
+    let file = b"<html>v2</html>".to_vec();
+    let sha = kept.put(&file).await.unwrap();
+    alice.neighbors.set_kept_blobs(kept);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    bob.neighbors.on_update(Arc::new(move |n, ev| {
+        let _ = tx.send((n, ev));
+    }));
+
+    let manifest = EventBuilder::new(Kind::from(myco_napplet_runtime::KIND_NAMED), "")
+        .tags([nostr::Tag::identifier("chat")])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let sent = alice
+        .neighbors
+        .share_update(NAPPLET_UPDATES, manifest.clone(), &[sha.clone()])
+        .await;
+    assert_eq!(sent, 1, "pushed to Bob's link");
+
+    let (n, got) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("Bob was told")
+        .unwrap();
+    assert_eq!((n, got.id), (id, manifest.id));
+
+    let source = super::updates::NeighborhoodSource {
+        neighbors: bob.neighbors.clone(),
+        n,
+    };
+    assert_eq!(
+        source.fetch_blob(&sha, &[]).await.unwrap(),
+        Some(file),
+        "the version's file came from Alice through the Club"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_update_is_pushed_where_the_peer_has_the_extension_off() {
+    use super::extensions::NAPPLET_UPDATES;
+    let (alice, bob, _, _) = linked_club().await;
+    let id = bob.neighbors.records()[0].id;
+    bob.neighbors.set_extension(id, NAPPLET_UPDATES, false);
+    refresh_offer(&alice).await;
+    let manifest = EventBuilder::new(Kind::from(myco_napplet_runtime::KIND_NAMED), "")
+        .tags([nostr::Tag::identifier("chat")])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    assert_eq!(
+        alice
+            .neighbors
+            .share_update(NAPPLET_UPDATES, manifest, &[])
+            .await,
+        0
+    );
+}

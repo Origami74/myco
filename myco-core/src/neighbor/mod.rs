@@ -17,6 +17,8 @@
 //!   which Myco fetches apps and updates from.
 //! - [`extensions`] — what a device shares proactively per neighborhood
 //!   (napplet updates, nsite updates, the Myco release).
+//! - [`updates`] — the update extensions: pushing a new version's manifest
+//!   to linked peers, and fetching one they pushed.
 //! - [`host`] — [`Neighbors`], the [`NeighborHost`](myco_napplet_runtime::NeighborHost)
 //!   napplets talk to, and the seams it reaches peers and the user through.
 //!
@@ -30,6 +32,7 @@ pub mod id;
 pub mod link;
 pub mod service;
 pub mod store;
+pub mod updates;
 pub mod view;
 pub mod wire;
 
