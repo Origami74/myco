@@ -111,7 +111,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | Doc | Description |
 | --- | --- |
 | [README.md](./design/nap-neighbor/README.md) | Overview: what a neighborhood is, the three keys, files on the device, what the Circle's removal took with it. |
-| [links.md](./design/nap-neighbor/links.md) | Invitations (`myco://link/`), the setup proof, link keys, offers (kind 37516), NIP-98, the link service on `:4873`, presence. |
+| [links.md](./design/nap-neighbor/links.md) | Invitations (`napplet.link/neighborhood/join`), the setup proof, link keys, offers (kind 37516), NIP-98, the link service on `:4873`, presence. |
 | [data-plane.md](./design/nap-neighbor/data-plane.md) | The scoped store and blobs, the scoped relay, publish and subscribe, hops and dedup. |
 | [extensions.md](./design/nap-neighbor/extensions.md) | How apps and updates travel: `napplet-updates`, `nsite-updates`, `myco-release` with Get and Share per neighborhood; where a missing app is fetched from. |
 | [policy.md](./design/nap-neighbor/policy.md) | Per-neighborhood settings: reach presets, blob push hops, extensions. |

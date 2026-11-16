@@ -249,7 +249,7 @@ turning extensions off, and the FIPS peer ACL ("block this peer", above).
 Setting up a link is the one moment a human asserts "this is who I think it
 is."
 
-- **The invitation is a bearer secret.** `myco://link/…` carries the inviter's
+- **The invitation is a bearer secret.** `https://napplet.link/neighborhood/join?invite=…` carries the inviter's
   link service URLs, link public key, a one-time 32-byte secret, the
   neighborhoods offered, an expiry and the inviter's name. Whoever holds it
   first can join. Hand it over in person (QR, NFC tap) or over a channel you

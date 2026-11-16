@@ -103,9 +103,12 @@ data class NeighborhoodsState(
 }
 
 /**
- * A neighborhood invitation, `myco://link/<base64url(json)>` like the share
- * codes, read just far enough to show what it offers and who
- * from. The core checks everything again.
+ * A neighborhood invitation, read just far enough to show what it offers and
+ * who from. The core checks everything again. Written as the napplet link
+ * `https://napplet.link/neighborhood/join?invite=<base64url(json)>`, the
+ * `neighborhood/join` convention the shell handles itself; the
+ * `napplet:neighborhood/join?invite=…` spelling and the older
+ * `myco://link/<base64url(json)>` are read too.
  */
 data class InvitePreview(
     val raw: String,
@@ -116,11 +119,21 @@ data class InvitePreview(
 ) {
     companion object {
         const val PREFIX = "myco://link/"
+        private val LINK_PREFIXES = listOf("https://napplet.link/neighborhood/join?", "napplet:neighborhood/join?")
+
+        /** The base64url payload of any invitation spelling, or null. */
+        fun payload(text: String): String? {
+            val t = text.trim()
+            if (t.startsWith(PREFIX)) return t.removePrefix(PREFIX)
+            val prefix = LINK_PREFIXES.firstOrNull { t.startsWith(it, ignoreCase = true) } ?: return null
+            return t.substring(prefix.length).substringBefore('#').split('&')
+                .firstOrNull { it.startsWith("invite=") }?.removePrefix("invite=")
+        }
 
         fun read(text: String): InvitePreview? = runCatching {
             val t = text.trim()
-            if (!t.startsWith(PREFIX)) return null
-            val bytes = Base64.decode(t.removePrefix(PREFIX), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+            val payload = payload(t) ?: return null
+            val bytes = Base64.decode(payload, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
             val o = JSONObject(String(bytes))
             if (o.optInt("v") != 1) return null
             val n = o.optJSONArray("n") ?: JSONArray()

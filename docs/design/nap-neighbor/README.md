@@ -26,7 +26,7 @@ transport-independent Nostr protocol. It is not a NIP yet.
 | **Neighborhood** | A propagation channel ("Household", "Sports club"). No members, no roster, no admin. |
 | **Link** | A pairwise relationship between two devices, set up once from an invitation, used over any network. |
 | **Link key** | A key generated for one link. Not the FIPS device key, not the user's social key. |
-| **Invitation** | A one-time `myco://link/…` payload: QR, share link or NFC tap. |
+| **Invitation** | A one-time `https://napplet.link/neighborhood/join?invite=…` payload: QR, share link or NFC tap. |
 | **Offer** | A signed event (kind 37516) listing the endpoints one side serves on a link. |
 | **Extension** | Something a device shares proactively in a neighborhood: app, site and Myco updates ([extensions.md](extensions.md)). Each has its own Get and Share switch. |
 

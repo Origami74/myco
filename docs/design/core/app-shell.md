@@ -125,7 +125,7 @@ Library, one nsite opening another, and a shared link:
 - **A shared link** (`myco://app/…` handed to you out of band) opens the site
   directly, the same way.
 
-This `myco://app/…` launch scheme is distinct from `myco://link/…` (a
+This `myco://app/…` launch scheme is distinct from `https://napplet.link/neighborhood/join?invite=…` (a
 neighborhood invitation, see [nap-neighbor/links.md](../nap-neighbor/links.md))
 and `myco://share/…` (an app shared face to face) — same custom scheme,
 different host.
@@ -279,5 +279,5 @@ off the main thread. Closing the window closes the session. Design:
 - [nsite-layer.md](../nsite/nsite-layer.md) — the gateway that serves `http://<host>.localhost`.
 - [security.md](./security.md) — nsite sandbox, origin isolation, the
   impersonation/capability trust boundary.
-- [nap-neighbor/](../nap-neighbor/README.md) — invitations (`myco://link/…`),
+- [nap-neighbor/](../nap-neighbor/README.md) — invitations (`https://napplet.link/neighborhood/join?invite=…`),
   the other deep-link surface.

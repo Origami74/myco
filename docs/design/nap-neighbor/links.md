@@ -23,7 +23,7 @@ Code: `myco-core/src/neighbor/link.rs` (the protocol, no sockets) and
    while the sheet is open.
 
 ```text
-myco://link/<base64url(JSON)>
+https://napplet.link/neighborhood/join?invite=<base64url(JSON)>
 
 { "v": 1,
   "link": ["http://<npub>.fips:4873/nh/<A's link pk>"],
@@ -33,6 +33,12 @@ myco://link/<base64url(JSON)>
   "exp":  <unix seconds>,
   "from": "Alice" }
 ```
+
+The link is the `neighborhood/join` convention (NAP-INTENT's napplet
+link). Myco's shell handles it itself and never hands it to a napplet: it
+opens Myco where Myco is installed, and napplet.link's web page elsewhere.
+The `napplet:neighborhood/join?invite=…` spelling and the older
+`myco://link/<base64url(JSON)>` are read too.
 
 ## Setup
 

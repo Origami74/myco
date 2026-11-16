@@ -32,7 +32,7 @@ map, the [index](./README.md).
 branch; see the CHANGELOG's `[Unreleased]`):
 
 - **Neighborhoods replace the Circle.** Links set up from one-time
-  invitations (`myco://link/…` by QR, share link or NFC), a link key per
+  invitations (`https://napplet.link/neighborhood/join?invite=…` by QR, share link or NFC), a link key per
   link, signed offers, the link service on `:4873`, traffic scoped per
   neighborhood and passed on link to link, and per-neighborhood reach —
   [nap-neighbor/](design/nap-neighbor/README.md).

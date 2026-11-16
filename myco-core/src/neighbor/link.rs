@@ -67,29 +67,59 @@ pub struct LinkOffer {
 }
 
 /// The link form of an invitation, for QR codes, NFC and messages, like
-/// `myco://pair/…` and `myco://share/…`.
+/// `myco://pair/…` and `myco://share/…`. Still read, no longer written.
 pub const INVITE_PREFIX: &str = "myco://link/";
 
+/// An invitation as a napplet link: the `neighborhood/join` convention
+/// (NAP-INTENT), which the shell handles itself. It opens Myco where Myco
+/// is installed and lands on napplet.link's web page elsewhere.
+pub const INVITE_LINK: &str = "https://napplet.link/neighborhood/join?invite=";
+
 impl LinkOffer {
-    /// The invitation as a link: `myco://link/<base64url of the JSON>`.
+    /// The invitation as a link:
+    /// `https://napplet.link/neighborhood/join?invite=<base64url of the JSON>`.
+    /// Base64url needs no escaping in a query.
     pub fn encode(&self) -> String {
         format!(
-            "{INVITE_PREFIX}{}",
+            "{INVITE_LINK}{}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(serde_json::to_vec(self).expect("serializes"))
         )
     }
 
-    /// Read an invitation, as a link or as the bare payload.
+    /// Read an invitation: the napplet link (either spelling, any case of
+    /// scheme and host), the older `myco://link/…`, or the bare payload.
     pub fn decode(text: &str) -> Option<Self> {
         let text = text.trim();
-        let payload = text.strip_prefix(INVITE_PREFIX).unwrap_or(text);
+        let payload = invite_payload(text).unwrap_or(text);
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
             .ok()?;
         let offer: Self = serde_json::from_slice(&bytes).ok()?;
         (offer.v == 1).then_some(offer)
     }
+}
+
+/// The `invite` value of a `neighborhood/join` napplet link
+/// (`https://napplet.link/…` or `napplet:neighborhood/join?…`), or the
+/// payload of a `myco://link/…`.
+fn invite_payload(text: &str) -> Option<&str> {
+    if let Some(rest) = text.strip_prefix(INVITE_PREFIX) {
+        return Some(rest);
+    }
+    let lower = text.to_ascii_lowercase();
+    let query_at = [
+        "https://napplet.link/neighborhood/join?",
+        "napplet:neighborhood/join?",
+    ]
+    .iter()
+    .find(|p| lower.starts_with(*p))
+    .map(|p| p.len())?;
+    text[query_at..]
+        .split('#')
+        .next()?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("invite="))
 }
 
 /// The joiner's `POST <link>/setup` body.
@@ -731,11 +761,21 @@ mod tests {
         let offer = a.invite(vec![url.into()], vec![home.clone(), club], INVITE_TTL_SECS);
         // Through the QR and back, as a link and bare.
         let link = offer.encode();
-        assert!(link.starts_with("myco://link/"));
-        assert_eq!(
-            LinkOffer::decode(link.strip_prefix(INVITE_PREFIX).unwrap()),
-            Some(offer.clone())
-        );
+        assert!(link.starts_with(INVITE_LINK));
+        let payload = link.strip_prefix(INVITE_LINK).unwrap();
+        for spelling in [
+            payload.to_string(),
+            format!("{INVITE_PREFIX}{payload}"),
+            format!("napplet:neighborhood/join?invite={payload}"),
+            // An alphanumeric QR upper-cases scheme and host, never the query.
+            format!("HTTPS://NAPPLET.LINK/NEIGHBORHOOD/JOIN?invite={payload}#x"),
+        ] {
+            assert_eq!(
+                LinkOffer::decode(&spelling),
+                Some(offer.clone()),
+                "{spelling}"
+            );
+        }
         let offer = LinkOffer::decode(&link).unwrap();
         let (request, joining) = Links::join(
             &offer,

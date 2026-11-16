@@ -84,7 +84,7 @@ A **neighborhood** is a propagation channel ("Household", "Sports club"). It
 has no members and no admin. It is carried on **links**.
 
 A **link** is a pairwise relationship between two devices, set up once from a
-one-time **invitation** (`myco://link/…`: QR, share link or NFC tap). Each
+one-time **invitation** (`https://napplet.link/neighborhood/join?invite=…`: QR, share link or NFC tap). Each
 side makes a **link key** for it. Each link carries the neighborhoods both
 sides agreed to; an event arriving on one link is passed on to the device's
 other links in that neighborhood, within local limits.
@@ -220,7 +220,7 @@ is opened. Design: [../nsite/propagation.md](../nsite/propagation.md).
 | **neighborhood** | a propagation channel carried on links; no members, no admin |
 | **link** | a pairwise relationship between two devices, set up from an invitation; carries neighborhoods |
 | **link key** | a keypair made for one link; neither the device key nor the user key |
-| **invitation** | a one-time `myco://link/…` payload (QR, share link, NFC) that sets up a link |
+| **invitation** | a one-time `https://napplet.link/neighborhood/join?invite=…` payload (QR, share link, NFC) that sets up a link |
 | **offer** | a link-key-signed event (kind `37516`) listing what a device serves on a link |
 | **extension** | something a device shares proactively in a neighborhood (`napplet-updates`, `nsite-updates`, `myco-release`), with a Get and a Share switch |
 | **peer** | a FIPS node this phone has a transport link to; says nothing about trust |

@@ -57,7 +57,7 @@ other phone: B joins over the mesh, so it needs a route to A.
 
 - On **A** tap **Invite**, pick a neighborhood or **+ New** (say "Household"),
   and keep the sheet open. It shows a QR code and a share link, and presents
-  the same `myco://link/…` invitation as an NFC tag.
+  the same `https://napplet.link/neighborhood/join?invite=…` invitation as an NFC tag.
 - On **B** tap **Join** and scan the code, or hold the phones together. B
   shows who is inviting and to what; tick the neighborhood and **Join**.
 

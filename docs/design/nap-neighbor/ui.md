@@ -45,6 +45,6 @@ Apps · Neighbors · Settings · Dev.
 
 ## Join
 
-- Scan a QR, tap phones, or open a `myco://link/…` link.
+- Scan a QR, tap phones, or open a `https://napplet.link/neighborhood/join?invite=…` link.
 - Shows who is inviting and to which neighborhoods. Pick which to accept.
 - A **Not private** note: people in a neighborhood can pass posts on.

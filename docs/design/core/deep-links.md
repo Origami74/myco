@@ -29,9 +29,10 @@ Deliberately: **no holder npub, no invitation secret, no token Myco interprets.*
 A deep link goes places nobody controls — a chat message, a printed QR on a wall, a
 URL bar, a screenshot in someone's camera roll. Anything inside it is public, durable
 and replayable, which is the exact opposite of what a one-time secret needs to
-be. Invitations keep their own carrier: the scanned or tapped `myco://link/…`
-payload ([nap-neighbor/links.md](../nap-neighbor/links.md)), exchanged
-face to face, one-shot, and short-lived. `myco://share/…` (an app shared face to
+be. Invitations are links too (`https://napplet.link/neighborhood/join?invite=…`,
+[nap-neighbor/links.md](../nap-neighbor/links.md)), but what makes them safe
+is not the carrier: the secret inside works once and expires in 15 minutes,
+and the shell asks before joining. Share one face to face where you can. `myco://share/…` (an app shared face to
 face) may still carry the sharer's npub, but nobody is contacted directly any
 more. `myco://pair/…` is
 gone with pairing.

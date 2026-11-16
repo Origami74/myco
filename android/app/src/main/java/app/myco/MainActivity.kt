@@ -957,7 +957,7 @@ class MainActivity : ComponentActivity() {
     // --- NFC tap-to-share (numo-style: we are the card; the other phone reads) ---
     //
     // While an invite or share sheet is open we claim foreground HCE for the standard
-    // NDEF AID and emulate a URI tag (myco://link/…, myco://share/…). The *other* phone needs no
+    // NDEF AID and emulate a URI tag (an invitation's napplet link, or myco://share/…). The *other* phone needs no
     // special mode: its OS tag dispatch reads the URI and delivers it to us as an
     // NDEF_DISCOVERED intent (see the manifest filter) → handleScannedText.
 
@@ -1443,6 +1443,12 @@ class MainActivity : ComponentActivity() {
 
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
+        // A neighborhood invitation, whatever its spelling: the shell's own
+        // `neighborhood/join`, never handed to a napplet.
+        app.myco.neighbor.InvitePreview.read(data.toString())?.let { invite ->
+            app.myco.neighbor.IncomingInvite.pending.value = invite
+            return
+        }
         if (NappletLinks.isNappletLink(data)) {
             openNappletLink(data.toString())
             return

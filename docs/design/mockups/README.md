@@ -13,7 +13,7 @@ are kept for the record; the shipped screens moved on:
 - Settings (04) gained Mesh lanes (Bluetooth, Wi-Fi Aware, Network), Storage
   with custom relay/Blossom, and Identity. Reach is now set per neighborhood,
   on the Neighbors tab.
-- The QR flow (06) now carries neighborhood invitations (`myco://link/…`),
+- The QR flow (06) now carries neighborhood invitations (`https://napplet.link/neighborhood/join?invite=…`),
   alongside NFC and share links.
 - "Getting an app" (07) has a napplet variant: the install review sheet.
 
