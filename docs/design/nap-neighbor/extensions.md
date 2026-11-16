@@ -66,10 +66,18 @@ neighborhood like any event. Then:
   manifest stays in the neighborhood, so an app store reading it sees that
   someone around holds that napplet.
 
-Only the files of versions this device pushed are reachable this way.
+Only the files of versions this device pushed are reachable this way. If
+the neighborhood can't supply them, the public servers are tried, unless
+the phone is mesh-only.
+
+## nsite-updates
+
+The same, for nsites in the Library: an update activated here is shared
+with every file its manifest names; a shared one is applied if the site is
+in the Library and the version is newer than the active one.
 
 ## Status
 
-`napplet-updates` is built. `nsite-updates` and `myco-release` have their
-switches and agreement but push nothing yet; Myco's own nsite and release
-updates still travel to app peers ([app-peers.md](app-peers.md)).
+`napplet-updates` and `nsite-updates` are built. `myco-release` has its
+switch and agreement but pushes nothing yet; release updates still travel
+to app peers ([app-peers.md](app-peers.md)).

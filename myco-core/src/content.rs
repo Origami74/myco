@@ -539,6 +539,8 @@ pub struct Content {
     /// catalog is the Library, so a write may change what an archetype
     /// resolves to. One waiter; a write while nobody waits leaves a permit.
     library_changed: Arc<tokio::sync::Notify>,
+    /// Nsite updates as they are activated ([`Content::site_updates`]).
+    site_updates: tokio::sync::broadcast::Sender<Event>,
     /// Napplet updates as they are pinned ([`Content::napplet_updates`]).
     napplet_updates: tokio::sync::broadcast::Sender<Event>,
     /// App peers: linked devices sharing an extension with us. Set by the
@@ -902,6 +904,7 @@ impl Content {
             library_changed: Arc::new(tokio::sync::Notify::new()),
             app_peers: Mutex::new(Vec::new()),
             napplet_updates: tokio::sync::broadcast::channel(32).0,
+            site_updates: tokio::sync::broadcast::channel(32).0,
             connected_peers: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
             forgotten: Mutex::new(std::collections::HashSet::new()),
@@ -3674,6 +3677,9 @@ impl Content {
                 let _ = self.relay.publish(candidate.clone()).await;
             }
             self.set_active(&candidate);
+            // An update this device now holds the files of: the
+            // `nsite-updates` extension shares it with neighbors.
+            let _ = self.site_updates.send(candidate.clone());
             let n = manifest.paths.len() as u64;
             self.set_status_titled(&addr, manifest.title.as_deref(), "ready", n, n, "Updated");
             self.pending_updates.lock().unwrap().remove(&host);
@@ -3980,6 +3986,56 @@ impl Content {
             let _ = self.napplet_updates.send(manifest.clone());
         }
         true
+    }
+
+    /// Nsite manifests as an update is activated — this device now holds
+    /// their files.
+    pub fn site_updates(&self) -> tokio::sync::broadcast::Receiver<Event> {
+        self.site_updates.subscribe()
+    }
+
+    /// Apply an nsite update a neighbor shared: if the site is in the
+    /// Library and the version is newer than the active one, fetch its
+    /// files from `first` (then the public servers, unless offline-only)
+    /// and activate it. Returns whether it activated.
+    pub async fn apply_site_update(
+        self: Arc<Self>,
+        event: Event,
+        first: Arc<dyn PeerSource>,
+    ) -> bool {
+        if event.verify().is_err() {
+            return false;
+        }
+        let addr = SiteAddr {
+            author: event.pubkey,
+            d_tag: event_d_tag(&event),
+        };
+        if !self.is_in_library(&addr) {
+            return false;
+        }
+        let key = manifest_key(event.kind.as_u16(), &event.pubkey, addr.d_tag.as_deref());
+        if self
+            .active_manifests
+            .lock()
+            .unwrap()
+            .get(&key)
+            .is_some_and(|cur| cur.created_at >= event.created_at)
+        {
+            return false;
+        }
+        let mut sources = vec![first];
+        sources.extend(self.fallback_sources(None));
+        self.download_and_activate(addr, event, sources, true).await
+    }
+
+    /// The public servers, unless offline-only: where a pushed version's
+    /// files are looked for when the neighbor who pushed it can't supply
+    /// them.
+    pub(crate) fn fallback_sources(
+        &self,
+        max_blob_bytes: Option<usize>,
+    ) -> Vec<Arc<dyn PeerSource>> {
+        self.manifest_push_sources(None, max_blob_bytes)
     }
 
     /// Napplet manifests as they are pinned over an older version — updates

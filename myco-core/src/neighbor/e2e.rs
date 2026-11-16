@@ -332,7 +332,7 @@ async fn a_napplet_update_is_pushed_and_its_files_fetched_over_the_link() {
     alice.neighbors.set_kept_blobs(kept);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    bob.neighbors.on_update(Arc::new(move |n, ev| {
+    bob.neighbors.on_update(Arc::new(move |n, _ext, ev| {
         let _ = tx.send((n, ev));
     }));
 
@@ -385,4 +385,32 @@ async fn no_update_is_pushed_where_the_peer_has_the_extension_off() {
             .await,
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_nsite_update_travels_under_nsite_updates() {
+    use super::extensions::NSITE_UPDATES;
+    let (alice, bob, _, _) = linked_club().await;
+    refresh_offer(&alice).await;
+    refresh_offer(&bob).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    bob.neighbors.on_update(Arc::new(move |_n, ext, ev| {
+        let _ = tx.send((ext, ev.id));
+    }));
+    let manifest = EventBuilder::new(Kind::from(nsite_deck::KIND_NAMED), "")
+        .tags([nostr::Tag::identifier("blog")])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    assert_eq!(
+        alice
+            .neighbors
+            .share_update(NSITE_UPDATES, manifest.clone(), &[])
+            .await,
+        1
+    );
+    let got = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("Bob was told")
+        .unwrap();
+    assert_eq!(got, (NSITE_UPDATES, manifest.id));
 }

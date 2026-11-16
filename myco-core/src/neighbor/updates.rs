@@ -1,4 +1,6 @@
-//! The update extensions over links ([`super::extensions`]).
+//! The update extensions over links ([`super::extensions`]):
+//! `napplet-updates` and `nsite-updates` work the same way, described here
+//! for napplets.
 //!
 //! **Pushing.** When this device moves an installed napplet to a newer
 //! version, the runtime calls [`Neighbors::share_update`]: in every
@@ -21,18 +23,25 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nostr::{Event, PublicKey};
 
-use super::extensions::{shared, NAPPLET_UPDATES};
+use super::extensions::{shared, NAPPLET_UPDATES, NSITE_UPDATES};
 use super::id::NeighborhoodId;
 use super::store::Record;
 use super::Neighbors;
 
 /// What the runtime does with an update a linked peer shared: neighborhood,
-/// manifest.
-pub type UpdateSink = Arc<dyn Fn(NeighborhoodId, Event) + Send + Sync>;
+/// the extension it came under, manifest.
+pub type UpdateSink = Arc<dyn Fn(NeighborhoodId, &'static str, Event) + Send + Sync>;
 
-/// Whether `kind` is a napplet manifest naming an updatable slot.
-pub fn is_napplet_manifest(kind: u16) -> bool {
-    kind == myco_napplet_runtime::KIND_ROOT || kind == myco_napplet_runtime::KIND_NAMED
+/// The update extension an event kind travels under, if any: napplet
+/// manifests under `napplet-updates`, nsite manifests under `nsite-updates`.
+pub fn extension_for(kind: u16) -> Option<&'static str> {
+    if kind == myco_napplet_runtime::KIND_ROOT || kind == myco_napplet_runtime::KIND_NAMED {
+        Some(NAPPLET_UPDATES)
+    } else if kind == nsite_deck::KIND_ROOT || kind == nsite_deck::KIND_NAMED {
+        Some(NSITE_UPDATES)
+    } else {
+        None
+    }
 }
 
 impl Neighbors {
@@ -100,9 +109,9 @@ impl Neighbors {
         from_link: &str,
         event: &Event,
     ) {
-        if !is_napplet_manifest(event.kind.as_u16()) {
+        let Some(extension) = extension_for(event.kind.as_u16()) else {
             return;
-        }
+        };
         let Some(sink) = self.on_update.get() else {
             return;
         };
@@ -113,8 +122,8 @@ impl Neighbors {
         else {
             return;
         };
-        if shared(record, &link, n, NAPPLET_UPDATES) {
-            sink(n, event.clone());
+        if shared(record, &link, n, extension) {
+            sink(n, extension, event.clone());
         }
     }
 }

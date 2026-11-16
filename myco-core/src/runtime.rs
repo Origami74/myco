@@ -2581,49 +2581,68 @@ impl AppRuntime {
     /// Built on first use rather than at startup: a device that never opens a
     /// napplet never pays for one, and the host holds nothing but the two seams
     /// and its open sessions.
-    /// The `napplet-updates` extension, both ways: an installed napplet
-    /// pinned at a newer version is shared into the neighborhoods, and one
-    /// a linked peer shares is fetched from that neighborhood if installed
-    /// here and newer. See [`crate::neighbor::updates`].
-    fn wire_napplet_updates(
+    /// The update extensions, both ways: an installed napplet pinned at a
+    /// newer version, or a Library nsite activated at one, is shared into the
+    /// neighborhoods; one a linked peer shares is fetched from that
+    /// neighborhood if installed here and newer. See
+    /// [`crate::neighbor::updates`].
+    fn wire_updates(
         handle: &tokio::runtime::Handle,
         content: &Arc<crate::content::Content>,
         neighbors: &Arc<crate::neighbor::Neighbors>,
     ) {
+        use crate::neighbor::extensions::{NAPPLET_UPDATES, NSITE_UPDATES};
         neighbors.set_kept_blobs(content.blobs());
 
-        let mut updates = content.napplet_updates();
-        let sharing = Arc::downgrade(neighbors);
-        handle.spawn(async move {
-            loop {
-                let manifest = match updates.recv().await {
-                    Ok(m) => m,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                };
-                let Some(neighbors) = sharing.upgrade() else {
-                    return;
-                };
-                let Ok(parsed) =
-                    myco_napplet_runtime::NappletManifest::from_event(manifest.clone())
-                else {
-                    continue;
-                };
-                let mut files = vec![parsed.artifact.clone()];
-                files.extend(parsed.icon.map(|i| i.sha256));
-                neighbors
-                    .share_update(
-                        crate::neighbor::extensions::NAPPLET_UPDATES,
-                        manifest,
-                        &files,
-                    )
-                    .await;
-            }
-        });
+        // Sharing: one task per extension, each turning a manifest into the
+        // files it names.
+        fn napplet_files(manifest: &nostr::Event) -> Option<Vec<String>> {
+            let parsed =
+                myco_napplet_runtime::NappletManifest::from_event(manifest.clone()).ok()?;
+            let mut files = vec![parsed.artifact];
+            files.extend(parsed.icon.map(|i| i.sha256));
+            Some(files)
+        }
+        fn site_files(manifest: &nostr::Event) -> Option<Vec<String>> {
+            let parsed = nsite_deck::Manifest::from_event(manifest.clone()).ok()?;
+            let mut files: Vec<String> = parsed.blob_hashes().map(str::to_string).collect();
+            files.sort();
+            files.dedup();
+            Some(files)
+        }
+        type Files = fn(&nostr::Event) -> Option<Vec<String>>;
+        let feeds: [(
+            tokio::sync::broadcast::Receiver<nostr::Event>,
+            &'static str,
+            Files,
+        ); 2] = [
+            (content.napplet_updates(), NAPPLET_UPDATES, napplet_files),
+            (content.site_updates(), NSITE_UPDATES, site_files),
+        ];
+        for (mut updates, extension, files_of) in feeds {
+            let sharing = Arc::downgrade(neighbors);
+            handle.spawn(async move {
+                loop {
+                    let manifest = match updates.recv().await {
+                        Ok(m) => m,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    };
+                    let Some(neighbors) = sharing.upgrade() else {
+                        return;
+                    };
+                    let Some(files) = files_of(&manifest) else {
+                        continue;
+                    };
+                    neighbors.share_update(extension, manifest, &files).await;
+                }
+            });
+        }
 
+        // Receiving.
         let content = content.clone();
         let receiving = Arc::downgrade(neighbors);
-        neighbors.on_update(Arc::new(move |n, manifest| {
+        neighbors.on_update(Arc::new(move |n, extension, manifest| {
             let Some(neighbors) = receiving.upgrade() else {
                 return;
             };
@@ -2631,15 +2650,24 @@ impl AppRuntime {
             tokio::spawn(async move {
                 let source: Arc<dyn nsite_deck::PeerSource> =
                     Arc::new(crate::neighbor::updates::NeighborhoodSource { neighbors, n });
+                let id = manifest.id;
+                if extension == NSITE_UPDATES {
+                    let activated = content.apply_site_update(manifest, source).await;
+                    tracing::info!(event = %id, activated, "nsite update from a neighborhood");
+                    return;
+                }
                 // No hops: once pinned, this device shares it onward itself.
                 let inbound = crate::mesh_relay::Inbound {
                     origin: crate::mesh_relay::Origin::Mesh,
                     event_ttl: Some(0),
                     sender: None,
                 };
-                let id = manifest.id;
+                let mut sources = vec![source];
+                sources.extend(
+                    content.fallback_sources(Some(myco_napplet_runtime::nap::resource::MAX_BYTES)),
+                );
                 let outcome = content
-                    .handle_napplet_manifest(manifest, &inbound, &[source], |_, _| {})
+                    .handle_napplet_manifest(manifest, &inbound, &sources, |_, _| {})
                     .await;
                 tracing::info!(event = %id, ?outcome, "napplet update from a neighborhood");
             });
@@ -2702,7 +2730,7 @@ impl AppRuntime {
             if let Some(svc) = &self.link_service {
                 let _ = svc.neighbors.set(neighbors.clone());
             }
-            Self::wire_napplet_updates(&handle, content, &neighbors);
+            Self::wire_updates(&handle, content, &neighbors);
 
             let outbox = Arc::new(crate::outbox::OutboxService::new(
                 content.relay(),
