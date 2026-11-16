@@ -5,7 +5,8 @@
 //! into one lands in the user's own relay or in another neighborhood. One
 //! copy per event, with the set of neighborhoods it belongs to beside it.
 //! Links carry it to peers: a publish is forwarded on every link carrying the
-//! neighborhood, a subscription pulls from them.
+//! neighborhood, a subscription pulls from them, and a blob missing here is
+//! asked of them (`GET /nh/{pk}/blob/{sha256}?n=`), verified and kept.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -174,6 +175,56 @@ impl Neighbors {
         self.record(n).is_some()
     }
 
+    /// A blob a linked peer asks for in `n`: only one kept in `n`'s scope,
+    /// and only where this side offers blob reads.
+    pub async fn link_blob(&self, n: NeighborhoodId, sha256: &str) -> Option<Vec<u8>> {
+        let record = self.record(n)?;
+        if !record.offer.blob_read {
+            return None;
+        }
+        self.scoped.blob(n, sha256).await.ok().flatten()
+    }
+
+    /// Ask the links carrying `n` (or only `peer`'s) for a blob, one after
+    /// another, until one has it. What comes back must hash to `sha256`; it
+    /// is then kept in `n`'s scope here, so the next ask is local.
+    async fn blob_from_links(
+        &self,
+        n: NeighborhoodId,
+        sha256: &str,
+        peer: Option<&str>,
+    ) -> Option<Vec<u8>> {
+        let links = self.links.as_ref()?;
+        let rest = format!("blob/{sha256}?n={}", n.to_hex());
+        for link in links.carrying(n) {
+            if peer.is_some_and(|p| p != link.peer) {
+                continue;
+            }
+            let Ok(resp) = super::service::call(&link, reqwest::Method::GET, &rest, None).await
+            else {
+                continue;
+            };
+            links.mark_seen(&link.id);
+            if !resp.status().is_success()
+                || resp.content_length().is_some_and(|l| l > MAX_LINK_BLOB)
+            {
+                continue;
+            }
+            let Ok(bytes) = resp.bytes().await else {
+                continue;
+            };
+            if bytes.len() as u64 > MAX_LINK_BLOB || sha256_hex(&bytes) != sha256 {
+                tracing::debug!(link = %link.id, "peer sent a blob that is not the one asked for");
+                continue;
+            }
+            if let Err(e) = self.scoped.add_blob(n, &bytes, sha256).await {
+                tracing::debug!(error = %e, "could not keep a fetched blob");
+            }
+            return Some(bytes.to_vec());
+        }
+        None
+    }
+
     /// What a linked peer's `REQ` in `n` is answered with.
     pub async fn link_backlog(&self, n: NeighborhoodId, filters: &[Filter]) -> Vec<Event> {
         let Some(record) = self.record(n) else {
@@ -262,6 +313,14 @@ impl Neighbors {
             });
         }
     }
+}
+
+/// The largest blob taken from a link.
+const MAX_LINK_BLOB: u64 = 64 * 1024 * 1024;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
 }
 
 /// Drop events by muted authors.
@@ -358,10 +417,14 @@ impl NeighborData for Neighbors {
         sha256: &str,
     ) -> Result<Option<Vec<u8>>, NeighborError> {
         let (target, record) = self.target(napplet, address)?;
-        match target.peer {
-            None => self.scoped.blob(record.id, sha256).await.map_err(failed),
-            Some(_) => Err(NeighborError::NotFound),
+        if target.peer.is_none() {
+            if let Some(bytes) = self.scoped.blob(record.id, sha256).await.map_err(failed)? {
+                return Ok(Some(bytes));
+            }
         }
+        Ok(self
+            .blob_from_links(record.id, sha256, target.peer.as_deref())
+            .await)
     }
 
     /// Kept here in the neighborhood's scope.
@@ -504,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_peer_address_reads_nothing_yet() {
+    async fn a_peer_address_asks_only_that_peer() {
         let n = open();
         create(&n, "Club").await;
         let id = n.list(&app()).await.remove(0).id;
@@ -514,11 +577,8 @@ mod tests {
             n.subscribe(&app(), addr, kind1()).await.err(),
             Some(NeighborError::Unsupported)
         );
-        assert_eq!(
-            n.blob(&app(), addr, "ab").await.unwrap_err(),
-            NeighborError::NotFound
-        );
-        // No link to Bob, so nothing to send to.
+        // No link to Bob: nobody to ask for a blob, nobody to send to.
+        assert_eq!(n.blob(&app(), addr, "ab").await.unwrap(), None);
         assert_eq!(
             n.publish(&app(), addr, note("psst")).await.unwrap_err(),
             NeighborError::NotFound

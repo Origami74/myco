@@ -93,6 +93,7 @@ GET  /nh/{pk}/offer          NIP-98                    -> current offer
 POST /nh/{pk}/neighborhoods  NIP-98  {add, remove}     -> ids, pending
 POST /nh/{pk}/end            NIP-98                    -> 204
 GET  /nh/{pk}/relay?n=&ttl=  NIP-98, WebSocket         -> NIP-01 scoped to n
+GET  /nh/{pk}/blob/{sha256}?n=  NIP-98               -> a blob in n's scope
 ```
 
 - **Auth.** Everything after setup carries a NIP-98 `Authorization` header

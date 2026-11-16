@@ -127,6 +127,7 @@ pub fn routes(service: LinkService) -> Router {
         .route("/nh/{pk}/neighborhoods", post(neighborhoods))
         .route("/nh/{pk}/end", post(end))
         .route("/nh/{pk}/relay", get(relay))
+        .route("/nh/{pk}/blob/{sha256}", get(blob))
         .with_state(service)
 }
 
@@ -318,6 +319,46 @@ async fn relay_session(
                 return;
             }
         }
+    }
+}
+
+// --- link blobs -----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct BlobScope {
+    n: String,
+}
+
+/// `GET /nh/{pk}/blob/{sha256}?n=…`: a blob kept here in a neighborhood the
+/// link carries, if this side offers blob reads there. Nothing outside that
+/// neighborhood's scope is served. Signed (NIP-98) over the full URL.
+async fn blob(
+    State(svc): State<LinkService>,
+    Path((pk, sha256)): Path<(String, String)>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    axum::extract::Query(scope): axum::extract::Query<BlobScope>,
+    headers: HeaderMap,
+) -> Response {
+    let rest = format!("blob/{sha256}?{}", query.unwrap_or_default());
+    let Some(link) = svc.authorized(&headers, "GET", &pk, &rest) else {
+        return refused();
+    };
+    let Some(n) = NeighborhoodId::from_hex(&scope.n) else {
+        return refused();
+    };
+    let Some(neighbors) = svc.neighbors.get().cloned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if !link.neighborhoods.contains(&n) {
+        return refused();
+    }
+    match neighbors.link_blob(n, &sha256).await {
+        Some(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

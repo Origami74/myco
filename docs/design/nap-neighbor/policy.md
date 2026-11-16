@@ -29,8 +29,8 @@ The neighborhood page shows reach as three presets:
 ## Blob push hops
 
 Blobs are heavy, so pushing is off by default. It is meant for
-neighborhoods like the user's own devices. Links do not forward blobs yet,
-so the setting has no effect today.
+neighborhoods like the user's own devices. Links fetch blobs on
+demand but push none yet, so the setting has no effect today.
 
 ## Mutes
 

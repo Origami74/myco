@@ -37,7 +37,7 @@ ws://<npub>.fips:4873/nh/{pk}/relay?n=<neighborhood id>&ttl=<hops>
 | --- | --- | --- |
 | Publish | Kept in `n`; sent to every link carrying `n` with `ttl = publish hops − 1` | Kept in `n`; sent to that peer only, `ttl = 0` |
 | Subscribe | Local view, then a backlog pull from links carrying `n` (if backlog hops > 0), then live | Not supported yet |
-| Blob read | Local scoped store only | Not supported |
+| Blob read | Local scoped store, then each link carrying `n` in turn | That peer only |
 | Upload | Kept in the local scoped store | Not supported |
 
 - Sends are spawned: a slow peer holds up nobody.
@@ -47,6 +47,20 @@ ws://<npub>.fips:4873/nh/{pk}/relay?n=<neighborhood id>&ttl=<hops>
 
 ## Blobs
 
-Blobs are not fetched from or pushed to peers yet. **Blob push hops**
-([policy.md](policy.md)) is stored but pushes nothing until links forward
-blobs.
+A blob read that misses here is asked of the links carrying `n`, one at a
+time:
+
+```text
+GET /nh/{pk}/blob/{sha256}?n=<id>   NIP-98 by the link key
+  200 bytes | 404 not held | 403 link doesn't carry n
+```
+
+- The serving side answers only from `n`'s scope, and only if its offer for
+  `n` has blob reads on. Nothing else on the phone is reachable this way.
+- The fetching side checks the bytes hash to `sha256` (64 MiB cap), then
+  keeps them in `n`'s scope, so the next read is local and it can serve
+  them in turn.
+- One hop: a peer that doesn't hold the blob does not ask its own links.
+
+Blobs are not pushed. **Blob push hops** ([policy.md](policy.md)) is stored
+but pushes nothing yet.

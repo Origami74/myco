@@ -222,3 +222,57 @@ async fn a_link_not_carrying_the_neighborhood_is_refused() {
         .await
         .is_empty());
 }
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_kept_in_the_neighborhood_is_fetched_over_the_link() {
+    let (alice, bob, alice_addr, bob_addr) = linked_club().await;
+    let bytes = b"club poster".to_vec();
+    let sha = sha256_hex(&bytes);
+    alice
+        .neighbors
+        .upload(&app(), &alice_addr, bytes.clone(), &sha)
+        .await
+        .unwrap();
+
+    let got = bob.neighbors.blob(&app(), &bob_addr, &sha).await.unwrap();
+    assert_eq!(got, Some(bytes.clone()), "Bob fetched it from Alice");
+
+    // Now kept in Bob's Club too: served even with Alice gone.
+    let id = bob.neighbors.records()[0].id;
+    assert_eq!(bob.neighbors.link_blob(id, &sha).await, Some(bytes));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_outside_the_neighborhood_is_not_served() {
+    let (alice, bob, _, bob_addr) = linked_club().await;
+    // Alice holds it, but in another neighborhood Bob isn't in.
+    let other = alice
+        .neighbors
+        .create(
+            &app(),
+            CreateRequest {
+                name: "Private".into(),
+                auto_accept: false,
+            },
+        )
+        .await
+        .unwrap();
+    let bytes = b"not for the club".to_vec();
+    let sha = sha256_hex(&bytes);
+    alice
+        .neighbors
+        .upload(&app(), other.address.as_ref().unwrap(), bytes, &sha)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bob.neighbors.blob(&app(), &bob_addr, &sha).await.unwrap(),
+        None,
+        "only the Club's own blobs cross the Club's link"
+    );
+}
