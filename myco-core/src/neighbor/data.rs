@@ -267,15 +267,15 @@ impl Neighbors {
     /// Whether `n` (or only `peer` in it) could supply a blob, without
     /// transferring it: here first, then a `HEAD` to every link carrying it
     /// at once, each bounded. `Some(true)` as soon as one has it,
-    /// `Some(false)` when all said no (or there is nobody to ask), `None`
-    /// when some could not be asked.
+    /// `Some(false)` when every one asked said no, `None` when some could
+    /// not be asked, or nobody was there to ask: who is around changes, and
+    /// a napplet is not told when it does, so an empty neighborhood is not
+    /// an answer.
     async fn has_in(&self, n: NeighborhoodId, sha256: &str, peer: Option<&str>) -> Option<bool> {
         if peer.is_none() && self.scoped.has_blob(n, sha256).await {
             return Some(true);
         }
-        let Some(links) = &self.links else {
-            return Some(false);
-        };
+        let links = self.links.as_ref()?;
         let rest = format!("blob/{sha256}?n={}", n.to_hex());
         let mut asks = futures_util::stream::FuturesUnordered::new();
         for link in links.carrying(n) {
@@ -295,6 +295,9 @@ impl Neighbors {
                     _ => None,
                 }
             });
+        }
+        if asks.is_empty() {
+            return None;
         }
         use futures_util::StreamExt as _;
         let mut unknown = false;
