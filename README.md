@@ -84,11 +84,12 @@ Myco lets them hand it to you in person.**
    **camera** is asked for only when you scan a code.
    **Notifications** are optional: turn them on in **Settings › Permissions**.
 3. **Join their neighborhood**, in the **Neighbors** tab. They tap
-   **Invite**; you tap **Join** and scan the code on their screen, or hold
+   the **invite** button (the person icon); you tap the **scan** button
+   (bottom right) and scan the code on their screen, or hold
    your phone back to back with theirs, or open the link they sent. Pick
    which neighborhoods to join.
 4. **Receive the app.** They long-press the app and tap **Share**. You bump
-   phones again, or scan the code on their screen from **Apps › +**.
+   phones again, or scan the code on their screen from the **scan** button on **Apps**.
 5. **Open it.** It lands in your **Apps** grid. Some apps first list what they
    want to use, such as nearby phones or your pictures. You choose.
 
@@ -127,7 +128,7 @@ picks up the latest ticks from the phones near it, even after joining late.
 
 1. Install [Myco](#get-myco) on your own phone.
 2. Add the app. Find it in the preinstalled **AppStore** app. Or, if its
-   maker sent you a link (it starts with `naddr`), go to **Apps › +** and
+   maker sent you a link (it starts with `naddr`), go to the **scan** button on **Apps** and
    paste it. Review what it asks for and tap **Add to my apps**. Every file
    is now on your phone.
 3. Ask people to install Myco before they come. Send them
@@ -226,7 +227,7 @@ it back in plaintext, whichever app wrote it; the install sheet says so.
 1. **Build** a single-file napplet, following
    [napplet.run](https://napplet.run). (Or a static site, for an nsite.)
 2. **Publish** it to Nostr. (An nsite: `nsite-cli upload dist`.)
-3. **Add it** on one phone while online: **Apps › +**, then paste its
+3. **Add it** on one phone while online: the **scan** button on **Apps**, then paste its
    `naddr` (or the nsite's link).
 4. **Hand it over** to a second phone in airplane mode, and open it there.
    Follow [the two-phone runbook](docs/how-to/run-two-device-demo.md).
@@ -262,8 +263,8 @@ Read on:
 - **Download:** the APK from the
   [latest release](https://github.com/Origami74/myco/releases/latest), or
   through [Zapstore](https://zapstore.dev/apps/app.myco).
-- **From a phone nearby:** someone who has Myco taps **Share Myco** on the
-  Apps tab. **Over a hotspot** works with no internet: join their Wi-Fi, open
+- **From a phone nearby:** someone who has Myco taps the **share** button
+  (above the scan button) on the Apps tab. **Over a hotspot** works with no internet: join their Wi-Fi, open
   the page they show you and tap **Download Myco**. **Send the app file**
   sends the APK through Quick Share, Bluetooth or a messenger.
 - **Updates:** Myco checks daily for publisher-signed stable releases, including

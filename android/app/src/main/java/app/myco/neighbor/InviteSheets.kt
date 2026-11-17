@@ -2,11 +2,12 @@ package app.myco.neighbor
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,7 +19,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -39,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -57,13 +58,14 @@ import app.myco.ui.screens.ShareLinkRow
 
 /**
  * **Invite** — one sheet, no steps before the code: it opens on the
- * neighborhood you invited to last (or the one you came from), with chips to
- * switch or add more, and shows the QR, the link to copy or send, and
+ * neighborhood you invited to last (or the one you came from), and shows the
+ * QR, the link to copy or send, and
  * tap-phones-together all at once. With no neighborhood yet it asks for a
  * name first and goes straight to the code. Counts down while it works,
- * waits visibly, and closes with "<name> joined".
+ * waits visibly, and closes with "<name> joined". What the invitation
+ * carries is a list of big tick rows at the bottom, in thumb reach.
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InviteSheet(
     state: AppState,
@@ -136,7 +138,10 @@ fun InviteSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = dismiss, sheetState = sheetState) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text("Invite", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -160,17 +165,6 @@ fun InviteSheet(
                 }
                 return@Column
             }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                for (n in choices) {
-                    FilterChip(
-                        selected = n.id in picked,
-                        onClick = { if (n.id in picked) picked.remove(n.id) else picked.add(n.id) },
-                        label = { Text(n.name) },
-                    )
-                }
-                FilterChip(selected = false, onClick = { adding = true }, label = { Text("+ New") })
-            }
-            Spacer(Modifier.height(8.dp))
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
@@ -182,7 +176,11 @@ fun InviteSheet(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     when {
-                        picked.isEmpty() -> Text("Pick at least one neighborhood.", Modifier.padding(24.dp))
+                        picked.isEmpty() -> Text(
+                            "Tick at least one neighborhood below.",
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(24.dp),
+                        )
                         uri == null -> Box(Modifier.size(210.dp), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
@@ -190,7 +188,12 @@ fun InviteSheet(
                             val qr = remember(uri) { NsiteShare.qrBitmap(uri) }
                             QrCodeCard(qr, contentDescription = "Invitation to $names", size = 210.dp)
                             Spacer(Modifier.height(10.dp))
-                            Text(names, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+                            Text(
+                                "Joins " + names,
+                                fontWeight = FontWeight.ExtraBold,
+                                style = MaterialTheme.typography.titleMedium,
+                                textAlign = TextAlign.Center,
+                            )
                             Text(
                                 "They'll see you as $from",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -199,7 +202,7 @@ fun InviteSheet(
                             val left = (preview?.exp ?: 0) - now
                             Text(
                                 if (left > 0) "Scan with Myco · works once · %d:%02d left".format(left / 60, left % 60)
-                                else "Expired — tap a chip to renew",
+                                else "Expired — change the neighborhoods below to renew",
                                 color = if (left > 0) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFFB45309),
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -219,6 +222,27 @@ fun InviteSheet(
                     Text("Waiting for them to join…", style = MaterialTheme.typography.bodyMedium)
                 }
             }
+            // What they join, near the thumb: one big row each.
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "INVITING THEM TO",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            for (n in choices) {
+                InviteChoiceRow(
+                    name = n.name,
+                    picked = n.id in picked,
+                    onToggle = { if (n.id in picked) picked.remove(n.id) else picked.add(n.id) },
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            TextButton(onClick = { adding = true }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Text("+ New neighborhood")
+            }
         }
     }
 }
@@ -229,6 +253,37 @@ fun InviteSheet(
  * through [onScanned] (MainActivity's one router for `myco://` codes), which
  * opens the confirm sheet.
  */
+@Composable
+private fun InviteChoiceRow(name: String, picked: Boolean, onToggle: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        border = if (picked) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(value = picked, role = Role.Checkbox, onValueChange = { onToggle() }),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp).height(60.dp),
+        ) {
+            Checkbox(checked = picked, onCheckedChange = null)
+            Spacer(Modifier.size(12.dp))
+            Text(
+                name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (picked) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                if (picked) "Inviting" else "Not included",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JoinSheet(onScanned: (String) -> Unit, onDismiss: () -> Unit) {

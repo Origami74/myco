@@ -89,7 +89,7 @@ fun NeighborsScreen(
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 96.dp),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 160.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // The mesh pill on top, as on Settings.
@@ -200,28 +200,12 @@ fun NeighborsScreen(
             }
         }
 
-        // Join and Invite, side by side at the bottom.
-        Row(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(20.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            OutlinedButton(
-                onClick = { joining = true },
-                modifier = Modifier.weight(1f).height(56.dp),
-            ) {
-                Icon(Icons.Filled.QrCodeScanner, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Join")
-            }
-            Button(
-                onClick = { inviting = true },
-                modifier = Modifier.weight(1f).height(56.dp),
-            ) {
-                Icon(Icons.Filled.PersonAdd, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Invite")
-            }
-        }
+        // Join (scan) bottom-right, Invite above it.
+        app.myco.ui.ActionBubbles(
+            main = app.myco.ui.BubbleAction(Icons.Filled.QrCodeScanner, "Join") { joining = true },
+            above = app.myco.ui.BubbleAction(Icons.Filled.PersonAdd, "Invite") { inviting = true },
+            modifier = Modifier.align(Alignment.BottomEnd),
+        )
     }
 
     if (inviting) {

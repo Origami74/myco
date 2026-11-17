@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Round icon buttons on Neighbors and Apps.** Scan sits bottom right on
+  both (Join on Neighbors, add an app on Apps), with Invite or Share Myco
+  above it. The "+" tile on Apps is gone: the scan button opens the same
+  sheet.
+- **The invite sheet lists its neighborhoods as big tick rows** at the
+  bottom, under "Inviting them to", and the code says which it joins.
 - **No name step in setup.** Myco uses its generated name (like "teal
   juno") until you set one in Settings. The phone's own name is no longer
   the default: it often carries a real name.

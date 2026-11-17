@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material3.AlertDialog
@@ -120,7 +121,7 @@ import kotlinx.coroutines.withContext
 /**
  * The **Apps** surface: an app-drawer of installed nsites (icon grid + search),
  * each opening as its own fullscreen task. Long-press an app for its sheet
- * (share, add-to-home, info); the "+" tile adds one by pasting a link or scanning.
+ * (share, add-to-home, info); the scan bubble adds one by scanning or pasting a link.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -186,12 +187,12 @@ fun AppsScreen(
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
         modifier = Modifier.fillMaxSize(),
-        // The bottom leaves room for the Share Myco bubble over the last row.
+        // The bottom leaves room for the two bubbles over the last rows.
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
             start = APPS_SIDE_PADDING,
             end = APPS_SIDE_PADDING,
             top = 20.dp,
-            bottom = 96.dp,
+            bottom = 160.dp,
         ),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -227,9 +228,6 @@ fun AppsScreen(
                 )
             }
         }
-        item {
-            AddTile { showAdd = true }
-        }
         if (apps.isEmpty() && query.isBlank()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
@@ -243,9 +241,11 @@ fun AppsScreen(
         }
     }
     }
-    ShareMycoBubble(
-        onClick = { shareMyco = true },
-        modifier = Modifier.align(Alignment.BottomEnd).padding(24.dp),
+    // Add an app (scan) bottom-right, as Join on Neighbors; Share Myco above it.
+    app.myco.ui.ActionBubbles(
+        main = app.myco.ui.BubbleAction(Icons.Filled.QrCodeScanner, "Add an app") { showAdd = true },
+        above = app.myco.ui.BubbleAction(Icons.Filled.Share, "Share Myco") { shareMyco = true },
+        modifier = Modifier.align(Alignment.BottomEnd),
     )
     }
 
@@ -1366,21 +1366,6 @@ internal fun capabilityWording(domain: String): Capability = when (domain) {
     "config" -> Capability("Settings", "Have settings you can change")
     "shell" -> Capability("Start up", "Every app does this")
     else -> Capability(domain, "Something this version of Myco doesn't know about")
-}
-
-@Composable
-private fun AddTile(onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.combinedClickableSafe(onClick)) {
-        LauncherIcon(
-            // A faint disc from the text colour, so it shows in every theme.
-            background = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
-            content = {
-                Icon(Icons.Filled.Add, contentDescription = "Add app", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-        LauncherLabel("Add", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

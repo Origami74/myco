@@ -22,7 +22,9 @@ Apps · Neighbors · Settings · Dev.
   pulsing bubble.
 - Pending additions from peers ("Alice added you to …"), with **Join** /
   **No thanks**.
-- **Join** (scanner) and **Invite** at the bottom.
+- Round icon buttons, bottom right: **Join** (scanner) at the bottom,
+  **Invite** above it. Apps has the same scanner (add an app) with
+  **Share Myco** above it.
 
 ## A person
 
@@ -45,10 +47,11 @@ Apps · Neighbors · Settings · Dev.
 
 ## Invite
 
-- Pick one or more neighborhoods, or **+ New**.
 - Shows a QR code, a share link and, while open, an NFC tag.
 - Says how the other side will see you ("They'll see you as …").
 - Waits for them to join.
+- Below that, "Inviting them to": one big tick row per neighborhood, in
+  thumb reach, and **+ New neighborhood**. The code says which it joins.
 
 ## Join
 

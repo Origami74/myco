@@ -42,7 +42,7 @@ on if the phones support it; it only adds a faster lane.
 
 ## Step 2 — Seed an app on phone A (online, once)
 
-On **A**, with internet: Apps › **+** › paste a link. An nsite link (`npub1…`,
+On **A**, with internet: Apps › the **scan** button › paste a link. An nsite link (`npub1…`,
 `<host>.nsite.lol`, or a bare host label) syncs the manifest and blobs from the
 public relays and Blossom servers; an `naddr…` fetches a napplet and shows the
 install review — tap **Add to my apps**. The tile appears in the grid, with a
@@ -55,10 +55,10 @@ Long-press the tile and **Add to Home screen** if you want the full effect.
 On both phones open the **Neighbors** tab. Wait until the mesh bar shows the
 other phone: B joins over the mesh, so it needs a route to A.
 
-- On **A** tap **Invite**, pick a neighborhood or **+ New** (say "Household"),
+- On **A** tap the **invite** button, tick a neighborhood or **+ New neighborhood** (say "Household"),
   and keep the sheet open. It shows a QR code and a share link, and presents
   the same `https://napplet.link/neighborhood/join?invite=…` invitation as an NFC tag.
-- On **B** tap **Join** and scan the code, or hold the phones together. B
+- On **B** tap the **scan** button and scan the code, or hold the phones together. B
   shows who is inviting and to what; tick the neighborhood and **Join**.
 
 B sets up a link with A's link service (`<npubA>.fips:4873`). Both phones now
@@ -82,7 +82,7 @@ The Dev tab lists the peer with its transport, RTT and every path fips holds.
 On **A**: long-press the tile › **Share**. A QR appears — and, while that sheet
 is open, the same payload is presented over NFC.
 
-On **B**: Apps › **+** › **Scan**, or hold the phones together. The share
+On **B**: Apps › the **scan** button, or hold the phones together. The share
 payload names the app. B looks for it in the neighborhoods where it gets
 updates: the manifest and files come from A over the link service
 (`<npubA>.fips:4873`) — the ring fills — and the tile appears. Nobody else is
