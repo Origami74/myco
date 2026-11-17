@@ -31,6 +31,19 @@ said to, opens (or brings forward) its window, and hands it the payload. The
 caller never picks another app. It can only recommend one (see
 [Recommended handlers](#recommended-handlers)).
 
+The same request also comes as a link from outside Myco, for any archetype:
+
+```text
+https://napplet.link/<archetype>/<intent>?<params>
+napplet:<archetype>/<intent>?<params>
+```
+
+Both go through the same resolver, with the query as the payload and `myco`
+as the sender. When nothing installed handles the role, Myco offers the
+link's web page in the browser. Shape, resolution, fallback and the domain's
+`assetlinks.json`:
+[napplet-runtime.md › napplet.link](napplet-runtime.md#nappletlink).
+
 ## The binding: two call forms
 
 The vendored `@napplet/shim` (0.29.2) has the first draft's API. Myco's

@@ -97,7 +97,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [concepts.md](./design/core/concepts.md) | Glossary: the four layers, device key vs user key vs author key, peer vs Circle member, `.fips` vs `.localhost`, nsite vs napplet. Read this first. |
 | [architecture.md](./design/core/architecture.md) | The stack on one phone: the crates, the Kotlin↔Rust boundary, what each layer owns. |
 | [app-shell.md](./design/core/app-shell.md) | The launch model: the manager app versus each nsite/napplet as its own full-screen task; intents, Recents, home-screen pins, origin isolation. |
-| [deep-links.md](./design/core/deep-links.md) | `myco://app/<host>/<path>`: a link that names an app *and* a place inside it. |
+| [deep-links.md](./design/core/deep-links.md) | `myco://app/<host>/<path>`: a link that names an app *and* a place inside it. For a role instead of an app, see napplet.link in napplet-runtime.md. |
 | [identity-pairing.md](./design/core/identity-pairing.md) | The device identity and the pairing handshake: the `myco://pair/` payload, the auth service, NFC tap-to-pair, unpairing. (What a pairing *means* is [circle.md](./design/circle/circle.md).) |
 | [event-gossip.md](./design/core/event-gossip.md) | Layer 3's push and pull planes: hop-limited flooding between Circle members, the `MESH` envelope, the seen-set. |
 | [security.md](./design/core/security.md) | Trust model: self-authenticating data, FIPS link crypto, the Circle gate, the nsite sandbox, the napplet sandbox and its grants. |
@@ -121,7 +121,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 
 | Doc | Description |
 | --- | --- |
-| [napplet-runtime.md](./design/napplet/napplet-runtime.md) | NIP-5D manifests over the nsite shape, verified resolve into a sandboxed iframe, the NAP capability seam, grants and the review screen, the three relay lanes. |
+| [napplet-runtime.md](./design/napplet/napplet-runtime.md) | NIP-5D manifests over the nsite shape, verified resolve into a sandboxed iframe, the NAP capability seam, grants and the review screen, the three relay lanes, `napplet.link` (`https://napplet.link/<archetype>/<intent>?…`). |
 | [NAP-MESH.md](./design/napplet/NAP-MESH.md) | Myco's own capability: hop-limited publish and subscribe over the mesh, in the registry's template so it can be proposed upstream. |
 | [NAP-UPLOAD.md](./design/napplet/NAP-UPLOAD.md) | Uploading a napplet's file to the user's Blossom servers, signed as the user: servers, auth, the shell's byte hop, caps, consent. |
 

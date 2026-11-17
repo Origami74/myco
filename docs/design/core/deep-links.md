@@ -17,6 +17,10 @@ myco://app/5rnyv42gd5hia53curyrl58o9vnouebwyt4gxdice14ialcs4vcahmls/dumpling/dmp
   app says it means.
 - A bare `myco://app/<host>` is valid: "just open it".
 
+This names **one app**. To open whichever app fills a role, use a
+`https://napplet.link/<archetype>/<intent>?…` link instead
+([napplet-runtime.md › napplet.link](../napplet/napplet-runtime.md#nappletlink)).
+
 Parsed by `MycoLink.parseAppLink` (`android/…/share/MycoLink.kt`), which is a pure
 function with JVM unit tests. The host is lowercased (a QR in alphanumeric mode is
 uppercase-only) and must be a usable DNS label, because it becomes `<host>.localhost`
