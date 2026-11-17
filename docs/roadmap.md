@@ -16,8 +16,9 @@ map, the [index](./README.md).
 **Shipped in v0.13.0** (2026-11-12; the [CHANGELOG](../CHANGELOG.md) and
 [release notes](../RELEASE-NOTES.md) have the detail):
 
-- **Updates from the Circle.** Phones keep the newest release APK and serve
-  it to paired phones over the mesh; it is checked against Zapstore's
+- **Myco updates from other phones.** Phones keep the newest release APK and
+  serve it to other phones over the mesh (in v0.13.0 over the Circle; on
+  this branch through neighborhoods' `myco-release` extension); it is checked against Zapstore's
   publisher-signed file event and the release key, and Android asks before
   installing (N11).
 - **Share Myco**, over a hotspot page or the Android share menu.
@@ -32,7 +33,7 @@ map, the [index](./README.md).
 branch; see the CHANGELOG's `[Unreleased]`):
 
 - **Neighborhoods replace the Circle.** Links set up from one-time
-  invitations (`https://napplet.link/neighborhood/join?invite=…` by QR, share link or NFC), a link key per
+  invitations (`https://napplet.link/neighborhood/join#invite=…` by QR, share link or NFC), a link key per
   link, signed offers, the link service on `:4873`, traffic scoped per
   neighborhood and passed on link to link, and per-neighborhood reach —
   [nap-neighbor/](design/nap-neighbor/README.md).
@@ -49,9 +50,8 @@ branch; see the CHANGELOG's `[Unreleased]`):
 - **Removed:** pairing (`myco://pair/`, kinds 9101–9103), the Circle (not
   migrated: people re-invite), general event gossip and backlog resync,
   outbox mesh lanes, NAP-MESH and the App reach setting, manifest forwarding
-  between linked phones over their relays, sending files between phones (to
-  return as a napplet on NAP-FS and NAP-NEIGHBOR), and the Dev peer speed
-  test.
+  between linked phones over their relays, sending files between phones,
+  and the Dev peer speed test.
 
 ## Earlier releases
 
@@ -116,31 +116,28 @@ Ordered by what unblocks what. Each is its own PR or short series.
 
 **Done** — built and tested across two networks;
 [design/fips/public-mesh-nodes.md](design/fips/public-mesh-nodes.md).
-Written before neighborhoods: read "Circle member" below as a linked peer.
-
 **Goal.** When a phone is online, it can also peer with public FIPS nodes
-over the internet, so Circle members who aren't in the same room still reach
-each other: gossip, pulls, file sharing and app updates over the mesh as if
-they were nearby. Today internet reach is only Nostr relays; the mesh itself
+over the internet, so linked peers who aren't in the same room still reach
+each other: neighborhood traffic and app updates over the mesh as if they
+were nearby. Today internet reach is only Nostr relays; the mesh itself
 stops at the radios and the LAN.
 
 **Shape.**
 
 - A short list of public nodes, shipped and user-editable, dialled over FIPS's
   TCP/UDP transports when the internet is up. They're ordinary peers in the
-  mesh routing; they're not Circle members, and the Circle gate is unchanged.
+  mesh routing; they're not linked peers and get no neighborhood traffic.
 - **Opt-in, with the trade-off said plainly.** A public node learns this
   phone's IP address and which mesh addresses it talks to, though not the
   contents. A Tor transport is the private alternative where available.
 - Battery-aware: connect while online and active, back off in the background,
   never instead of a radio path that works.
 - Diagnostics in the Dev tab: which public nodes are up and the path to each
-  Circle member.
+  linked peer.
 
-**Exit criterion.** Two paired phones on different networks, with no radio
-path between them, see each other as reachable in the Circle and exchange a
-`mesh.publish` through a public node; switching the option off drops those
-links.
+**Exit criterion.** Two linked phones on different networks, with no radio
+path between them, see each other as Here now and exchange a neighborhood
+post through a public node; switching the option off drops those links.
 
 ### N12 — Permissions held against the manifest
 
@@ -327,11 +324,11 @@ forwarding are gone, so what an nsite publishes on the loopback relay stays
 on this phone. Reaching people is a napplet's job, through NAP-NEIGHBOR.
 Still to check: the chat nsite in the demo set.
 
-**Goal.** An nsite talks to `ws://localhost:4870` like any relay; today an
-event it publishes there is also flooded to the Circle at the default hop
-budget, and its `REQ`s are recreated against Circle members. That made sense
-before napplets; now the mesh is a *granted* capability (NAP-MESH) with a user
-cap, and an nsite has no grant and no review screen. Make the loopback relay
+**Goal.** An nsite talks to `ws://localhost:4870` like any relay. Before
+neighborhoods, an event it published there was also flooded to paired
+phones, and its `REQ`s were recreated against them. Reaching people is now a
+*granted* capability (NAP-NEIGHBOR), and an nsite has no grant and no
+review screen. Make the loopback relay
 socket **local-only**: nsite publishes are stored and shown here, forwarded
 nowhere; nsite subscriptions are not replayed to peers. Reaching the room is
 what a napplet is for.
@@ -365,16 +362,16 @@ opens the napplet.
 
 **Done** — the AppStore napplet ships preinstalled (`DEFAULT_NAPPLETS`) and
 the native Discover tab is gone (v0.8.0, completed since); tested. It lists
-napplets from relays and from the phones around you (over NAP-MESH, which is
-since removed — "Around you" needs NAP-NEIGHBOR), with stacks
+napplets from relays and from the phones around you ("Around you": the napplet
+manifests held in neighborhoods, through NAP-NEIGHBOR), with stacks
 (NIP-51 app sets), recommendations from people you follow and profiles;
 Install hands the app's `naddr` to Myco over NAP-LINK, which opens the
 install review.
 
 **Goal.** Retire the built-in Discover tab and ship "around me" as a
-**napplet** — the first-party app store. It lists what your Circle holds
-(nsites and napplets), shows who has each one, lets you install with one tap,
-and surfaces new arrivals — all through the NAPs everyone else gets: `mesh`
+**napplet** — the first-party app store. It lists what the phones around you
+hold, lets you install with one tap,
+and surfaces new arrivals — all through the NAPs everyone else gets: `neighbor`
 for the room, `outbox` for reach beyond it, `resource` for icons, `intent`
 (N6+) to hand an install to Myco. Dogfoods the runtime on the one feature that
 needs every mesh capability, and lets the store evolve like any other app —
@@ -489,11 +486,17 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Set reconciliation (NIP-77 negentropy)** between links in a
   neighborhood, so backlog catch-up is a sync rather than a replay —
   [propagation.md](./design/nsite/propagation.md) §5.
-- **Neighborhood follow-ups.** Blobs over links (fetch from peers, and push
-  by the per-neighborhood blob hops), reading one peer's view, `neighbor.invite`
-  for napplets, granting existing neighborhoods to napplets, Tor or public
-  endpoints in offers, and the optional proximity extension (`nearby`) —
-  [nap-neighbor/](design/nap-neighbor/README.md).
+- **Neighborhood follow-ups.** Pushing blobs by the per-neighborhood blob
+  hops, history from further than one hop (backlog hops), reading one peer's
+  view, `neighbor.invite` for napplets, and Tor or public endpoints in
+  offers — [nap-neighbor/](design/nap-neighbor/README.md).
+- **Cheaper neighborhood stores.** Each neighborhood has its own LMDB store,
+  so replaceable and deletion rules stay inside it. Open ones are never
+  closed, an event kept in two neighborhoods is stored twice, and each
+  reserves its own map (256 MiB, 32 MiB on 32-bit). Ideas: close stores
+  idle for a while, size the map from the quota, share event bodies by id
+  with a per-neighborhood index, and one store for `nearby` that is simply
+  wiped — [data-plane.md](design/nap-neighbor/data-plane.md#scoped-store).
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
   `relay_read_multihop`, …) with defaults for everyone; a switch per app
   peer — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.

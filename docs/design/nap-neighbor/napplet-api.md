@@ -14,9 +14,9 @@ Code:
 
 It carries no data. It tells a napplet:
 
-- which neighborhoods it was granted (`neighbor.list`),
-- which of the user's peers carry each, and whether they are reachable
-  (`neighbor.peers`),
+- every neighborhood the user carries (`neighbor.list`),
+- which of the user's peers carry each, whether they are reachable, and
+  their names as the spec's `Peer.name` defines them (`neighbor.peers`),
 - a `neighborhood://` address for each.
 
 ```text
@@ -33,17 +33,23 @@ neighborhood://<n>        the whole neighborhood
 neighborhood://<n>/<p>    one peer in it
 ```
 
+- This format is internal to Myco. Napplets must not parse or build
+  addresses: NAP-NEIGHBOR makes them opaque.
 - Tokens are minted per napplet. An address means nothing in another
   napplet and is refused there.
 - The scheme never reaches DNS or a socket.
+- A subscription on an address never tells the napplet which peer an event
+  came from.
 
 ## How other NAPs carry addresses
 
 | NAP | Call | With an address |
 | --- | --- | --- |
 | NAP-RELAY | `relay.subscribe` | Reads the neighborhood ([data-plane.md](data-plane.md)) |
-| NAP-OUTBOX | `outbox.publish` | Publishes into it. Outbox reads refuse addresses. |
-| NAP-RESOURCE | `resource.bytes` | Honors `xs=<address>` |
+| NAP-OUTBOX | `outbox.publish` | Publishes into it |
+| NAP-OUTBOX | `outbox.*` reads | Reads it, as `relay.subscribe` on the address does |
+| NAP-RESOURCE | `resource.bytes` | Honors `xs=<address>`. The blob stays in that neighborhood: not in the device-wide store |
+| NAP-RESOURCE | `resource.check` | Myco's extension, not upstream ([data-plane.md](data-plane.md#resourcecheck-mycos-nap-resource-extension)) |
 | NAP-UPLOAD | `upload.upload` | `destination = <address>` on the `blossom-neighborhood` rail |
 
 ## What Myco supports
@@ -52,7 +58,7 @@ neighborhood://<n>/<p>    one peer in it
 | --- | --- |
 | `info`, `list`, `peers` | yes |
 | `create` (asks the user) | yes |
-| `leave` | yes |
+| `leave` | yes (on `nearby`: turns Nearby off) |
 | `setOffer` | yes |
 | `mute` | yes |
 | `invite` | no (invitations are made in the Neighbors tab) |
@@ -67,3 +73,7 @@ starts or joins in the Neighbors tab and the ones any napplet created.
 
 Each napplet still gets its own ids and `neighborhood://` addresses for
 them, so an id one napplet holds means nothing to another.
+
+Confirmation follows the spec: `create`, `leave` and a `setOffer` that
+widens access ask the user. `mute` and a narrowing `setOffer` do not, and
+they apply for every napplet ([security.md](../core/security.md#52-the-napplet-sandbox--a-program-behind-a-permission-model)).

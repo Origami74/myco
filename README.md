@@ -11,18 +11,26 @@ way to ring each other. With Myco they invite you into a neighborhood and hand
 the app over, and it is on your phone too. It opens full-screen like any other app, and it still opens
 with no signal. Once you have it, you can hand it on to the next person.
 
+<!-- screenshots of the Neighbors tab: TODO -->
+
+|  |  |
+| :--: | :--: |
+| ![Hand over an app by bumping again](docs/images/zapstore-03-share-app.png)<br>**Hand over an app** | ![People in a park using an app over Bluetooth](docs/images/zapstore-01-mesh.png)<br>**Use it together, offline** |
+
 |  |  |  |
 | :--: | :--: | :--: |
-| ![Bump phones to connect](docs/images/zapstore-02-connect-circle.png)<br>**Bump phones to connect** | ![Hand over an app by bumping again](docs/images/zapstore-03-share-app.png)<br>**Hand over an app** | ![People in a park using an app over Bluetooth](docs/images/zapstore-01-mesh.png)<br>**Use it together, offline** |
-
-|  |  |  |  |
-| :--: | :--: | :--: | :--: |
-| ![Tap phones over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to connect** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
+| ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
 
 ## What you can do with it today
 
 - **Invite people into a neighborhood** ("Household", "Sports club") by
-  showing a QR code, sending a link, or bumping phones (NFC).
+  showing a QR code, sending a link, or bumping phones (NFC). Both screens
+  show the same short code, so you can check you're joining the right
+  person.
+- **Meet the phones around you.** **Nearby** links phones in Bluetooth
+  reach by themselves, with no invitation and no names. AppStore's
+  **Around you** shows the apps they have. It forgets them once nobody is
+  in reach. Turn it off on its card in **Neighbors**.
 - **Hand over an app.** The other phone pulls it straight from yours.
 - **Open it with no internet**, full-screen, from the Apps grid or a
   home-screen icon.
@@ -39,10 +47,6 @@ All of this is tested with every phone in airplane mode and Bluetooth on
 What Myco does not do yet:
 
 - It is **Android only** (Android 10 or newer, 64-bit ARM phones).
-- **Updates to Myco** come from a download, not from another phone.
-  **Share Myco** hands the app to a phone without it, but a phone with Myco
-  doesn't yet update from a newer one nearby
-  ([roadmap](docs/roadmap.md#n11--share-myco-itself)).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
 - **Mesh over the internet** is opt-in (Settings › Mesh › Internet) and not
@@ -106,6 +110,9 @@ A neighborhood works both ways. The people you share one with can:
 - receive what your apps post into that neighborhood, and pass it on.
 
 You get theirs the same way, under the **Get** switches.
+
+**Nearby** is a neighborhood too. With it on, phones in reach see which apps
+you have, and get your updates, unless you turn its **Share** switches off.
 
 A neighborhood is not private: people in it can pass posts on, even outside
 it. Nothing else on your phone is open to them, and people you share no
@@ -242,7 +249,8 @@ hand it on. Phones connect over a [FIPS](https://github.com/jmcorgan/fips)
 mesh: Bluetooth (L2CAP), Wi-Fi Aware, a USB cable, the local network, or the
 internet when there is one. Mesh links are encrypted. Your relay and file store are never open to other
 phones: apps and updates travel only through your neighborhoods, to the
-people you set up a link with from an invitation.
+people you set up a link with from an invitation, and with Nearby on, to
+phones in Bluetooth reach.
 
 The reusable content layer (relay, Blossom, gateway, sync) is the
 `nsite-deck` crate. `myco-core` wires it to FIPS and the Android app.

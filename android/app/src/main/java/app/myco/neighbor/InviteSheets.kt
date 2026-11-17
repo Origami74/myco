@@ -40,9 +40,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import app.myco.R
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
@@ -100,6 +103,12 @@ fun InviteSheet(
     DisposableEffect(uri) {
         if (uri != null) PairPresent.beginRaw(uri)
         onDispose { PairPresent.stop() }
+    }
+    // The one-time invitation lives only while this sheet does: leaving it
+    // any way (dismissed, joined, a tab switch, the activity going away)
+    // clears it. Clearing twice is harmless; the core may be closed already.
+    DisposableEffect(Unit) {
+        onDispose { runCatching { client.dispatch(NativeActions.clearLinkInvite()) } }
     }
     var now by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(Unit) {
@@ -199,6 +208,15 @@ fun InviteSheet(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
+                            val code = preview?.fingerprint.orEmpty()
+                            if (code.isNotEmpty()) {
+                                Text(
+                                    stringResource(R.string.invite_check_code, code),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
                             val left = (preview?.exp ?: 0) - now
                             Text(
                                 if (left > 0) "Scan with Myco · works once · %d:%02d left".format(left / 60, left % 60)
@@ -258,17 +276,58 @@ fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, ownNpub: Stri
     // Sent to the inviter with the join, and to nobody else.
     val myName = remember(ownNpub) { DeviceName.current(context, ownNpub) }
     val accept = remember(invite) { mutableStateListOf<String>().also { l -> invite.offered.forEach { l.add(it.id) } } }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
+    LaunchedEffect(invite.exp) {
+        while (invite.exp > 0 && !invite.expired(now)) {
+            kotlinx.coroutines.delay(1000)
+            now = System.currentTimeMillis() / 1000
+        }
+    }
+    val expired = invite.expired(now)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Anyone can make a link, QR code or tag that names anybody: say
+            // where this one came from, quote the name as theirs, and show
+            // the code their invite sheet shows, to compare.
             Text(
-                if (invite.from.isNotBlank()) "${invite.from} invites you" else "You're invited",
+                stringResource(
+                    when (invite.source) {
+                        InvitePreview.Source.Link -> R.string.invite_from_link
+                        InvitePreview.Source.Qr -> R.string.invite_from_qr
+                        InvitePreview.Source.Tap -> R.string.invite_from_tap
+                    },
+                ),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
+            Text(
+                if (invite.from.isNotBlank()) stringResource(R.string.invite_title_named, invite.from)
+                else stringResource(R.string.invite_title),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
                 modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
+            if (invite.fingerprint.isNotEmpty()) {
+                Text(
+                    stringResource(R.string.invite_code, invite.fingerprint),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                )
+            }
+            Text(
+                stringResource(R.string.invite_names_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
             Text(
                 "Pick what to join. They'll see you as $myName.",
@@ -313,13 +372,23 @@ fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, ownNpub: Stri
                 }
             }
             Spacer(Modifier.height(4.dp))
+            if (expired) {
+                Text(
+                    stringResource(R.string.invite_expired),
+                    color = Color(0xFFB45309),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             val chosen = invite.offered.filter { it.id in accept }
             Button(
                 onClick = {
                     client.dispatch(NativeActions.joinLink(invite.raw, accept.toList(), myName))
                     onDismiss()
                 },
-                enabled = invite.offered.isEmpty() || chosen.isNotEmpty(),
+                enabled = !expired && (invite.offered.isEmpty() || chosen.isNotEmpty()),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(

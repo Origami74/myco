@@ -48,7 +48,9 @@ Apps · Neighbors · Settings · Dev.
 ## Invite
 
 - Shows a QR code, a share link and, while open, an NFC tag.
-- Says how the other side will see you ("They'll see you as …").
+- Says how the other side will see you ("They'll see you as …") and the
+  short code they'll see ("They'll see code …"): the first and last four
+  hex digits of this invitation's link key.
 - Waits for them to join.
 - Below that, "Inviting them to": one big tick row per neighborhood, in
   thumb reach, and **+ New neighborhood**. The code says which it joins.
@@ -57,6 +59,11 @@ Apps · Neighbors · Settings · Dev.
 
 - The scan sheet, the same one Apps opens to add an app: it takes an
   invitation or an app share and the shell routes each.
-- Scan a QR, tap phones, or open a `https://napplet.link/neighborhood/join?invite=…` link.
+- Scan a QR, tap phones (also while the scan sheet is open), or open a
+  `https://napplet.link/neighborhood/join#invite=…` link.
 - Shows who is inviting and to which neighborhoods. Pick which to accept.
+- Says where the invitation came from (a link, a QR code or a phone tap)
+  and shows the inviter's code, to compare with their invite sheet.
+  Anyone can make a link that names anybody.
+- An expired invitation says so and can't be joined.
 - A **Not private** note: people in a neighborhood can pass posts on.

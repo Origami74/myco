@@ -145,11 +145,13 @@ at node start ([settings.md](../../reference/settings.md)).
 
 ## Discovery: the service announcement carries no identity
 
-The BLE advert carries no identity — the FIPS service UUID plus the 2-byte
-PSM service-data field that universal PSM discovery added (routing plumbing,
-not identity) — deliberately, so nothing that names a person leaks before the
-Noise handshake. The Aware announcement makes the same promise. The publish
-carries:
+The BLE advert carries no identity — the FIPS service UUID plus one
+service-data field: the 2-byte PSM that universal PSM discovery added
+(routing plumbing, not identity) and Nearby's 4-byte use-once secret
+([nap-neighbor/proximity.md](../nap-neighbor/proximity.md#the-nearby-secret)),
+random and tied to no key — deliberately, so nothing that names a person
+leaks before the Noise handshake. The Aware announcement makes the same
+promise. The publish carries:
 
 1. **The Myco service name** (fixed constant — the Aware analog of the FIPS
    service UUID).
@@ -159,6 +161,10 @@ carries:
 
 A passive scanner learns "a Myco device is nearby, listening on port N" —
 exactly the disclosure class of the BLE advert.
+
+**Known gap.** Release builds made without `MYCO_FIPS_REPO_PATH` are
+single-path. With no node prefix in the BLE advert, they can't tell that a
+peer is already reached over Wi-Fi Aware, and may dial it over BLE too.
 
 Identity comes later and costs interaction, as it does on BLE. After a
 subscribe match, the two sides exchange device pubkeys over Aware

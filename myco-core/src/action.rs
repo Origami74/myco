@@ -245,8 +245,9 @@ pub enum NativeAppAction {
     /// Turn Nearby on or off: the `nearby` neighborhood and the ephemeral
     /// links to devices in reach that carry it. Kept with the neighborhoods.
     SetNearby { enabled: bool },
-    /// A nearby secret heard in a BLE advert (8 hex chars). Offered, as a
-    /// proof, when setting up nearby links. Our own is ignored.
+    /// Nearby secrets heard in BLE adverts: one or more 8-hex-char secrets,
+    /// comma-separated (the beacon batches them). Offered, as proofs, when
+    /// setting up nearby links. Our own is ignored, as is anything malformed.
     NearbyHeard { secret: String },
     /// How far a neighborhood pushes uploaded blobs (0: not at all).
     SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },

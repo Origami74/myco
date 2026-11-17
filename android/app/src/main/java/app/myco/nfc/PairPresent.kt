@@ -47,7 +47,7 @@ object PairPresent {
     var onChanged: (() -> Unit)? = null
 
     /** Begin presenting a prebuilt payload verbatim (e.g. a `myco://share/…` URI
-     *  carrying an nsite, or a `https://napplet.link/neighborhood/join?invite=…` invitation). */
+     *  carrying an nsite, or a `https://napplet.link/neighborhood/join#invite=…` invitation). */
     fun beginRaw(uri: String) {
         payload.value = uri
         pairPresenting.value = true

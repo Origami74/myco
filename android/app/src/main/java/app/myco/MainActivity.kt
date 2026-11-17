@@ -333,7 +333,12 @@ class MainActivity : ComponentActivity() {
             } }
         }
 
-        handleDeepLink(intent)
+        // Only a fresh launch carries a link to act on. A recreated activity
+        // (saved state) or a relaunch from Recents hands back the intent that
+        // started it long ago: acting on it again would replay an old
+        // invitation or share.
+        val fromHistory = ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (savedInstanceState == null && !fromHistory) handleDeepLink(intent)
     }
 
     // --- mesh adapter (app-owned TUN) ---
@@ -1038,11 +1043,14 @@ class MainActivity : ComponentActivity() {
             }
             msg?.records?.firstNotNullOfOrNull { it.toUri() }
         }.getOrNull() ?: return
-        // Only act on our own scheme. Reader mode reads *any* tapped NDEF tag, so
-        // without this an unrelated URL tag would fall through to openNsite(). Raw
-        // nsite links are entered via QR/paste, never NFC.
-        if (uri.scheme != NsiteShare.SCHEME) return
-        runOnUiThread { handleScannedText(uri.toString()) }
+        // Only act on our own scheme or a neighborhood invitation (the invite
+        // sheet presents `https://napplet.link/neighborhood/join#invite=…`).
+        // Reader mode reads *any* tapped NDEF tag, so without this an
+        // unrelated URL tag would fall through to openNsite(). Raw nsite links
+        // are entered via QR/paste, never NFC.
+        val text = uri.toString()
+        if (uri.scheme != NsiteShare.SCHEME && app.myco.neighbor.InvitePreview.payload(text) == null) return
+        runOnUiThread { handleScannedText(text, app.myco.neighbor.InvitePreview.Source.Tap) }
     }
 
     // --- BLE toggle (remembered) ---
@@ -1346,10 +1354,14 @@ class MainActivity : ComponentActivity() {
     // --- share QR: scan (in-app PairScreen) + deep-link ---
 
     /** A scanned QR is a neighborhood invitation, a `myco://share/…` shared
-     *  nsite, or a raw nsite link. */
-    private fun handleScannedText(text: String) {
+     *  nsite, or a raw nsite link. [source] is how an invitation arrived, for
+     *  the join sheet to say. */
+    private fun handleScannedText(
+        text: String,
+        source: app.myco.neighbor.InvitePreview.Source = app.myco.neighbor.InvitePreview.Source.Qr,
+    ) {
         // A neighborhood invitation: confirm first, then join.
-        app.myco.neighbor.InvitePreview.read(text)?.let { invite ->
+        app.myco.neighbor.InvitePreview.read(text, source)?.let { invite ->
             app.myco.neighbor.IncomingInvite.pending.value = invite
             return
         }
@@ -1405,8 +1417,14 @@ class MainActivity : ComponentActivity() {
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
         // A neighborhood invitation, whatever its spelling: the shell's own
-        // `neighborhood/join`, never handed to a napplet.
-        app.myco.neighbor.InvitePreview.read(data.toString())?.let { invite ->
+        // `neighborhood/join`, never handed to a napplet. A tapped tag comes
+        // as NDEF_DISCOVERED; anything else is a link from another app.
+        val source = if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED) {
+            app.myco.neighbor.InvitePreview.Source.Tap
+        } else {
+            app.myco.neighbor.InvitePreview.Source.Link
+        }
+        app.myco.neighbor.InvitePreview.read(data.toString(), source)?.let { invite ->
             app.myco.neighbor.IncomingInvite.pending.value = invite
             return
         }

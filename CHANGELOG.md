@@ -7,42 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Round icon buttons on Neighbors and Apps.** Scan sits bottom right on
-  both (Join on Neighbors, add an app on Apps), with Invite or Share Myco
-  above it. The "+" tile on Apps is gone. Both scan buttons open one
-  sheet that takes an app share or a neighborhood invitation alike.
-- **The invite sheet lists its neighborhoods as big tick rows** at the
-  bottom, under "Inviting them to", and the code says which it joins.
-- **No name step in setup.** Myco uses its generated name (like "teal
-  juno") until you set one in Settings. The phone's own name is no longer
-  the default: it often carries a real name.
-- **Nearby needs a secret heard over Bluetooth.** Each phone advertises a
-  short secret that works once: a phone sets up a nearby link only by
-  proving it heard it. Phones racing for the same one retry with the next.
-  It is not tied to the phone's mesh key. A phone reached only over the
-  local network no longer joins through Nearby, until mDNS carries the
-  secret too.
-- **Nearby is anonymous.** Phones that meet nearby never see a name, and
-  nearby starts over (every nearby link and what it knew, forgotten) as
-  soon as nobody is in reach, and when the mesh is turned off or on.
-
-### Fixed
-
-- **A neighborhood subscription follows people as they come and go.** It
-  asked the peers once, when it started, so someone who joined or came in
-  reach afterwards never showed up (AppStore's Around you stayed as it
-  was). It now stays open on every linked peer, opens on peers who arrive
-  later, and closes on those who leave and when the napplet or its window
-  closes.
-- **AppStore's Install on an app you already have shows its sheet with
-  Open.** `intent.launch` opened an installed app directly, which did
-  nothing visible when that app was already open (or was AppStore itself),
-  and a quick second tap then failed with "Could not start the install".
-  It now always shows the app's review: **Open** when installed, the install
-  review when not.
-
 ### Added
 
 - **Neighborhoods replace the Circle.** Start a neighborhood ("Household",
@@ -53,18 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Napplets reach neighborhoods through NAP-NEIGHBOR
   ([napplet/naps#146](https://github.com/napplet/naps/pull/146)).
 - **Nearby.** A neighborhood of the people around you, with no invitation:
-  phones in reach over Bluetooth, Wi-Fi Aware, USB or the same Wi-Fi link up
-  by themselves and drop off a few minutes after they leave. On by default,
-  with a switch on its card in the Neighbors tab. Apps see it as `nearby`
-  (NAP-NEIGHBOR's proximity extension). Your chosen name goes to them inside
-  the link, never over Bluetooth.
+  phones that hear each other's Bluetooth secret link up by themselves and
+  drop off a few minutes after they leave. Posts reach only the phones in
+  reach. Updates are shared, so AppStore's Around you shows what they hold.
+  On by default, with a switch on its card in the Neighbors tab. Apps see it
+  as `nearby` (NAP-NEIGHBOR's proximity extension).
+- **Neighborhood subscriptions follow people.** A subscription stays open
+  on every linked peer, opens on peers who arrive later, and closes on those
+  who leave and when the napplet or its window closes.
 - **Updates, per neighborhood.** Two switches, both on by default and
   independent: *Install updates from people here* and *Send my updates to
   people here*, for apps, sites and Myco. Sent updates travel the
   neighborhood like posts, with their files.
 - **Neighborhood files cross links.** A file posted in a neighborhood can be
   fetched by the people linked to you there, and only that neighborhood's
-  files are reachable this way.
+  files are reachable this way. A file fetched from a neighborhood stays in
+  it.
+- **Check who invited you.** The join sheet says where an invitation came
+  from (a link, a QR code or a phone tap) and shows a short code that the
+  inviter's sheet shows too. Expired invitations can't be joined. Tapping
+  phones works with the Scan sheet open.
 - **An app can recommend the app it wants to open, and Myco offers to
   install it.** A napplet opening a role (NAP-INTENT) can name an app with
   `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default
@@ -82,28 +54,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the older SDK (`open(role, payload)`, payload as an `inc.event`) work
   unchanged.
 
-### Deprecated
-
-- **Installing through `link.open("nostr:naddr…")`.** Use
-  `intent.launch(naddr)`. Myco still opens the install review for the link,
-  for napplets running on Myco versions without `launch`, and logs a warning
-  naming the napplet each time it is used.
-
-### Removed
-
-- **The Circle and pairing.** `myco://pair/` QR codes and tap-to-pair are
-  gone. An existing Circle is not carried over: invite people to a
-  neighborhood again.
-- **NAP-MESH** (the `mesh` domain). Use NAP-NEIGHBOR.
-- **The "App reach" setting.** Reach is set per neighborhood.
-- **Event gossip between phones.** Posts no longer spread to every nearby
-  phone; they travel only in neighborhoods.
-- **File transfer between phones.** It is to return as a napplet, built on
-  NAP-FS and NAP-NEIGHBOR.
-- **The Dev speedtest.**
-
 ### Changed
 
+- **Round icon buttons on Neighbors and Apps.** Scan sits bottom right on
+  both (Join on Neighbors, add an app on Apps), with Invite or Share Myco
+  above it. The "+" tile on Apps is gone. Both scan buttons open one
+  sheet that takes an app share or a neighborhood invitation alike.
+- **The invite sheet lists its neighborhoods as big tick rows** at the
+  bottom, under "Inviting them to", and the code says which it joins.
+- **No name step in setup.** Myco uses its generated name (like "teal
+  juno") until you set one in Settings. The phone's own name is no longer
+  the default: it often carries a real name.
+- **Nearby needs a secret heard over Bluetooth.** Each phone advertises a
+  short secret that works once: a phone sets up a nearby link only by
+  proving it heard it. Phones racing for the same one retry with the next.
+  It is not tied to the phone's mesh key. A phone reached only over the
+  local network does not join through Nearby.
+- **Nearby is anonymous.** Phones that meet nearby never see a name, and
+  nearby starts over (every nearby link, what it knew and what it held,
+  forgotten) as soon as nobody is in reach, when Nearby is turned off, and
+  when the mesh is turned off or on.
+- **Posts are passed on only as far as reach allows.** A phone passes on
+  only what it published, or what was pushed to it with hops left where
+  **Pass on** is on, whether by push, to a peer's open subscription or in
+  its history. What your apps pull from peers stays on your phone. Turning
+  off **Share** for updates, or reads or writes in what you offer, now
+  applies to every request.
+- **Each neighborhood has a quota** of 10 000 posts and 256 MiB of files,
+  oldest out first. Leaving a neighborhood deletes what only it held.
+- **Phones expose only the napplets they have installed**, and only their
+  `index.html` and icon.
+- **Invitation links carry their secret after `#`**
+  (`https://napplet.link/neighborhood/join#invite=…`), so napplet.link's web
+  host never sees it. Older `?invite=` links still work.
+- **Outbox reads accept neighborhood addresses**, as NAP-NEIGHBOR says.
+- **The link service is hardened:** peer-supplied URLs are dialled only on
+  the mesh or the public internet, request pacing and caps per source and
+  overall, bounded relay sockets, signed requests that can't be replayed,
+  and capped answers, names and pending additions.
 - **Myco's relay and Blossom are no longer reachable by other phones.** The
   relay listens on this phone only (`127.0.0.1:4870`) and Blossom on no port
   (`24243` is no longer served). The link service on `:4873` is the only port
@@ -124,6 +112,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A default app that can't do what was asked is passed over** instead of
   failing the request, and a request whose convention names a different role
   or action is refused as `invalid convention`.
+
+### Fixed
+
+- **AppStore's Install on an app you already have shows its sheet with
+  Open.** `intent.launch` opened an installed app directly, which did
+  nothing visible when that app was already open (or was AppStore itself),
+  and a quick second tap then failed with "Could not start the install".
+  It now always shows the app's review: **Open** when installed, the install
+  review when not.
+- **An old invitation or share is not replayed** when Android recreates
+  Myco or reopens it from Recents.
+
+### Deprecated
+
+- **Installing through `link.open("nostr:naddr…")`.** Use
+  `intent.launch(naddr)`. Myco still opens the install review for the link,
+  for napplets running on Myco versions without `launch`, and logs a warning
+  naming the napplet each time it is used.
+
+### Removed
+
+- **The Circle and pairing.** `myco://pair/` QR codes and tap-to-pair are
+  gone. An existing Circle is not carried over: invite people to a
+  neighborhood again.
+- **NAP-MESH** (the `mesh` domain). Use NAP-NEIGHBOR.
+- **The "App reach" setting.** Reach is set per neighborhood.
+- **Event gossip between phones.** Posts no longer spread to every nearby
+  phone; they travel only in neighborhoods.
+- **File transfer between phones.**
+- **The Dev speedtest.**
 
 ## [0.13.0] - 2026-11-12
 

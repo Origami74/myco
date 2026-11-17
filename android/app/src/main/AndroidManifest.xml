@@ -49,7 +49,7 @@
          the user before each install. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <!-- NFC tap-to-connect: HCE presents a neighborhood invite (https://napplet.link/neighborhood/join?invite=…) or a
+    <!-- NFC tap-to-connect: HCE presents a neighborhood invite (https://napplet.link/neighborhood/join#invite=…) or a
          share link while that sheet is open; reader mode reads a peer's. Both
          optional — the app falls back to QR/paste without NFC. -->
     <uses-permission android:name="android.permission.NFC" />
@@ -136,8 +136,9 @@
                 <data android:scheme="myco" />
             </intent-filter>
             <!-- A tapped invitation tag: the napplet link
-                 https://napplet.link/neighborhood/join?invite=…, claimed here
-                 so a tap opens Myco's join sheet rather than a browser. -->
+                 https://napplet.link/neighborhood/join#invite=…, claimed here
+                 so a tap opens Myco's join sheet rather than a browser. The
+                 fragment plays no part in matching: the path is the filter. -->
             <intent-filter>
                 <action android:name="android.nfc.action.NDEF_DISCOVERED" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -257,7 +258,7 @@
             android:foregroundServiceType="connectedDevice" />
 
         <!-- HCE for NFC tap-to-connect: emulates a tag serving the open invite
-             (https://napplet.link/neighborhood/join?invite=…) or share link while that sheet is open, or the
+             (https://napplet.link/neighborhood/join#invite=…) or share link while that sheet is open, or the
              file-share hotspot's page URL while it runs. -->
         <service
             android:name=".nfc.PairHostApduService"

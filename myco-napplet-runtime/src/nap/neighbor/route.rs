@@ -94,6 +94,93 @@ pub async fn subscribe(
     out
 }
 
+/// What `addresses` hold matching `filters`, for an `outbox` read naming
+/// them in `relays`: each address's backlog, as `relay.subscribe` on it is
+/// answered. Refused as a whole without the `neighbor` grant or for an
+/// address that is not this napplet's.
+pub async fn read(
+    ctx: &NapContext,
+    session: &Session,
+    addresses: &[String],
+    filters: &[Filter],
+) -> Result<Vec<Event>, NeighborError> {
+    allowed(session)?;
+    let mut out: Vec<Event> = Vec::new();
+    for addr in addresses {
+        let feed = ctx
+            .neighbor
+            .subscribe(session.identity(), addr, filters.to_vec())
+            .await?;
+        for event in matching(filters, feed.backlog) {
+            if !out.iter().any(|e| e.id == event.id) {
+                out.push(event);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Follow `addresses` for a subscription already open in `domain` as
+/// `sub_id` (an `outbox.subscribe` naming them in `relays`): each one's
+/// backlog, then what the host streams, as `relay.subscribe` on it does,
+/// until the subscription closes. Returns the backlog frames when there is
+/// no streamer to push them through.
+pub async fn follow(
+    ctx: &NapContext,
+    session: &Session,
+    domain: &str,
+    sub_id: &str,
+    filters: &[Filter],
+    addresses: &[String],
+) -> Result<Vec<Envelope>, NeighborError> {
+    allowed(session)?;
+    let mut feeds = Vec::with_capacity(addresses.len());
+    for addr in addresses {
+        feeds.push(
+            ctx.neighbor
+                .subscribe(session.identity(), addr, filters.to_vec())
+                .await?,
+        );
+    }
+    let handle = session.subscription_handle(domain, sub_id);
+    let Some(streamer) = session.streamer().cloned() else {
+        let mut out = Vec::new();
+        for feed in feeds {
+            for event in matching(filters, feed.backlog) {
+                handle.deliver(&event.id, || out.push(event_frame(domain, sub_id, &event)));
+            }
+        }
+        return Ok(out);
+    };
+    for feed in feeds {
+        let (handle, streamer) = (handle.clone(), streamer.clone());
+        let (domain, sub_id, filters) = (domain.to_string(), sub_id.to_string(), filters.to_vec());
+        let backlog = feed.backlog;
+        // Ends when the subscription does: dropping the feed lets go of the
+        // peers.
+        let mut live = futures_util::StreamExt::take_until(feed.live, handle.closed());
+        (streamer.spawn)(Box::pin(async move {
+            for event in matching(&filters, backlog) {
+                handle.deliver(&event.id, || {
+                    (streamer.push)(event_frame(&domain, sub_id.as_str(), &event))
+                });
+            }
+            while let Some(event) = futures_util::StreamExt::next(&mut live).await {
+                if handle.is_closed() {
+                    return;
+                }
+                if !matches(&filters, &event) {
+                    continue;
+                }
+                handle.deliver(&event.id, || {
+                    (streamer.push)(event_frame(&domain, sub_id.as_str(), &event))
+                });
+            }
+        }));
+    }
+    Ok(Vec::new())
+}
+
 /// Publish `event` to each address. One result per address, in order:
 /// `Ok` once the host took it.
 pub async fn publish(
@@ -283,18 +370,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbox_reads_refuse_addresses_rather_than_ignore_them() {
-        let (ctx, _) = ctx();
+    async fn outbox_reads_take_addresses_as_relay_subscribe_does() {
+        let (ctx, host) = ctx();
         let mut s = session(&["neighbor", "outbox"]);
+        // Held in the neighborhood only, nowhere else on the device.
+        let home = nostr::EventBuilder::text_note("hi home")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        host.published.lock().unwrap().push((HOME.into(), home));
         let q = Envelope::new("outbox.query")
             .with_id("q1")
             .with_field("filters", json!([{"kinds": [1]}]))
             .with_field("options", json!({"relays": [HOME]}));
         let r = send(&ctx, &mut s, q).await;
+        let events = r[0]["events"].as_array().expect("events");
         assert!(
-            r[0]["error"].as_str().unwrap().contains("relay.subscribe"),
+            events.iter().any(|e| e["event"]["content"] == "hi home"),
             "{}",
             r[0]
+        );
+
+        // Subscribing names it too: its backlog comes with the answer.
+        let sub = Envelope::new("outbox.subscribe")
+            .with_id("s1")
+            .with_field("subId", "o1")
+            .with_field("filters", json!([{"kinds": [1]}]))
+            .with_field("options", json!({"relays": [HOME]}));
+        let out = send(&ctx, &mut s, sub).await;
+        assert!(
+            out.iter()
+                .any(|e| e["result"]["event"]["content"] == "hi home"),
+            "{out:?}"
+        );
+
+        // Without the neighbor grant, refused, not ignored.
+        let mut s = session(&["outbox"]);
+        let q = Envelope::new("outbox.query")
+            .with_id("q2")
+            .with_field("filters", json!([{"kinds": [1]}]))
+            .with_field("options", json!({"relays": [HOME]}));
+        let r = send(&ctx, &mut s, q).await;
+        assert_eq!(r[0]["error"], "denied", "{}", r[0]);
+    }
+
+    /// A blob fetched through a neighborhood stays in that neighborhood:
+    /// not put in the device's store, where a plain `blossom:` ask by any
+    /// napplet would find it. The window host reads it back through the
+    /// address it came by.
+    #[tokio::test]
+    async fn a_neighborhood_blob_is_not_readable_by_hash_alone() {
+        let (ctx, host) = ctx();
+        let mut s = session(&["neighbor", "resource"]);
+        let bytes = b"\x89PNG\r\n\x1a\nhousehold only".to_vec();
+        let sha = nsite_deck::sync::sha256_hex(&bytes);
+        host.blobs
+            .lock()
+            .unwrap()
+            .insert(sha.clone(), bytes.clone());
+        let get = Envelope::new("resource.bytes").with_id("b1").with_field(
+            "url",
+            format!("blossom:{sha}.png?xs=neighborhood%3A%2F%2Fh2c"),
+        );
+        let r = send(&ctx, &mut s, get).await;
+        assert_eq!(r[0]["type"], "resource.bytes.result", "{}", r[0]);
+        assert!(!ctx.blobs.has(&sha).await, "not in the device's store");
+
+        // Another napplet asking by hash alone gets nothing.
+        let mut other = Session::new(NappletIdentity::new("map", "x"), vec!["resource"]);
+        other.on_ready();
+        let check = Envelope::new("resource.check")
+            .with_id("c1")
+            .with_field("urls", json!([format!("blossom:{sha}")]));
+        let r = send(&ctx, &mut other, check).await;
+        assert_ne!(r[0]["result"]["items"][0]["available"], "yes", "{}", r[0]);
+        let plain = Envelope::new("resource.bytes")
+            .with_id("b2")
+            .with_field("url", format!("blossom:{sha}"));
+        let r = send(&ctx, &mut other, plain).await;
+        assert_eq!(r[0]["type"], "resource.bytes.error", "{}", r[0]);
+
+        // The napplet it was delivered to can still be served it.
+        let served = crate::nap::resource::neighborhood_bytes(&ctx, s.identity(), true, &sha).await;
+        assert_eq!(served, Some(bytes));
+        assert_eq!(
+            crate::nap::resource::neighborhood_bytes(&ctx, other.identity(), true, &sha).await,
+            None,
+            "only to the napplet it was delivered to"
         );
     }
 

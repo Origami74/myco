@@ -15,7 +15,7 @@
 //! ```
 //!
 //! This module is the protocol only: no sockets. The link service carries
-//! it over HTTP; see `.planning/neighbour/neighborhood-protocol.md`.
+//! it over HTTP; see `docs/design/nap-neighbor/links.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -72,13 +72,15 @@ pub const INVITE_PREFIX: &str = "myco://link/";
 
 /// An invitation as a napplet link: the `neighborhood/join` convention
 /// (NAP-INTENT), which the shell handles itself. It opens Myco where Myco
-/// is installed and lands on napplet.link's web page elsewhere.
-pub const INVITE_LINK: &str = "https://napplet.link/neighborhood/join?invite=";
+/// is installed and lands on napplet.link's web page elsewhere. The payload
+/// rides in the fragment, which a browser never sends: the web host never
+/// sees the one-time secret.
+pub const INVITE_LINK: &str = "https://napplet.link/neighborhood/join#invite=";
 
 impl LinkOffer {
     /// The invitation as a link:
-    /// `https://napplet.link/neighborhood/join?invite=<base64url of the JSON>`.
-    /// Base64url needs no escaping in a query.
+    /// `https://napplet.link/neighborhood/join#invite=<base64url of the JSON>`.
+    /// Base64url needs no escaping in a fragment.
     pub fn encode(&self) -> String {
         format!(
             "{INVITE_LINK}{}",
@@ -101,24 +103,27 @@ impl LinkOffer {
 }
 
 /// The `invite` value of a `neighborhood/join` napplet link
-/// (`https://napplet.link/…` or `napplet:neighborhood/join?…`), or the
-/// payload of a `myco://link/…`.
+/// (`https://napplet.link/…` or `napplet:neighborhood/join…`), in its
+/// fragment (`#invite=`, what is written) or its query (`?invite=`, what
+/// older invitations carry); or the payload of a `myco://link/…`.
 fn invite_payload(text: &str) -> Option<&str> {
     if let Some(rest) = text.strip_prefix(INVITE_PREFIX) {
         return Some(rest);
     }
     let lower = text.to_ascii_lowercase();
-    let query_at = [
-        "https://napplet.link/neighborhood/join?",
-        "napplet:neighborhood/join?",
+    let rest_at = [
+        "https://napplet.link/neighborhood/join",
+        "napplet:neighborhood/join",
     ]
     .iter()
     .find(|p| lower.starts_with(*p))
     .map(|p| p.len())?;
-    text[query_at..]
-        .split('#')
-        .next()?
-        .split('&')
+    let rest = &text[rest_at..];
+    if !rest.starts_with(['?', '#']) {
+        return None;
+    }
+    rest[1..]
+        .split(['&', '#', '?'])
         .find_map(|pair| pair.strip_prefix("invite="))
 }
 
@@ -234,17 +239,37 @@ pub fn read_offer(event: &Event, peer_pk: &str) -> Option<(OfferContent, Option<
         .iter()
         .find(|t| t.kind().to_string() == "name")
         .and_then(|t| t.content())
-        .map(str::to_string);
+        .map(clip_name);
     Some((content, name))
 }
 
-/// A NIP-98 `Authorization` header value for `method url`, signed by `keys`.
-pub fn http_auth(keys: &Keys, method: &str, url: &str) -> String {
+/// The longest name kept from a peer: a person's, or a neighborhood's.
+pub const MAX_NAME_CHARS: usize = 64;
+/// The most additions a peer may hold waiting on one link; past this the
+/// oldest are dropped.
+pub const MAX_PENDING: usize = 8;
+
+/// A peer-supplied name as kept: trimmed, at most [`MAX_NAME_CHARS`].
+pub fn clip_name(name: &str) -> String {
+    name.trim().chars().take(MAX_NAME_CHARS).collect()
+}
+
+/// A NIP-98 `Authorization` header value for `method url` with `body`,
+/// signed by `keys`. A `POST`, or any request with a body, carries the
+/// body's sha256 in a `payload` tag; every header carries a random `nonce`,
+/// so two requests in the same second are never the same event (a repeated
+/// one is refused as a replay).
+pub fn http_auth(keys: &Keys, method: &str, url: &str, body: &[u8]) -> String {
+    let mut tags = vec![
+        Tag::parse(["u", url]).expect("valid tag"),
+        Tag::parse(["method", method]).expect("valid tag"),
+        Tag::parse(["nonce", &token()]).expect("valid tag"),
+    ];
+    if method.eq_ignore_ascii_case("POST") || !body.is_empty() {
+        tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).expect("valid tag"));
+    }
     let event = EventBuilder::new(Kind::from(K_HTTP_AUTH), "")
-        .tags([
-            Tag::parse(["u", url]).expect("valid tag"),
-            Tag::parse(["method", method]).expect("valid tag"),
-        ])
+        .tags(tags)
         .sign_with_keys(keys)
         .expect("signs");
     let json = serde_json::to_vec(&event).expect("serializes");
@@ -254,8 +279,58 @@ pub fn http_auth(keys: &Keys, method: &str, url: &str) -> String {
     )
 }
 
-/// Who signed a NIP-98 header for `method url`, if it is valid and fresh.
-pub fn check_http_auth(header: &str, method: &str, url: &str) -> Option<String> {
+/// Who signed a NIP-98 header for `method url` with `body`, if it is valid,
+/// fresh, and not seen before. A `POST` must carry the body's sha256 in its
+/// `payload` tag; any other request that carries one must match too. An
+/// accepted header is remembered (see [`Replays`]) and refused the second
+/// time.
+pub fn check_http_auth(header: &str, method: &str, url: &str, body: &[u8]) -> Option<String> {
+    let event = verify_http_auth(header, method, url, body)?;
+    replays().first_use(event.id, std::time::Instant::now())?;
+    Some(event.pubkey.to_hex())
+}
+
+/// How long an accepted NIP-98 id is remembered: past the signing window
+/// both ways, after which the timestamp check refuses it anyway.
+const REPLAY_FOR: std::time::Duration = std::time::Duration::from_secs(2 * AUTH_WINDOW_SECS);
+/// The most accepted NIP-98 ids remembered at once; the oldest go first.
+const REPLAY_IDS: usize = 4096;
+
+/// NIP-98 event ids accepted lately: a header is good once.
+#[derive(Default)]
+struct Replays {
+    seen: std::collections::HashSet<nostr::EventId>,
+    order: std::collections::VecDeque<(std::time::Instant, nostr::EventId)>,
+}
+
+impl Replays {
+    /// `Some` the first time `id` is offered within [`REPLAY_FOR`].
+    fn first_use(&mut self, id: nostr::EventId, now: std::time::Instant) -> Option<()> {
+        while let Some((at, old)) = self.order.front().copied() {
+            if now.saturating_duration_since(at) < REPLAY_FOR && self.order.len() < REPLAY_IDS {
+                break;
+            }
+            self.order.pop_front();
+            self.seen.remove(&old);
+        }
+        if !self.seen.insert(id) {
+            return None;
+        }
+        self.order.push_back((now, id));
+        Some(())
+    }
+}
+
+fn replays() -> std::sync::MutexGuard<'static, Replays> {
+    static REPLAYS: std::sync::OnceLock<Mutex<Replays>> = std::sync::OnceLock::new();
+    REPLAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// [`check_http_auth`] without the replay check.
+fn verify_http_auth(header: &str, method: &str, url: &str, body: &[u8]) -> Option<Event> {
     let b64 = header.strip_prefix("Nostr ")?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
@@ -275,11 +350,23 @@ pub fn check_http_auth(header: &str, method: &str, url: &str) -> Option<String> 
     if tag("u")? != url || !tag("method")?.eq_ignore_ascii_case(method) {
         return None;
     }
+    match tag("payload") {
+        Some(payload) => {
+            if !same(
+                &payload.to_ascii_lowercase(),
+                &hex::encode(Sha256::digest(body)),
+            ) {
+                return None;
+            }
+        }
+        None if method.eq_ignore_ascii_case("POST") => return None,
+        None => {}
+    }
     if now().abs_diff(event.created_at.as_secs()) > AUTH_WINDOW_SECS {
         return None;
     }
     event.verify().ok()?;
-    Some(event.pubkey.to_hex())
+    Some(event)
 }
 
 // --- the store ------------------------------------------------------------------
@@ -410,54 +497,134 @@ pub struct Links {
     /// Bumped whenever a link starts, ends, changes what it carries, or
     /// comes back in reach: what live subscriptions follow.
     changes: tokio::sync::watch::Sender<u64>,
+    /// Link relay sockets open per link, held by [`RelaySlot`]s.
+    sockets: std::sync::Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 /// How long after the last exchange a link still counts as reachable.
 pub const REACHABLE_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+/// The most link relay sockets one link may hold open at once.
+pub const MAX_RELAY_SOCKETS: usize = 4;
+
+/// One of a link's [`MAX_RELAY_SOCKETS`], given back when dropped.
+pub struct RelaySlot {
+    sockets: std::sync::Arc<Mutex<BTreeMap<String, usize>>>,
+    link_id: String,
+}
+
+impl Drop for RelaySlot {
+    fn drop(&mut self) {
+        let mut sockets = self.sockets.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = sockets.get_mut(&self.link_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                sockets.remove(&self.link_id);
+            }
+        }
+    }
+}
+
+/// What `links.json` holds: the links and invites, ephemeral links left
+/// out — they live for this run only, in memory, secret keys and all.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Persisted<'a> {
+    links: Vec<&'a Link>,
+    invites: &'a BTreeMap<String, Invite>,
+}
+
+/// Write `value` to `file` whole or not at all: a temp file, synced to disk,
+/// then renamed over it.
+fn write_atomically(file: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let tmp = file.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(value)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, file)?;
+    Ok(())
+}
 
 impl Links {
     pub fn open(data_dir: &Path) -> Self {
         let file = data_dir.join(FILE);
-        let saved: Saved = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let links = Self {
+        let mut saved: Saved = match std::fs::read(&file) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    // Set aside, not overwritten: a bad write must never
+                    // silently lose the user's links.
+                    tracing::warn!(error = %e, "links.json unreadable; keeping it aside");
+                    let _ = std::fs::rename(&file, file.with_extension("json.bad"));
+                    Saved::default()
+                }
+            },
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(error = %e, "links.json unreadable; keeping it aside");
+                    let _ = std::fs::rename(&file, file.with_extension("json.bad"));
+                }
+                Saved::default()
+            }
+        };
+        // Ephemeral links belong to an encounter, and the encounter ended
+        // with the last run. They are no longer written; an older file may
+        // still hold some, dropped at the next save.
+        saved.links.retain(|l| l.ephemeral.is_none());
+        Self {
             file,
             saved: Mutex::new(saved),
             seen: Mutex::default(),
             direct: Mutex::default(),
             changes: tokio::sync::watch::channel(0).0,
-        };
-        // Ephemeral links belong to an encounter, and the encounter ended
-        // with the last run: whoever is still in reach links afresh.
-        let stale = links
-            .saved
-            .lock()
-            .unwrap()
-            .links
-            .iter()
-            .any(|l| l.ephemeral.is_some());
-        if stale {
-            links.change(|saved| saved.links.retain(|l| l.ephemeral.is_none()));
+            sockets: Default::default(),
         }
-        links
     }
 
     fn change<T>(&self, f: impl FnOnce(&mut Saved) -> T) -> T {
         let mut saved = self.saved.lock().unwrap();
         let out = f(&mut saved);
-        let tmp = self.file.with_extension("json.tmp");
-        let written = serde_json::to_vec(&*saved)
-            .map_err(anyhow::Error::from)
-            .and_then(|b| std::fs::write(&tmp, b).map_err(Into::into))
-            .and_then(|_| std::fs::rename(&tmp, &self.file).map_err(Into::into));
-        if let Err(e) = written {
+        let persisted = Persisted {
+            links: saved
+                .links
+                .iter()
+                .filter(|l| l.ephemeral.is_none())
+                .collect(),
+            invites: &saved.invites,
+        };
+        if let Err(e) = write_atomically(&self.file, &persisted) {
             tracing::warn!(error = %e, "could not save links");
         }
         drop(saved);
         self.changed();
         out
+    }
+
+    /// Whether link `link_id` still exists and carries `n`.
+    pub fn carries(&self, link_id: &str, n: NeighborhoodId) -> bool {
+        self.saved
+            .lock()
+            .unwrap()
+            .links
+            .iter()
+            .any(|l| l.id == link_id && l.neighborhoods.contains(&n))
+    }
+
+    /// One of `link_id`'s relay sockets, or `None` when it holds
+    /// [`MAX_RELAY_SOCKETS`] already.
+    pub fn relay_slot(&self, link_id: &str) -> Option<RelaySlot> {
+        let mut sockets = self.sockets.lock().unwrap();
+        let open = sockets.entry(link_id.to_string()).or_default();
+        if *open >= MAX_RELAY_SOCKETS {
+            return None;
+        }
+        *open += 1;
+        Some(RelaySlot {
+            sockets: self.sockets.clone(),
+            link_id: link_id.to_string(),
+        })
     }
 
     fn changed(&self) {
@@ -655,7 +822,7 @@ impl Links {
     /// The joiner's side, after the answer: store the link.
     pub fn finish(&self, joining: Joining, response: &SetupResponse) -> Result<Link, Refused> {
         let (_, name) = read_offer(&response.offer, &joining.peer).ok_or(Refused::BadOffer)?;
-        let name = name.or(joining.from);
+        let name = name.or(joining.from.as_deref().map(clip_name));
         let carried: BTreeSet<NeighborhoodId> = response
             .n
             .iter()
@@ -760,8 +927,9 @@ impl Links {
     }
 
     /// Hold neighborhoods the peer asked to add until this side's user
-    /// answers. Ones the link already carries are not held. Returns every
-    /// id now waiting.
+    /// answers. Ones the link already carries are not held. At most
+    /// [`MAX_PENDING`] wait per link, the oldest dropped first, each name
+    /// clipped to [`MAX_NAME_CHARS`]. Returns every id now waiting.
     pub fn hold_pending(&self, link_id: &str, add: Vec<Shared>) -> Vec<NeighborhoodId> {
         self.change(|saved| {
             let Some(link) = saved.links.iter_mut().find(|l| l.id == link_id) else {
@@ -771,9 +939,14 @@ impl Links {
                 let known = link.neighborhoods.contains(&shared.id)
                     || link.pending.iter().any(|p| p.id == shared.id);
                 if !known {
-                    link.pending.push(shared);
+                    link.pending.push(Shared {
+                        id: shared.id,
+                        name: clip_name(&shared.name),
+                    });
                 }
             }
+            let over = link.pending.len().saturating_sub(MAX_PENDING);
+            link.pending.drain(..over);
             link.pending.iter().map(|p| p.id).collect()
         })
     }
@@ -884,14 +1057,19 @@ mod tests {
         let offer = a.invite(vec![url.into()], vec![home.clone(), club], INVITE_TTL_SECS);
         // Through the QR and back, as a link and bare.
         let link = offer.encode();
-        assert!(link.starts_with(INVITE_LINK));
+        assert!(link.starts_with("https://napplet.link/neighborhood/join#invite="));
         let payload = link.strip_prefix(INVITE_LINK).unwrap();
         for spelling in [
             payload.to_string(),
             format!("{INVITE_PREFIX}{payload}"),
             format!("napplet:neighborhood/join?invite={payload}"),
+            format!("napplet:neighborhood/join#invite={payload}"),
+            // Older invitations carried it in the query.
+            format!("https://napplet.link/neighborhood/join?invite={payload}"),
+            format!("https://napplet.link/neighborhood/join?x=1#invite={payload}"),
             // An alphanumeric QR upper-cases scheme and host, never the query.
             format!("HTTPS://NAPPLET.LINK/NEIGHBORHOOD/JOIN?invite={payload}#x"),
+            format!("HTTPS://NAPPLET.LINK/NEIGHBORHOOD/JOIN#invite={payload}"),
         ] {
             assert_eq!(
                 LinkOffer::decode(&spelling),
@@ -1064,14 +1242,138 @@ mod tests {
     #[test]
     fn http_auth_round_trips_and_binds_method_and_url() {
         let keys = Keys::generate();
-        let h = http_auth(&keys, "POST", "http://a.fips:4873/nh/offer");
+        let url = "http://a.fips:4873/nh/offer";
+        let h = http_auth(&keys, "POST", url, b"{}");
+        assert!(check_http_auth(&h, "GET", url, b"{}").is_none());
+        assert!(check_http_auth(&h, "POST", "http://b.fips:4873/nh/offer", b"{}").is_none());
+        assert!(check_http_auth("Nostr not-base64!", "POST", "x", b"").is_none());
         assert_eq!(
-            check_http_auth(&h, "POST", "http://a.fips:4873/nh/offer"),
+            check_http_auth(&h, "POST", url, b"{}"),
             Some(keys.public_key().to_hex())
         );
-        assert!(check_http_auth(&h, "GET", "http://a.fips:4873/nh/offer").is_none());
-        assert!(check_http_auth(&h, "POST", "http://b.fips:4873/nh/offer").is_none());
-        assert!(check_http_auth("Nostr not-base64!", "POST", "x").is_none());
+    }
+
+    #[test]
+    fn a_post_is_bound_to_its_body() {
+        let keys = Keys::generate();
+        let url = "http://a.fips:4873/nh/x/neighborhoods";
+        let h = http_auth(&keys, "POST", url, b"{\"add\":[]}");
+        assert!(check_http_auth(&h, "POST", url, b"{\"add\":[1]}").is_none());
+        assert!(check_http_auth(&h, "POST", url, b"{\"add\":[]}").is_some());
+        // A body-less POST still signs the empty body.
+        let h = http_auth(&keys, "POST", url, b"");
+        assert!(check_http_auth(&h, "POST", url, b"x").is_none());
+        assert!(check_http_auth(&h, "POST", url, b"").is_some());
+        // A POST signed without a payload tag is refused.
+        let bare = EventBuilder::new(Kind::from(K_HTTP_AUTH), "")
+            .tags([
+                Tag::parse(["u", url]).unwrap(),
+                Tag::parse(["method", "POST"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let bare = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&bare).unwrap())
+        );
+        assert!(check_http_auth(&bare, "POST", url, b"").is_none());
+    }
+
+    #[test]
+    fn a_header_is_good_once() {
+        let keys = Keys::generate();
+        let url = "http://a.fips:4873/nh/x/offer";
+        let h = http_auth(&keys, "GET", url, b"");
+        assert!(check_http_auth(&h, "GET", url, b"").is_some());
+        assert!(check_http_auth(&h, "GET", url, b"").is_none(), "a replay");
+        // Two requests in the same second are still two headers.
+        assert!(check_http_auth(&http_auth(&keys, "GET", url, b""), "GET", url, b"").is_some());
+    }
+
+    #[test]
+    fn the_replay_memory_forgets_the_old_and_stays_bounded() {
+        let mut r = Replays::default();
+        let t = std::time::Instant::now();
+        let id = |i: u32| nostr::EventId::from_byte_array(Sha256::digest(i.to_be_bytes()).into());
+        assert!(r.first_use(id(0), t).is_some());
+        assert!(r.first_use(id(0), t).is_none());
+        assert!(r.first_use(id(0), t + REPLAY_FOR).is_some(), "forgotten");
+        for i in 1..(REPLAY_IDS as u32 + 100) {
+            r.first_use(id(i), t + REPLAY_FOR);
+        }
+        assert!(r.order.len() <= REPLAY_IDS && r.seen.len() <= REPLAY_IDS);
+    }
+
+    #[test]
+    fn pending_additions_and_names_are_bounded() {
+        let (a, _, a_link, _) = setup();
+        let many: Vec<Shared> = (0..(MAX_PENDING + 3))
+            .map(|_| Shared {
+                id: NeighborhoodId::random(),
+                name: "x".repeat(1000),
+            })
+            .collect();
+        let waiting = a.hold_pending(&a_link.id, many.clone());
+        assert_eq!(waiting.len(), MAX_PENDING);
+        assert_eq!(waiting[0], many[3].id, "the oldest went first");
+        let stored = a.by_peer(&a_link.peer).unwrap();
+        assert!(stored
+            .pending
+            .iter()
+            .all(|p| p.name.chars().count() == MAX_NAME_CHARS));
+        let long = sign_offer(&Keys::generate(), &offer_content(), Some(&"é".repeat(500)));
+        let (_, name) = read_offer(&long, &long.pubkey.to_hex()).unwrap();
+        assert_eq!(name.unwrap().chars().count(), MAX_NAME_CHARS);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_set_aside_not_overwritten() {
+        let d = dir();
+        std::fs::write(d.join(FILE), b"{not json").unwrap();
+        let links = Links::open(&d);
+        assert!(links.all().is_empty());
+        assert_eq!(
+            std::fs::read(d.join("links.json.bad")).unwrap(),
+            b"{not json"
+        );
+        links.invite(vec![], vec![], INVITE_TTL_SECS);
+        assert_eq!(
+            std::fs::read(d.join("links.json.bad")).unwrap(),
+            b"{not json"
+        );
+    }
+
+    #[test]
+    fn ephemeral_links_are_never_written() {
+        let d = dir();
+        let links = Links::open(&d);
+        let peer = Keys::generate();
+        let mine = Keys::generate();
+        let link = links
+            .add_ephemeral(
+                &mine,
+                sign_offer(&peer, &offer_content(), None),
+                BTreeSet::from([NeighborhoodId::random()]),
+                "device",
+            )
+            .unwrap();
+        assert_eq!(links.ephemeral().len(), 1, "kept in memory");
+        let on_disk = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!on_disk.contains(&mine.secret_key().to_secret_hex()));
+        assert!(!on_disk.contains(&link.id));
+        assert!(Links::open(&d).all().is_empty());
+    }
+
+    #[test]
+    fn a_link_holds_a_bounded_number_of_relay_sockets() {
+        let a = Links::open(&dir());
+        let slots: Vec<_> = (0..MAX_RELAY_SOCKETS)
+            .map(|_| a.relay_slot("l").unwrap())
+            .collect();
+        assert!(a.relay_slot("l").is_none());
+        assert!(a.relay_slot("other").is_some());
+        drop(slots);
+        assert!(a.relay_slot("l").is_some());
     }
 
     #[test]

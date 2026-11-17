@@ -25,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.myco.core.AppState
 import app.myco.neighbor.IncomingInvite
+import app.myco.neighbor.InvitePreview
 import app.myco.nfc.NfcReader
 
 /**
@@ -98,7 +99,17 @@ fun ScanSheet(state: AppState, onScanned: (String) -> Unit, onDismiss: () -> Uni
                 }
             }
             Spacer(Modifier.height(12.dp))
-            PasteCodeButton(label = "Paste a link or invitation", onPaste = take)
+            // A pasted invitation came from a link, not a QR code: say so on
+            // the join sheet. Anything else goes to the one router.
+            PasteCodeButton(label = "Paste a link or invitation", onPaste = { text ->
+                val invite = InvitePreview.read(text, InvitePreview.Source.Link)
+                if (invite != null) {
+                    onDismiss()
+                    IncomingInvite.pending.value = invite
+                } else {
+                    take(text)
+                }
+            })
         }
     }
 }

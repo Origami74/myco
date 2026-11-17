@@ -65,17 +65,38 @@ there as extensions
 - **Routes** (`{pk}` is this side's link key for the link):
 
   ```text
-  POST /nh/{pk}/setup          one-time secret proof     -> offer, ids on the link
-  GET  /nh/{pk}/offer          NIP-98                    -> current offer
-  POST /nh/{pk}/neighborhoods  NIP-98  {add, remove}     -> ids, pending
-  POST /nh/{pk}/end            NIP-98                    -> 204
-  GET  /nh/{pk}/relay?n=&ttl=  NIP-98, WebSocket         -> NIP-01 scoped to n
-  GET  /nh/{pk}/blob/{sha256}?n=  NIP-98               -> a blob in n's scope
+  POST /nh/nearby                 NIP-98, nearby secret proof -> offer, ids on the link
+  POST /nh/{pk}/setup             one-time secret proof       -> offer, ids on the link
+  GET  /nh/{pk}/offer             NIP-98                      -> current offer
+  POST /nh/{pk}/neighborhoods     NIP-98  {add, remove}       -> ids, pending
+  POST /nh/{pk}/end               NIP-98                      -> 204
+  GET  /nh/{pk}/relay?n=&ttl=     NIP-98, WebSocket           -> NIP-01 scoped to n
+  GET  /nh/{pk}/blob/{sha256}?n=  NIP-98                      -> a blob in n's scope
+  HEAD /nh/{pk}/blob/{sha256}?n=  NIP-98                      -> 200 or 404, no body
   ```
 
-- **Reached by:** anyone holding an invitation (`/setup`), then linked peers,
-  each request signed with their link key. Every refusal is a bare `403
-  refused`. Bodies are capped at 8 KiB.
+- **Reached by:** any direct peer (`/nh/nearby`, with a proof that it heard
+  this phone's Bluetooth secret), anyone holding an invitation (`/setup`),
+  then linked peers, each request signed with their link key.
+- **Refusals** are a bare `403 refused`, except `429` (slow down, too many
+  sockets), `503` (busy) and `/nh/nearby`'s `409 used` and
+  `503 {"error":"busy"}`.
+- **Limits:**
+
+  | What | Limit |
+  | --- | --- |
+  | Request body | 8 KiB |
+  | Requests per source address | 2/s, bursts of 20, then `429` |
+  | Requests, all sources | 50/s, bursts of 200, then `429` |
+  | Requests in flight | 64, then `503` |
+  | Relay sockets per link | 4, then `429` |
+  | Relay message or frame | 64 KiB |
+  | Relay frames per socket | 20/s, bursts of 100 |
+  | Relay socket idle, no subscription open | 5 min |
+  | NIP-98 header | fresh within 60 s, used once (remembered 120 s) |
+  | Nearby links | 32 at once, 12 setups a minute, then `503` |
+
+  A relay socket also closes when its link ends or stops carrying `n`.
 
 This is the only port open to other phones. Design:
 [nap-neighbor/](../design/nap-neighbor/README.md).

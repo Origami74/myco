@@ -22,7 +22,7 @@ start".
 | `library.json` | the Apps grid: every installed nsite and napplet, with `kind`, `pinned`, a napplet's `granted` capabilities and the `pointer` it was added by | `content.rs` (`LibraryItem`) |
 | `neighborhoods.json` | the neighborhoods this device carries: id, local name, policy (publish / backlog hops, pass on, blob push hops, extensions not got / not shared), offer, muted authors, napplet grants, and each napplet's address tokens | `neighbor/store.rs` |
 | `links.json` | links: this side's link key, the peer's link key, the neighborhoods carried, the peer's last offer and name, pending additions; plus open invitations | `neighbor/link.rs` |
-| `neighborhood-relay/`, `neighborhood-blobs/`, `neighborhood-scopes.json` | neighborhood events and blobs, kept apart from the user's own relay, and which neighborhoods each belongs to | `neighbor/data.rs` |
+| `neighborhood-relay/<id>/`, `neighborhood-blobs/`, `neighborhood-scopes.json` | neighborhood events (one store per neighborhood) and blobs, kept apart from the user's own relay, and which neighborhoods each belongs to | `neighbor/data.rs` |
 | `active.json` | which version of each nsite is active (staged updates) | `content.rs`, [nsite-updates.md](../design/nsite/nsite-updates.md) |
 | `relay/lmdb/` | the embedded relay's events — what this phone keeps (manifests, relay lists, profiles, its own notes, private messages) — an LMDB database. Expiring events (chat) are stored too and swept once expired. A pre-LMDB `relay/events.json` is migrated in on first open and left as `events.json.migrated` | `myco-relay` |
 | `relay/expiring.log` | the ids and expiries of stored expiring events, one `"<expiry> <hex id>"` per line, for the sweep | `myco-relay` |

@@ -12,6 +12,7 @@
 //!                                                  proofs of the secrets it heard)
 //!   <- NearbyResponse { their fresh link key, signed offer, shared ids }
 //!   <- 409 { "error": "used", "proof": i }   that secret was taken: retry with the next
+//!   <- 503 { "error": "busy" }               too many nearby links or setups: next tick
 //! ```
 //!
 //! **The nearby secret.** Each device advertises a 4-byte [`Secret`] over
@@ -19,7 +20,7 @@
 //! `HMAC(secret, "nap-neighbor:nearby:" ‖ its new link key)`. A secret works once:
 //! the first setup that proves it wins and a new secret is advertised;
 //! anyone racing with the same one is told `used` and tries again with the
-//! next secret it hears, as many rounds as it takes. A secret is also
+//! next new secret it hears, for a bounded number of rounds. A secret is also
 //! replaced every [`SECRET_FOR`] and whenever nearby starts over. The
 //! server also checks the request came from a FIPS address directly in
 //! reach.
@@ -193,13 +194,29 @@ pub type Secret = [u8; 4];
 
 /// How long an unused secret is advertised before it is replaced.
 pub const SECRET_FOR: Duration = Duration::from_secs(300);
-/// How long a heard secret is offered in proofs.
+/// How long a heard secret is offered in proofs after it was last heard.
+/// The BLE radio reports a secret still in the air every 20 s.
 pub const HEARD_FOR: Duration = Duration::from_secs(60);
-/// Most proofs one request carries, and most secrets remembered either way.
+/// Most proofs one request carries.
 pub const MAX_PROOFS: usize = 16;
 /// How long a replaced secret is remembered, to answer `used` rather than
 /// refused.
 const SPENT_FOR: Duration = Duration::from_secs(300);
+/// Most heard secrets remembered.
+const MAX_HEARD: usize = 32;
+/// Sightings that make a heard secret look like a real phone's: a phone
+/// keeps advertising its secret, so it is heard again and again, where a
+/// beacon cycling made-up secrets shows each one once.
+const REPEATED: u32 = 2;
+/// At most [`NEW_PER_WINDOW`] secrets never heard before are taken in per
+/// [`NEW_WINDOW`], so a flood of made-up ones can't push the real ones out.
+const NEW_PER_WINDOW: usize = 8;
+const NEW_WINDOW: Duration = Duration::from_secs(10);
+/// Most ephemeral links at once.
+pub const MAX_EPHEMERAL: usize = 32;
+/// Most nearby setups answered per [`SETUP_WINDOW`].
+pub const MAX_SETUPS: usize = 12;
+const SETUP_WINDOW: Duration = Duration::from_secs(60);
 
 fn fresh_secret() -> Secret {
     let bytes = Keys::generate().secret_key().to_secret_bytes();
@@ -221,6 +238,31 @@ struct Secrets {
     spent: std::collections::VecDeque<(Secret, Instant)>,
 }
 
+/// One heard secret.
+#[derive(Debug, Clone, Copy)]
+struct Sighting {
+    first: Instant,
+    last: Instant,
+    count: u32,
+}
+
+impl Sighting {
+    fn live(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last) <= HEARD_FOR
+            // Its owner replaces it within SECRET_FOR: one heard for longer
+            // than that is not a real phone's.
+            && now.saturating_duration_since(self.first) <= SECRET_FOR + HEARD_FOR
+    }
+}
+
+/// Secrets heard from others over BLE.
+#[derive(Default)]
+struct Heard {
+    secrets: BTreeMap<Secret, Sighting>,
+    /// The current new-secret window: when it started, how many it took.
+    window: Option<(Instant, usize)>,
+}
+
 /// Why a setup was not answered with a link.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -229,22 +271,26 @@ pub enum Refusal {
     /// Proof `i` was for a secret already used or replaced: try again with
     /// the next one.
     Used(usize),
+    /// Too many nearby links or setups right now: try again later.
+    Busy,
 }
 
 /// Nearby's state on the link service.
 #[derive(Default)]
 pub struct Nearby {
     direct: OnceLock<Arc<dyn DirectPeers>>,
-    /// This device's secret, made on first use.
+    /// This device's secret, made on first use; none while Nearby is off.
     secrets: Mutex<Option<Secrets>>,
-    /// Secrets heard from others over BLE, with when.
-    heard: Mutex<BTreeMap<Secret, Instant>>,
+    /// Secrets heard from others over BLE.
+    heard: Mutex<Heard>,
     /// Woken when a new secret is heard, for a dial waiting on one.
     heard_new: tokio::sync::Notify,
     /// Devices being dialed now, so two ticks don't link twice.
     dialing: Mutex<BTreeSet<String>>,
     /// Per ephemeral link, the neighborhoods already offered on it.
     offered: Mutex<BTreeMap<String, BTreeSet<NeighborhoodId>>>,
+    /// When recent nearby setups were answered, for [`MAX_SETUPS`].
+    setups: Mutex<std::collections::VecDeque<Instant>>,
 }
 
 impl Nearby {
@@ -287,6 +333,12 @@ impl Nearby {
         }
     }
 
+    /// The secret made so far, without making one.
+    #[cfg(test)]
+    fn current(&self) -> Option<Secret> {
+        self.secrets.lock().unwrap().as_ref().map(|s| s.current)
+    }
+
     fn replace(s: &mut Secrets, now: Instant) -> Secret {
         s.spent.push_back((s.current, now));
         while s.spent.len() > MAX_PROOFS
@@ -312,13 +364,25 @@ impl Nearby {
     /// Check `proofs` from link key `pk` against this device's secret and,
     /// if one is for the current secret, use it up: a new one is advertised
     /// and nobody else gets in with it. Atomic, so of racing requests
-    /// exactly one wins.
+    /// exactly one wins. Past [`MAX_SETUPS`] in a minute the right proof is
+    /// told [`Refusal::Busy`] and the secret is kept.
     fn take(&self, proofs: &[String], pk: &str, now: Instant) -> Result<(), Refusal> {
         self.secret(now);
         let mut guard = self.secrets.lock().unwrap();
         let s = guard.as_mut().ok_or(Refusal::Refused)?;
         let proofs = &proofs[..proofs.len().min(MAX_PROOFS)];
         if proofs.iter().any(|p| *p == proof(&s.current, pk)) {
+            let mut setups = self.setups.lock().unwrap();
+            while setups
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= SETUP_WINDOW)
+            {
+                setups.pop_front();
+            }
+            if setups.len() >= MAX_SETUPS {
+                return Err(Refusal::Busy);
+            }
+            setups.push_back(now);
             Self::replace(s, now);
             return Ok(());
         }
@@ -330,47 +394,117 @@ impl Nearby {
         Err(Refusal::Refused)
     }
 
-    /// A secret heard over BLE. Our own (current or old) is ignored.
+    /// A secret heard over BLE. Our own (current or old) is ignored, and so
+    /// are new ones past [`NEW_PER_WINDOW`] in a window.
     pub fn hear(&self, secret: Secret, now: Instant) {
         if let Some(s) = self.secrets.lock().unwrap().as_ref() {
             if s.current == secret || s.spent.iter().any(|(old, _)| *old == secret) {
                 return;
             }
         }
-        let mut heard = self.heard.lock().unwrap();
-        heard.retain(|_, t| now.saturating_duration_since(*t) <= HEARD_FOR);
-        let new = heard.insert(secret, now).is_none();
-        while heard.len() > MAX_PROOFS {
-            let oldest = heard.iter().min_by_key(|(_, t)| **t).map(|(k, _)| *k);
-            match oldest {
-                Some(k) => heard.remove(&k),
-                None => break,
-            };
-        }
-        drop(heard);
+        let new = {
+            let mut h = self.heard.lock().unwrap();
+            h.secrets.retain(|_, s| s.live(now));
+            if let Some(s) = h.secrets.get_mut(&secret) {
+                s.last = now;
+                s.count = s.count.saturating_add(1);
+                false
+            } else {
+                let (start, taken) = match h.window {
+                    Some((start, n)) if now.saturating_duration_since(start) < NEW_WINDOW => {
+                        (start, n)
+                    }
+                    _ => (now, 0),
+                };
+                if taken >= NEW_PER_WINDOW {
+                    false
+                } else {
+                    h.window = Some((start, taken + 1));
+                    if h.secrets.len() >= MAX_HEARD {
+                        // Ones seen once go before repeated ones, then the
+                        // stalest.
+                        let out = h
+                            .secrets
+                            .iter()
+                            .min_by_key(|(_, s)| (s.count >= REPEATED, s.last))
+                            .map(|(k, _)| *k);
+                        if let Some(k) = out {
+                            h.secrets.remove(&k);
+                        }
+                    }
+                    h.secrets.insert(
+                        secret,
+                        Sighting {
+                            first: now,
+                            last: now,
+                            count: 1,
+                        },
+                    );
+                    true
+                }
+            }
+        };
         if new {
             self.heard_new.notify_waiters();
         }
     }
 
-    /// Secrets heard within [`HEARD_FOR`], newest first.
+    /// Secrets heard lately, at most [`MAX_PROOFS`]: those heard again and
+    /// again first, each group newest first.
     pub fn heard(&self, now: Instant) -> Vec<Secret> {
-        let mut heard: Vec<(Secret, Instant)> = self
+        let mut heard: Vec<(Secret, Sighting)> = self
             .heard
             .lock()
             .unwrap()
+            .secrets
             .iter()
-            .filter(|(_, t)| now.saturating_duration_since(**t) <= HEARD_FOR)
-            .map(|(k, t)| (*k, *t))
+            .filter(|(_, s)| s.live(now))
+            .map(|(k, s)| (*k, *s))
             .collect();
-        heard.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+        heard.sort_by_key(|(_, s)| std::cmp::Reverse((s.count >= REPEATED, s.last)));
         heard.into_iter().map(|(k, _)| k).take(MAX_PROOFS).collect()
     }
 
     /// A heard secret turned out to be used: never offer it again.
     fn drop_heard(&self, secret: &Secret) {
-        self.heard.lock().unwrap().remove(secret);
+        self.heard.lock().unwrap().secrets.remove(secret);
     }
+
+    /// Heard secrets not in `tried`, waiting until `deadline` for one if
+    /// there are none. `None`: none came.
+    async fn untried(
+        &self,
+        tried: &BTreeSet<Secret>,
+        deadline: tokio::time::Instant,
+    ) -> Option<Vec<Secret>> {
+        loop {
+            let woken = self.heard_new.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let fresh: Vec<Secret> = self
+                .heard(Instant::now())
+                .into_iter()
+                .filter(|s| !tried.contains(s))
+                .collect();
+            if !fresh.is_empty() {
+                return Some(fresh);
+            }
+            tokio::time::timeout_at(deadline, woken).await.ok()?;
+        }
+    }
+
+    /// Whether nearby holds anything worth forgetting besides its secret.
+    fn holds_anything(&self) -> bool {
+        !self.offered.lock().unwrap().is_empty()
+            || !self.dialing.lock().unwrap().is_empty()
+            || !self.heard.lock().unwrap().secrets.is_empty()
+    }
+}
+
+/// Whether one more ephemeral link with `device` fits under
+/// [`MAX_EPHEMERAL`]. One that replaces its old link always does.
+fn room_for(links: &super::link::Links, device: &str) -> bool {
+    links.ephemeral_with(device).is_some() || links.ephemeral().len() < MAX_EPHEMERAL
 }
 
 // --- the wire -------------------------------------------------------------------
@@ -442,7 +576,7 @@ pub fn answer(
     let signer = svc
         .bases
         .iter()
-        .find_map(|b| check_http_auth(auth?, "POST", &format!("{b}/nh/nearby")))
+        .find_map(|b| check_http_auth(auth?, "POST", &format!("{b}/nh/nearby"), body))
         .ok_or(Refusal::Refused)?;
     if signer != request.pk {
         return Err(refused());
@@ -455,6 +589,9 @@ pub fn answer(
         .collect();
     if !carried.contains(&id()) {
         return Err(refused());
+    }
+    if !room_for(&svc.links, &peer.npub) {
+        return Err(Refusal::Busy);
     }
     // Last, so a refused request never uses the secret up.
     svc.nearby.take(&request.proofs, &request.pk, now)?;
@@ -478,51 +615,82 @@ pub fn answer(
     })
 }
 
-/// How many times a dial tries again after `used`, and how long it waits
-/// for a new secret each time.
-const USED_ROUNDS: usize = 8;
-const WAIT_FOR_SECRET: Duration = Duration::from_secs(5);
+/// How many times a dial tries again after a failed round, and how long, in
+/// all, it waits for secrets it has not tried yet.
+const RETRY_ROUNDS: usize = 8;
+const WAIT_FOR_SECRET: Duration = Duration::from_secs(25);
 
-/// The dialing side: set up an ephemeral link with `peer`, whose link
-/// service is at `base` (`http://<npub>.fips:4873`). Told a secret was
-/// used, it drops that one and tries again with the next it hears, up to
-/// [`USED_ROUNDS`] times.
-pub async fn dial(svc: &LinkService, base: &str, peer: &DirectPeer) -> anyhow::Result<Link> {
-    for round in 0..=USED_ROUNDS {
-        let mut heard = svc.nearby.heard(Instant::now());
-        // Nothing heard at all: no point waiting, the next tick asks again.
-        if heard.is_empty() && round == 0 {
-            anyhow::bail!("no nearby secret heard");
-        }
-        if heard.is_empty() {
-            let woken = svc.nearby.heard_new.notified();
-            let _ = tokio::time::timeout(WAIT_FOR_SECRET, woken).await;
-            heard = svc.nearby.heard(Instant::now());
-            if heard.is_empty() {
-                anyhow::bail!("no nearby secret heard");
-            }
-        }
-        match dial_once(svc, base, peer, &heard).await? {
-            Ok(link) => return Ok(link),
-            Err(i) => {
-                tracing::debug!("nearby secret already used: trying the next");
-                if let Some(s) = heard.get(i) {
-                    svc.nearby.drop_heard(s);
-                }
-            }
-        }
-    }
-    anyhow::bail!("every nearby secret tried was already used")
+/// How one setup attempt went.
+enum Attempt {
+    Linked(Box<Link>),
+    /// Proof `i` was for a used secret (`409`).
+    Used(usize),
+    /// None of the proofs was for its secret (`403`).
+    Refused,
 }
 
-/// One setup attempt with proofs for `heard`. `Ok(Err(i))`: proof `i` was
-/// for a used secret.
+/// The dialing side: set up an ephemeral link with `peer`, whose link
+/// service is at `base` (`http://<npub>.fips:4873`).
+pub async fn dial(svc: &LinkService, base: &str, peer: &DirectPeer) -> anyhow::Result<Link> {
+    dial_rounds(&svc.nearby, WAIT_FOR_SECRET, |heard| async move {
+        dial_once(svc, base, peer, &heard).await
+    })
+    .await
+}
+
+/// The rounds of a dial. Round one offers every secret heard; a refusal
+/// there ends the dial (the next tick asks again). Told a secret was used,
+/// its owner advertises a new one in a moment, so each later round waits,
+/// within `wait` in all, for a secret not offered yet: the secrets left
+/// over are most likely other phones', and a refusal of them is not the
+/// end either.
+async fn dial_rounds<F, Fut>(
+    nearby: &Nearby,
+    wait: Duration,
+    mut attempt: F,
+) -> anyhow::Result<Link>
+where
+    F: FnMut(Vec<Secret>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Attempt>>,
+{
+    let first = nearby.heard(Instant::now());
+    if first.is_empty() {
+        anyhow::bail!("no nearby secret heard");
+    }
+    let mut heard = first;
+    let mut tried: BTreeSet<Secret> = BTreeSet::new();
+    let mut deadline = None;
+    for round in 0..=RETRY_ROUNDS {
+        if round > 0 {
+            let until = *deadline.get_or_insert_with(|| tokio::time::Instant::now() + wait);
+            heard = nearby
+                .untried(&tried, until)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no new nearby secret heard"))?;
+        }
+        match attempt(heard.clone()).await? {
+            Attempt::Linked(link) => return Ok(*link),
+            Attempt::Used(i) => {
+                tracing::debug!("nearby secret already used: waiting for the next");
+                if let Some(s) = heard.get(i) {
+                    nearby.drop_heard(s);
+                }
+            }
+            Attempt::Refused if round == 0 => anyhow::bail!("nearby setup refused"),
+            Attempt::Refused => {}
+        }
+        tried.extend(heard.iter().copied());
+    }
+    anyhow::bail!("every nearby secret tried was refused or already used")
+}
+
+/// One setup attempt with proofs for `heard`.
 async fn dial_once(
     svc: &LinkService,
     base: &str,
     peer: &DirectPeer,
     heard: &[Secret],
-) -> anyhow::Result<Result<Link, usize>> {
+) -> anyhow::Result<Attempt> {
     let ours = ours(svc);
     if !ours.iter().any(|s| s.id == id()) {
         anyhow::bail!("Nearby is off");
@@ -536,20 +704,23 @@ async fn dial_once(
         n: ours.iter().map(|s| s.id).collect(),
     };
     let url = format!("{base}/nh/nearby");
+    let body = serde_json::to_vec(&request)?;
     let resp = super::service::client_for(&url)
         .post(&url)
         .map_err(|e| anyhow::anyhow!("{url}: {}", e.0))?
-        .header("authorization", http_auth(&keys, "POST", &url))
+        .header("authorization", http_auth(&keys, "POST", &url, &body))
         .header("content-type", "application/json")
-        .body(serde_json::to_vec(&request)?)
+        .body(body)
         .send()
         .await?;
-    if resp.status() == reqwest::StatusCode::CONFLICT {
-        let used: UsedSecret = serde_json::from_slice(&resp.bytes().await?)?;
-        return Ok(Err(used.proof));
-    }
-    if !resp.status().is_success() {
-        anyhow::bail!("{url}: refused ({})", resp.status());
+    match resp.status() {
+        reqwest::StatusCode::CONFLICT => {
+            let used: UsedSecret = serde_json::from_slice(&resp.bytes().await?)?;
+            return Ok(Attempt::Used(used.proof));
+        }
+        reqwest::StatusCode::FORBIDDEN => return Ok(Attempt::Refused),
+        s if !s.is_success() => anyhow::bail!("{url}: refused ({s})"),
+        _ => {}
     }
     let response: NearbyResponse = serde_json::from_slice(&resp.bytes().await?)?;
     // Only what we sent can be on the link, whatever they say.
@@ -570,7 +741,7 @@ async fn dial_once(
         .add_ephemeral(&keys, response.offer, carried, &peer.npub)
         .ok_or_else(|| anyhow::anyhow!("their offer was not valid"))?;
     svc.links.mark_direct(&link.id, peer.reach, Instant::now());
-    Ok(Ok(link))
+    Ok(Attempt::Linked(Box::new(link)))
 }
 
 /// Whether this device dials `peer`: the lower device npub does, so two
@@ -622,22 +793,45 @@ pub fn plan(own: &str, direct: &[DirectPeer], links: &super::link::Links, now: I
             out.dial.push(p.clone());
         }
     }
+    // No more links than MAX_EPHEMERAL, counting those that stay.
+    let staying = links.ephemeral().len().saturating_sub(out.end.len());
+    out.dial.truncate(MAX_EPHEMERAL.saturating_sub(staying));
     out
 }
 
 /// End every ephemeral link and forget all nearby knew: Nearby was turned
 /// off, nobody is in reach any more, or the node stopped or started. The
 /// next peer in reach meets this device as a stranger, on fresh link keys.
-pub fn end_all(svc: &LinkService) -> Vec<Link> {
+///
+/// `None` when there was nothing to forget: then nothing changes, not even
+/// the secret, so calling it again and again costs the BLE advert nothing.
+/// `Some(links)` (possibly empty) when something was forgotten; the caller
+/// then runs [`forget_content`] too, which needs to await. While Nearby is
+/// off there is no secret at all, so nothing is advertised.
+pub fn end_all(svc: &LinkService) -> Option<Vec<Link>> {
     let all = svc.links.ephemeral();
     for link in &all {
         svc.links.end(&link.id);
     }
+    let held = !all.is_empty() || svc.nearby.holds_anything();
     svc.nearby.offered.lock().unwrap().clear();
     svc.nearby.dialing.lock().unwrap().clear();
-    svc.nearby.heard.lock().unwrap().clear();
-    svc.nearby.renew(Instant::now());
-    all
+    *svc.nearby.heard.lock().unwrap() = Heard::default();
+    let on = svc.neighbors.get().is_some_and(|n| n.nearby_on());
+    if !on {
+        *svc.nearby.secrets.lock().unwrap() = None;
+    } else if held {
+        svc.nearby.renew(Instant::now());
+    }
+    held.then_some(all)
+}
+
+/// Forget what the `nearby` neighborhood held: it was carried on links that
+/// are gone. Run after an [`end_all`] that forgot something.
+pub async fn forget_content(svc: &LinkService) {
+    if let Some(n) = svc.neighbors.get() {
+        n.forget_content(id()).await;
+    }
 }
 
 /// One tick: end links whose peer left, dial peers newly in reach, and keep
@@ -653,8 +847,12 @@ pub async fn tick(
         return;
     };
     if !neighbors.nearby_on() {
-        for link in end_all(svc) {
-            tell_ended(link);
+        // Only the first tick after turning off finds anything.
+        if let Some(ended) = end_all(svc) {
+            for link in ended {
+                tell_ended(link);
+            }
+            forget_content(svc).await;
         }
         return;
     }
@@ -662,8 +860,13 @@ pub async fn tick(
     svc.nearby.secret(now);
     let direct = svc.nearby.direct_peers();
     if direct.is_empty() {
-        // Nobody to tell: they are out of reach.
-        if !end_all(svc).is_empty() {
+        // Only once there were links: secrets heard from phones not (yet)
+        // reached over fips are kept for when they are, and our own stays
+        // as it is, so a lone phone's advert never churns.
+        if !svc.links.ephemeral().is_empty() {
+            // Nobody to tell: they are out of reach.
+            end_all(svc);
+            forget_content(svc).await;
             tracing::info!("nobody in reach: nearby forgotten");
         }
         return;
@@ -997,5 +1200,241 @@ mod tests {
         n.hear([1, 2, 3, 4], now);
         assert_eq!(n.heard(now), vec![[1, 2, 3, 4]]);
         assert!(n.heard(now + HEARD_FOR + Duration::from_secs(1)).is_empty());
+    }
+
+    struct Yes;
+    #[async_trait::async_trait]
+    impl super::super::host::Asker for Yes {
+        async fn confirm(&self, _: super::super::host::Ask) -> bool {
+            true
+        }
+    }
+
+    /// A link service with neighborhoods, Nearby on, and nobody in reach.
+    fn service() -> LinkService {
+        let d = std::env::temp_dir().join(format!("myco-nearby-{}", super::super::id::token()));
+        std::fs::create_dir_all(&d).unwrap();
+        let links = Arc::new(super::super::link::Links::open(&d));
+        let neighbors = Arc::new(super::super::Neighbors::open(
+            &d,
+            super::super::host::Seams {
+                peers: Arc::new(super::super::LinkPeers(Some(links.clone()))),
+                asker: Arc::new(Yes),
+                scoped_stores: Arc::new(crate::neighbor::data::MemStores::default()),
+                scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+                links: Some(links.clone()),
+            },
+        ));
+        neighbors.set_nearby(true);
+        let svc = LinkService {
+            links,
+            neighbors: Arc::default(),
+            bases: vec!["http://127.0.0.1:1".into()],
+            nearby: Arc::new(Nearby::with(Arc::new(NoDirectPeers))),
+        };
+        let _ = svc.neighbors.set(neighbors);
+        svc
+    }
+
+    async fn tick_alone(svc: &LinkService) {
+        tick(svc, "npub1a", &|_: &str| String::new(), Instant::now()).await;
+    }
+
+    #[tokio::test]
+    async fn ticks_alone_never_change_the_secret_and_off_advertises_none() {
+        let svc = service();
+        let s = svc.nearby.secret(Instant::now());
+        for _ in 0..5 {
+            tick_alone(&svc).await;
+        }
+        assert_eq!(
+            svc.nearby.current(),
+            Some(s),
+            "a lone phone keeps its advert"
+        );
+        // A phone heard over BLE but not reached over fips yet: its secret
+        // is kept for when it is, and ours stays.
+        svc.nearby.hear([9, 9, 9, 9], Instant::now());
+        tick_alone(&svc).await;
+        assert_eq!(svc.nearby.current(), Some(s));
+        assert_eq!(svc.nearby.heard(Instant::now()), [[9, 9, 9, 9]]);
+        assert!(end_all(&svc).is_some(), "it held a heard secret");
+        let renewed = svc.nearby.current().unwrap();
+        assert_ne!(renewed, s, "forgetting renews once");
+        assert!(end_all(&svc).is_none(), "and then has nothing to forget");
+        assert_eq!(svc.nearby.current(), Some(renewed));
+
+        svc.neighbors.get().unwrap().set_nearby(false);
+        for _ in 0..3 {
+            tick_alone(&svc).await;
+            assert_eq!(svc.nearby.current(), None, "off: nothing to advertise");
+        }
+    }
+
+    #[tokio::test]
+    async fn turning_nearby_off_ends_its_links_and_drops_the_secret() {
+        let svc = service();
+        svc.nearby.secret(Instant::now());
+        ephemeral(&svc.links, "npub1b");
+        svc.neighbors.get().unwrap().set_nearby(false);
+        let ended = end_all(&svc).expect("a link to end");
+        assert_eq!(ended.len(), 1);
+        assert!(svc.links.ephemeral().is_empty());
+        assert_eq!(svc.nearby.current(), None);
+    }
+
+    #[test]
+    fn a_beacon_cycling_made_up_secrets_cannot_push_a_real_one_out() {
+        let n = Nearby::default();
+        let t0 = Instant::now();
+        let real = [7, 7, 7, 7];
+        // A real phone: heard, and heard again 20 s later.
+        n.hear(real, t0);
+        let t1 = t0 + Duration::from_secs(20);
+        n.hear(real, t1);
+        // Then a flood: 100 made-up secrets a second for 30 s.
+        for i in 0..3000u32 {
+            let t = t1 + Duration::from_millis(10 * u64::from(i));
+            n.hear((i + 1_000_000).to_be_bytes(), t);
+        }
+        let t2 = t1 + Duration::from_secs(30);
+        n.hear(real, t2);
+        let heard = n.heard(t2);
+        assert_eq!(heard[0], real, "the one heard again and again comes first");
+        assert!(heard.len() <= MAX_PROOFS);
+        assert!(n.heard.lock().unwrap().secrets.len() <= MAX_HEARD);
+    }
+
+    #[test]
+    fn only_so_many_new_secrets_are_taken_in_per_window() {
+        let n = Nearby::default();
+        let now = Instant::now();
+        for i in 0..20u32 {
+            n.hear(i.to_be_bytes(), now);
+        }
+        assert_eq!(n.heard(now).len(), NEW_PER_WINDOW);
+        let later = now + NEW_WINDOW;
+        n.hear(99u32.to_be_bytes(), later);
+        assert_eq!(n.heard(later).len(), NEW_PER_WINDOW + 1);
+    }
+
+    #[test]
+    fn a_secret_heard_for_longer_than_it_can_live_is_dropped() {
+        let n = Nearby::default();
+        let t0 = Instant::now();
+        let mut t = t0;
+        while t <= t0 + SECRET_FOR + HEARD_FOR {
+            n.hear([1, 1, 1, 1], t);
+            t += Duration::from_secs(20);
+        }
+        assert!(
+            n.heard(t).is_empty(),
+            "no real phone keeps a secret that long"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_used_a_dial_waits_for_a_new_secret_and_a_later_refusal_is_not_the_end() {
+        let n = Arc::new(Nearby::default());
+        let (a, b, c) = ([1, 0, 0, 0], [2, 0, 0, 0], [3, 0, 0, 0]);
+        n.hear(a, Instant::now());
+        let link = ephemeral(&links(), "npub1b");
+        let rounds = Arc::new(Mutex::new(Vec::<Vec<Secret>>::new()));
+        let later = |n: Arc<Nearby>, s: Secret| {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                n.hear(s, Instant::now());
+            });
+        };
+        let got = dial_rounds(&n, Duration::from_secs(5), |heard| {
+            let (n, rounds, link) = (n.clone(), rounds.clone(), link.clone());
+            async move {
+                let round = {
+                    let mut r = rounds.lock().unwrap();
+                    r.push(heard);
+                    r.len()
+                };
+                Ok(match round {
+                    1 => {
+                        later(n, b);
+                        Attempt::Used(0)
+                    }
+                    2 => {
+                        later(n, c);
+                        Attempt::Refused
+                    }
+                    _ => Attempt::Linked(Box::new(link)),
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(got.id, link.id);
+        assert_eq!(*rounds.lock().unwrap(), [vec![a], vec![b], vec![c]]);
+        assert!(
+            !n.heard(Instant::now()).contains(&a),
+            "the used one is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_refusal_ends_the_dial_and_a_used_secret_waits_only_so_long() {
+        let n = Nearby::default();
+        n.hear([1, 0, 0, 0], Instant::now());
+        let mut calls = 0;
+        let refused = dial_rounds(&n, Duration::from_secs(5), |_| {
+            calls += 1;
+            async { Ok(Attempt::Refused) }
+        })
+        .await;
+        assert!(refused.is_err());
+        assert_eq!(calls, 1);
+
+        let mut calls = 0;
+        let used = dial_rounds(&n, Duration::from_millis(100), |_| {
+            calls += 1;
+            async { Ok(Attempt::Used(0)) }
+        })
+        .await;
+        assert!(used.is_err(), "no new secret came");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn setups_past_the_limit_are_busy_and_keep_the_secret() {
+        let n = Nearby::default();
+        let now = Instant::now();
+        let pk = "aa".repeat(32);
+        for _ in 0..MAX_SETUPS {
+            let s = n.secret(now);
+            assert_eq!(n.take(&[proof(&s, &pk)], &pk, now), Ok(()));
+        }
+        let s = n.secret(now);
+        assert_eq!(n.take(&[proof(&s, &pk)], &pk, now), Err(Refusal::Busy));
+        assert_eq!(n.secret(now), s, "busy uses nothing up");
+        let later = now + SETUP_WINDOW;
+        assert_eq!(n.take(&[proof(&s, &pk)], &pk, later), Ok(()));
+    }
+
+    #[test]
+    fn ephemeral_links_are_capped() {
+        let l = links();
+        for i in 0..MAX_EPHEMERAL - 1 {
+            ephemeral(&l, &format!("npub1d{i:02}"));
+        }
+        let p = plan(
+            "npub1a",
+            &[peer("npub1x1"), peer("npub1x2"), peer("npub1x3")],
+            &l,
+            Instant::now(),
+        );
+        assert_eq!(p.dial.len(), 1, "room for one more");
+        assert!(room_for(&l, "npub1x1"));
+        ephemeral(&l, "npub1x1");
+        assert!(!room_for(&l, "npub1x2"), "full");
+        assert!(
+            room_for(&l, "npub1d00"),
+            "a new link with a linked device replaces its old one"
+        );
     }
 }

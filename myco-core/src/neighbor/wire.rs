@@ -28,18 +28,33 @@ use super::link::{http_auth, Link};
 
 /// How long one send or pull may take end to end.
 pub const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
+/// The largest message or frame read from a peer's relay.
+pub const MAX_MESSAGE: usize = 64 * 1024;
+/// The most events one pull takes from a peer.
+pub const MAX_PULL_EVENTS: usize = 2000;
 
 /// The relay URLs a link's peer offers, most preferred first: FIPS first,
-/// as it needs no internet.
+/// as it needs no internet. Only ones this device may dial: a mesh peer or
+/// a public host, never its own network (see [`crate::http::may_dial_peer`]).
 pub fn relay_urls(link: &Link) -> Vec<String> {
     let mut urls: Vec<String> = link
         .services()
         .into_iter()
         .filter(|s| s.kind == "relay")
         .map(|s| s.url)
+        .filter(|u| dialable(u))
         .collect();
     urls.sort_by_key(|u| !u.contains(".fips"));
     urls
+}
+
+/// Whether a peer-supplied relay URL may be dialled, judged in http form.
+fn dialable(url: &str) -> bool {
+    reqwest::Url::parse(&signed_form(url))
+        .map_err(|e| e.to_string())
+        .and_then(|u| crate::http::may_dial_peer(&u))
+        .inspect_err(|why| tracing::debug!(url, why, "peer relay URL not dialled"))
+        .is_ok()
 }
 
 /// The URL for neighborhood `n` with `ttl` hops on a relay URL.
@@ -62,8 +77,11 @@ pub fn signed_form(url: &str) -> String {
 type Socket = tokio_tungstenite::WebSocketStream<crate::mesh_net::MeshStream>;
 
 /// Open a link-signed WebSocket to `url`.
-async fn open(link: &Link, url: &str) -> anyhow::Result<Socket> {
-    let auth = http_auth(&link.keys(), "GET", &signed_form(url));
+pub(super) async fn open(link: &Link, url: &str) -> anyhow::Result<Socket> {
+    if !dialable(url) {
+        anyhow::bail!("{url}: not dialled");
+    }
+    let auth = http_auth(&link.keys(), "GET", &signed_form(url), &[]);
     let target = if url.contains(".fips") {
         crate::dns_intercept::mesh_literal_url(url)
             .await
@@ -81,16 +99,40 @@ async fn open(link: &Link, url: &str) -> anyhow::Result<Socket> {
         .ok_or_else(|| anyhow::anyhow!("no port in {url}"))?;
     let addr = match host.parse::<std::net::IpAddr>() {
         Ok(ip) => std::net::SocketAddr::new(ip, port),
-        Err(_) => tokio::net::lookup_host((host.as_str(), port))
-            .await?
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("{host} does not resolve"))?,
+        Err(_) => {
+            // Judged on what the name resolves to, the address then dialled:
+            // a name that rebinds to this device's network is refused.
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+                .await?
+                .collect();
+            if addrs.iter().any(|a| !crate::http::may_connect_peer(a.ip())) {
+                anyhow::bail!("{host}: resolves outside the mesh and the public internet");
+            }
+            addrs
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("{host} does not resolve"))?
+        }
     };
+    if !crate::http::may_connect_peer(addr.ip()) {
+        anyhow::bail!("{url}: not dialled");
+    }
     let stream = crate::mesh_net::dial(addr).await?;
     let mut request = target.into_client_request()?;
     request.headers_mut().insert("authorization", auth.parse()?);
-    let (ws, _) = tokio_tungstenite::client_async(request, stream).await?;
+    let (ws, _) =
+        tokio_tungstenite::client_async_with_config(request, stream, Some(client_config())).await?;
     Ok(ws)
+}
+
+/// What a peer's relay may send us: messages and frames of at most
+/// [`MAX_MESSAGE`].
+fn client_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(MAX_MESSAGE),
+        max_frame_size: Some(MAX_MESSAGE),
+        ..Default::default()
+    }
 }
 
 /// Send one event into `n` over `link`, with `ttl` hops left for the peer to
@@ -142,7 +184,8 @@ pub async fn pull(
 }
 
 /// As [`pull`], streaming: each verified event goes to `tx` the moment it
-/// arrives, not at `EOSE`. Returns how many were sent.
+/// arrives, not at `EOSE`. Returns how many were sent; at most
+/// [`MAX_PULL_EVENTS`] are read.
 pub async fn pull_into(
     link: &Link,
     n: NeighborhoodId,
@@ -162,6 +205,7 @@ pub async fn pull_into(
             ws.send(Message::text(serde_json::Value::Array(req).to_string()))
                 .await?;
             let mut sent = 0usize;
+            let mut read = 0usize;
             while let Some(frame) = ws.next().await {
                 let Message::Text(text) = frame? else {
                     continue;
@@ -169,6 +213,11 @@ pub async fn pull_into(
                 let v: serde_json::Value = serde_json::from_str(&text)?;
                 match v[0].as_str() {
                     Some("EVENT") => {
+                        read += 1;
+                        if read > MAX_PULL_EVENTS {
+                            tracing::debug!(url, "pull cut at {MAX_PULL_EVENTS} events");
+                            break;
+                        }
                         if let Ok(e) = serde_json::from_value::<Event>(v[2].clone()) {
                             if e.verify().is_ok() && tx.send(e).is_ok() {
                                 sent += 1;
@@ -275,5 +324,73 @@ mod tests {
         );
         assert_eq!(signed_form(&u), u.replacen("ws://", "http://", 1));
         assert_eq!(signed_form("wss://r.example/x"), "https://r.example/x");
+    }
+
+    #[test]
+    fn only_mesh_and_public_relay_urls_are_dialled() {
+        use super::super::link::{sign_offer, Links, OfferContent, Service};
+        let d = std::env::temp_dir().join(format!("myco-wire-{}", super::super::id::token()));
+        std::fs::create_dir_all(&d).unwrap();
+        let links = Links::open(&d);
+        let relay = |url: &str| Service {
+            kind: "relay".into(),
+            url: url.into(),
+            read: true,
+            write: true,
+            own: false,
+        };
+        let npub = {
+            use nostr::nips::nip19::ToBech32;
+            nostr::Keys::generate().public_key().to_bech32().unwrap()
+        };
+        let fips = format!("ws://{npub}.fips:4873/nh/x/relay");
+        let offered = [
+            "ws://8.8.8.8:4873/nh/x/relay",
+            "ws://[fd12::1]:4873/nh/x/relay",
+            "wss://relay.example.com/nh/x/relay",
+            fips.as_str(),
+            // Refused: this device's networks and the reserved ranges.
+            "ws://10.0.0.1:4873/",
+            "ws://172.16.3.4:4873/",
+            "ws://192.168.1.1:4873/",
+            "ws://100.64.0.1:4873/",
+            "ws://169.254.1.1:4873/",
+            "ws://0.0.0.0:4873/",
+            "ws://255.255.255.255:4873/",
+            "ws://224.0.0.1:4873/",
+            "ws://192.0.2.1:4873/",
+            "ws://[fe80::1]:4873/",
+            "ws://[fc00::1]:4873/",
+            "ws://[::]:4873/",
+            "ws://[ff02::1]:4873/",
+            "ws://[2001:db8::1]:4873/",
+            "ws://[::ffff:10.0.0.1]:4873/",
+            "ws://[::ffff:192.168.0.1]:4873/",
+            "ws://router.lan:4873/",
+            "ws://intranet/",
+            "ws://user:pw@relay.example.com/",
+            "file:///etc/passwd",
+        ];
+        let content = OfferContent {
+            services: offered.iter().map(|u| relay(u)).collect(),
+        };
+        let peer = nostr::Keys::generate();
+        let link = links
+            .add_ephemeral(
+                &nostr::Keys::generate(),
+                sign_offer(&peer, &content, None),
+                Default::default(),
+                "device",
+            )
+            .unwrap();
+        assert_eq!(
+            relay_urls(&link),
+            [
+                fips.as_str(),
+                "ws://8.8.8.8:4873/nh/x/relay",
+                "ws://[fd12::1]:4873/nh/x/relay",
+                "wss://relay.example.com/nh/x/relay",
+            ]
+        );
     }
 }

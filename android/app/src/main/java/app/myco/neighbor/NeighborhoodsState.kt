@@ -1,6 +1,5 @@
 package app.myco.neighbor
 
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -139,45 +138,90 @@ data class NeighborhoodsState(
 /**
  * A neighborhood invitation, read just far enough to show what it offers and
  * who from. The core checks everything again. Written as the napplet link
- * `https://napplet.link/neighborhood/join?invite=<base64url(json)>`, the
- * `neighborhood/join` convention the shell handles itself; the
- * `napplet:neighborhood/join?invite=…` spelling and the older
- * `myco://link/<base64url(json)>` are read too.
+ * `https://napplet.link/neighborhood/join#invite=<base64url(json)>`, the
+ * `neighborhood/join` convention the shell handles itself. The payload rides
+ * in the fragment so the one-time secret never reaches napplet.link's web
+ * server. The older `?invite=` query, the `napplet:neighborhood/join…`
+ * spelling and `myco://link/<base64url(json)>` are read too.
  */
 data class InvitePreview(
     val raw: String,
+    /** What the inviter calls themselves: their claim, not checked. */
     val from: String,
     val offered: List<NeighborhoodsState.Pending>,
-    /** Unix seconds after which it no longer works. */
+    /** Unix seconds after which it no longer works; 0 when it names none. */
     val exp: Long = 0,
+    /** The inviter's link public key, hex. */
+    val pk: String = "",
+    /** How it reached this phone. */
+    val source: Source = Source.Link,
 ) {
+    /** How an invitation arrived, shown on the join sheet. */
+    enum class Source { Link, Qr, Tap }
+
+    /**
+     * A short code for the inviter's link key, `ab12 · cd34`. The invite
+     * sheet shows the same one, so the two people can compare. Empty when
+     * the invitation carries no key.
+     */
+    val fingerprint: String
+        get() = fingerprintOf(pk)
+
+    /** Whether it has run out at [nowSecs]. */
+    fun expired(nowSecs: Long): Boolean = exp in 1..nowSecs
+
     companion object {
         const val PREFIX = "myco://link/"
-        private val LINK_PREFIXES = listOf("https://napplet.link/neighborhood/join?", "napplet:neighborhood/join?")
+        private val LINK_PREFIXES = listOf("https://napplet.link/neighborhood/join", "napplet:neighborhood/join")
 
-        /** The base64url payload of any invitation spelling, or null. */
-        fun payload(text: String): String? {
-            val t = text.trim()
-            if (t.startsWith(PREFIX)) return t.removePrefix(PREFIX)
-            val prefix = LINK_PREFIXES.firstOrNull { t.startsWith(it, ignoreCase = true) } ?: return null
-            return t.substring(prefix.length).substringBefore('#').split('&')
-                .firstOrNull { it.startsWith("invite=") }?.removePrefix("invite=")
+        /** `ab12 · cd34` from a hex key, or empty. */
+        fun fingerprintOf(pk: String): String {
+            val k = pk.trim().lowercase()
+            if (k.length < 8 || k.any { it !in "0123456789abcdef" }) return ""
+            return "${k.take(4)} · ${k.takeLast(4)}"
         }
 
-        fun read(text: String): InvitePreview? = runCatching {
+        /**
+         * The base64url payload of any invitation spelling, or null: the
+         * `invite` parameter of the fragment or the query (key in any case,
+         * value percent-decoded), or the rest of a `myco://link/…`.
+         */
+        fun payload(text: String): String? {
+            val t = text.trim()
+            if (t.startsWith(PREFIX)) return t.removePrefix(PREFIX).ifEmpty { null }
+            val prefix = LINK_PREFIXES.firstOrNull { t.startsWith(it, ignoreCase = true) } ?: return null
+            val rest = t.substring(prefix.length).removePrefix("/")
+            if (rest.isNotEmpty() && rest[0] != '?' && rest[0] != '#') return null
+            val hash = rest.indexOf('#')
+            val query = if (rest.startsWith("?")) rest.substring(1, if (hash < 0) rest.length else hash) else ""
+            val fragment = if (hash < 0) "" else rest.substring(hash + 1)
+            return inviteParam(fragment) ?: inviteParam(query)
+        }
+
+        private fun inviteParam(params: String): String? = params.split('&').firstNotNullOfOrNull { pair ->
+            val key = pair.substringBefore('=')
+            if (!pair.contains('=') || !key.equals("invite", ignoreCase = true)) return@firstNotNullOfOrNull null
+            runCatching { java.net.URLDecoder.decode(pair.substringAfter('='), "UTF-8") }
+                .getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        }
+
+        fun read(text: String, source: Source = Source.Link): InvitePreview? = runCatching {
             val t = text.trim()
             val payload = payload(t) ?: return null
-            val bytes = Base64.decode(payload, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-            val o = JSONObject(String(bytes))
+            // java.util's decoder takes unpadded input, and runs in JVM tests.
+            val bytes = java.util.Base64.getUrlDecoder().decode(payload.trimEnd('='))
+            val o = JSONObject(String(bytes, Charsets.UTF_8))
             if (o.optInt("v") != 1) return null
             val n = o.optJSONArray("n") ?: JSONArray()
             InvitePreview(
                 raw = t,
                 from = o.optString("from"),
                 exp = o.optLong("exp"),
+                pk = o.optString("pk"),
                 offered = (0 until n.length()).mapNotNull { n.optJSONObject(it) }.map {
                     NeighborhoodsState.Pending(it.optString("id"), it.optString("name"))
                 },
+                source = source,
             )
         }.getOrNull()
     }
@@ -185,8 +229,10 @@ data class InvitePreview(
 
 /**
  * An invitation that arrived by scan, tap or link, waiting for the user to
- * confirm. Set from `MainActivity.handleScannedText`; the confirm sheet is
- * drawn at the app root, so it shows over whichever tab is open.
+ * confirm, with [InvitePreview.source] saying which. Set from
+ * `MainActivity.handleScannedText` / `handleDeepLink` and the scan sheet's
+ * paste; the confirm sheet is drawn at the app root, so it shows over
+ * whichever tab is open.
  */
 object IncomingInvite {
     val pending = androidx.compose.runtime.mutableStateOf<InvitePreview?>(null)

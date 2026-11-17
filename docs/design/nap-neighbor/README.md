@@ -4,9 +4,11 @@ Neighborhoods are how Myco devices share with each other. They replace the
 Circle and pairing.
 
 Napplets reach them through **NAP-NEIGHBOR**, proposed in
-[napplet/naps#146](https://github.com/napplet/naps/pull/146). The wire
-protocol underneath (links, offers, scoped traffic) is Myco's draft of a
-transport-independent Nostr protocol. It is not a NIP yet.
+[napplet/naps#146](https://github.com/napplet/naps/pull/146). That spec is
+authoritative for what napplets see. It leaves the peering protocol out of
+scope, so everything underneath is **Myco's**: invitations, links, the
+setup proof, offers (kind 37516), the `/nh/…` routes, name-derived ids and
+the nearby handshake. It is not a NIP.
 
 ## Pages
 
@@ -15,7 +17,7 @@ transport-independent Nostr protocol. It is not a NIP yet.
 | [links.md](links.md) | Invitations, setup proof, link keys, offers, NIP-98, the link service on `:4873` | `myco-core/src/neighbor/{link,service}.rs` |
 | [data-plane.md](data-plane.md) | Scoped store and blobs, the scoped relay, publish and subscribe, hops, dedup | `myco-core/src/neighbor/{data,wire}.rs` |
 | [extensions.md](extensions.md) | What a device shares proactively: napplet updates, nsite updates, the Myco release; how a missing app is fetched | `myco-core/src/neighbor/{extensions,updates}.rs` |
-| [policy.md](policy.md) | Per-neighborhood settings: reach presets, blob push hops, extensions | `myco-core/src/neighbor/store.rs` |
+| [policy.md](policy.md) | Per-neighborhood settings and what a peer is given: reach presets, offers, quotas, blob push hops ([diagram](policy.svg)) | `myco-core/src/neighbor/{store,data}.rs` |
 | [napplet-api.md](napplet-api.md) | What NAP-NEIGHBOR exposes, `neighborhood://` addresses, how other NAPs carry them | `myco-napplet-runtime/src/nap/neighbor/`, `myco-core/src/neighbor/host.rs` |
 | [proximity.md](proximity.md) | The `nearby` neighborhood: who counts as in reach, ephemeral links, `POST /nh/nearby` | `myco-core/src/neighbor/nearby.rs` |
 | [ui.md](ui.md) | Neighbors tab, neighborhood page, invite and join | `myco-core/src/neighbor/view.rs`, `android/…/app/myco/neighbor/` |
@@ -27,16 +29,17 @@ transport-independent Nostr protocol. It is not a NIP yet.
 | **Neighborhood** | A propagation channel ("Household", "Sports club"). No members, no roster, no admin. |
 | **Link** | A pairwise relationship between two devices, set up once from an invitation, used over any network. |
 | **Link key** | A key generated for one link. Not the FIPS device key, not the user's social key. |
-| **Invitation** | A one-time `https://napplet.link/neighborhood/join?invite=…` payload: QR, share link or NFC tap. |
-| **Offer** | A signed event (kind 37516) listing the endpoints one side serves on a link. |
+| **Invitation** | A one-time `https://napplet.link/neighborhood/join#invite=…` payload: QR, share link or NFC tap. |
+| **Offer** | A signed event (kind 37516, Myco's) listing the endpoints one side serves on a link. |
 | **Extension** | Something a device shares proactively in a neighborhood: app, site and Myco updates ([extensions.md](extensions.md)). Each has its own Get and Share switch. |
 
 ## What a neighborhood is
 
 - **An id, not a group.** 32 bytes (`neighbor/id.rs`). Random for a
   neighborhood someone starts, so two "Book club"s never merge. Derived from
-  a name (`sha256("nostr-neighborhood:" || lowercase name)`) for
-  auto-accepted ones, so everyone typing the same name meets.
+  a name (`sha256("nostr-neighborhood:" || lowercase name)`, Myco's
+  derivation) for auto-accepted ones, so everyone on Myco typing the same
+  name meets.
 - **Carried on links.** Each link carries the neighborhoods both sides agreed
   to. An event arriving on one link is passed on to the device's other links
   in the same neighborhood, within local limits.
@@ -66,17 +69,17 @@ See [../core/identity.md](../core/identity.md) for the device key.
 | File | Holds |
 | --- | --- |
 | `neighborhoods.json` | Each neighborhood: id, local name, policy, offer, mutes, and each napplet's tokens |
-| `links.json` | Links and open invitations, with link secret keys |
-| `neighborhood-relay/` | Neighborhood events |
+| `links.json` | Links and open invitations, with link secret keys. Never ephemeral links |
+| `neighborhood-relay/<id>/` | Neighborhood events, one store per neighborhood |
 | `neighborhood-blobs/` | Neighborhood blobs |
-| `neighborhood-scopes.json` | Event id or `blob:<sha256>` → the neighborhoods it belongs to |
+| `neighborhood-scopes.json` | Event id or `blob:<sha256>` → the neighborhoods it belongs to, with whether it was published here and its hops left (format 2) |
 
 ## Proximity (optional extension)
 
 NAP-NEIGHBOR makes proximity optional. Myco implements it: an
 auto-accepted `nearby` neighborhood, on by default, carried on ephemeral
-links to devices directly in reach (BLE, Wi-Fi Aware, USB, the same local
-network). See [proximity.md](proximity.md).
+links to devices directly in reach whose Bluetooth secret this phone
+heard. See [proximity.md](proximity.md).
 
 ## Removed with the Circle
 
@@ -89,8 +92,7 @@ network). See [proximity.md](proximity.md).
   replaces them.
 - Myco's relay and Blossom open to linked devices, manifest forwarding
   over them, and sending files between phones. Apps and updates travel as
-  extensions ([extensions.md](extensions.md)). Sending files is to return
-  as a napplet on NAP-FS and NAP-NEIGHBOR.
+  extensions ([extensions.md](extensions.md)).
 
 ## See also
 

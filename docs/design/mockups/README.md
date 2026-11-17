@@ -1,7 +1,9 @@
 # UI mockups — historical
 
 Seven SVG mockups drawn before the consumer UI existed (the P3.5 pass). They
-are kept for the record; the shipped screens moved on:
+are kept for the record; the shipped screens moved on. **01–06 are
+obsolete**: drawn for the Circle-era app, before neighborhoods.
+07 is the only one still close to a shipped screen.
 
 - The shell is a bottom-nav with **Apps · Neighbors · Settings · Dev**.
   Mockup 03 shows the Circle, which neighborhoods replaced; it predates them
@@ -13,7 +15,7 @@ are kept for the record; the shipped screens moved on:
 - Settings (04) gained Mesh lanes (Bluetooth, Wi-Fi Aware, Network), Storage
   with custom relay/Blossom, and Identity. Reach is now set per neighborhood,
   on the Neighbors tab.
-- The QR flow (06) now carries neighborhood invitations (`https://napplet.link/neighborhood/join?invite=…`),
+- The QR flow (06) now carries neighborhood invitations (`https://napplet.link/neighborhood/join#invite=…`),
   alongside NFC and share links.
 - "Getting an app" (07) has a napplet variant: the install review sheet.
 

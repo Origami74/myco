@@ -133,8 +133,10 @@ L2CAP CoC connect, the peers exchange a pre-handshake pubkey frame
 [../../reference/fips/src/transport/ble/mod.rs](../../../reference/fips/src/transport/ble/mod.rs)).
 Identity is the **pubkey**, never the MAC address — so Android MAC
 randomization is harmless, and a spoofed MAC gains nothing because it cannot
-complete the Noise handshake. BLE adverts are UUID-only and carry no identity
-material, so passive scanners learn only that a FIPS device is nearby, not who.
+complete the Noise handshake. BLE adverts carry the service UUID, the L2CAP
+PSM and Nearby's 4-byte use-once secret (random, tied to no key), and no
+identity material, so passive scanners learn only that a FIPS device is
+nearby, not who.
 
 The crucial inherited principle, carried over verbatim from FIPS:
 
@@ -156,7 +158,8 @@ What this means:
 - **Being a FIPS peer confers nothing.** A phone can hold a transport link to
   yours for an hour and never read a byte of content. It reaches exactly one
   service: the link service on `:4873`, and only to set up a link it holds an
-  invitation for.
+  invitation for, or, directly in reach with Nearby on, a nearby link after
+  proving it heard this phone's Bluetooth secret.
 - **A link confers the neighborhoods it carries.** A linked peer may read and
   write the neighborhoods both sides agreed to on that link, through the
   scoped relay. Nothing else.
@@ -189,7 +192,7 @@ One port is exposed:
 
 | Port | Service | Who may reach it |
 | --- | --- | --- |
-| `4873` | Link service, `/nh/{pk}/…` | `setup`: anyone holding a valid invitation. Everything else: a linked peer, by NIP-98 with its link key |
+| `4873` | Link service, `/nh/…` | `/nh/nearby`: any direct peer that proves it heard this phone's Bluetooth secret. `setup`: anyone holding a valid invitation. Everything else: a linked peer, by NIP-98 with its link key |
 
 The relay on `4870` listens on loopback only, for the in-app WebView. The
 Blossom store has no port.
@@ -220,10 +223,27 @@ link key for that link.
   (15 minutes by default).
 - **Everything after setup** carries a NIP-98 header signed by the caller's
   link key, fresh within 60 s, for that exact URL. The signer must be the
-  link held on that `{pk}`.
-- **Every refusal says only `refused`.** A stranger learns nothing about which
-  check failed.
+  link held on that `{pk}`. Each header has a random `nonce`, a `POST` a
+  `payload` hash of its body; an accepted header is remembered for 120 s and
+  refused if replayed.
+- **Refusals say only `refused`.** A stranger learns nothing about which
+  check failed. The exceptions say only how to retry: `429` (slow down, or
+  too many sockets), `503` (busy), and Nearby's `409 used`.
 - **Bodies are capped at 8 KiB.** A setup or offer is a few signed events.
+- **Pacing.** Per source address 2 requests/s, bursts of 20 (`429`); all
+  sources together 50/s, bursts of 200; 64 requests in flight (`503`). The
+  source table is bounded, least recently used out first.
+- **Scoped relay sockets.** 4 per link, 64 KiB messages and frames, 20
+  frames/s with bursts of 100. A socket closes when its link ends or stops
+  carrying its neighborhood, and after 5 minutes idle with no subscription
+  open.
+- **Outbound, too.** URLs a peer hands over (in an offer or invitation) are
+  dialled only if they are `.fips`, a mesh address or the public internet,
+  never loopback, LAN, link-local or another ULA, checked again after DNS.
+  Answers are read up to 64 KiB, pulls up to 2000 events.
+- **Bounded state.** Pending neighborhood additions: 8 per link. Names a
+  peer supplies: 64 characters. A `links.json` that can't be read is set
+  aside as `links.json.bad`, never overwritten.
 
 ### 3.4 What a linked peer can still learn
 
@@ -238,8 +258,11 @@ link key for that link.
   outside it.
 - **Link keys stop correlation by key.** Each link has its own key, so two of
   your peers cannot tie their links to you by comparing keys. Over FIPS the
-  transport still shows the device key, so this holds only off the mesh
-  today.
+  transport still shows the device key, so this holds only off the mesh.
+- **Nearby shares with strangers.** Phones in reach get the update
+  manifests this phone shares in `nearby`, so they learn which apps it has
+  installed. That is what AppStore's Around you shows. Turning **Share**
+  off on `nearby`, or Nearby off, stops it ([proximity.md](../nap-neighbor/proximity.md#privacy-cost)).
 
 The coarse knobs are ending a link, dropping a neighborhood from a link,
 turning extensions off, and the FIPS peer ACL ("block this peer", above).
@@ -249,11 +272,19 @@ turning extensions off, and the FIPS peer ACL ("block this peer", above).
 Setting up a link is the one moment a human asserts "this is who I think it
 is."
 
-- **The invitation is a bearer secret.** `https://napplet.link/neighborhood/join?invite=…` carries the inviter's
+- **The invitation is a bearer secret.** `https://napplet.link/neighborhood/join#invite=…` carries the inviter's
   link service URLs, link public key, a one-time 32-byte secret, the
   neighborhoods offered, an expiry and the inviter's name. Whoever holds it
   first can join. Hand it over in person (QR, NFC tap) or over a channel you
   trust.
+- **The web host never sees it.** The payload rides in the URL fragment,
+  which a browser never sends, so napplet.link's server learns nothing when
+  the link opens there.
+- **The join sheet helps check.** It says where the invitation came from
+  (link, QR code or phone tap) and shows a short code of the inviter's link
+  key, which the inviter's sheet shows too. Anyone can make a link that
+  names anybody; comparing the code catches that. Expired invitations
+  can't be joined.
 - **The proof binds both keys and the URL.** A party that relays the
   invitation cannot reuse the joiner's answer at another endpoint or with
   another key.
@@ -328,8 +359,13 @@ security shape is:
   manifest whose files do not hash to it never gets a session.
 - **What a grant lets a napplet do to you** is said plainly on the review
   screen because it is real: `relay`, `outbox` and `neighbor` let it publish
-  *as you*, to your relays or into the neighborhoods it was granted, with no
-  per-event prompt.
+  *as you*, to your relays or into any neighborhood (a napplet with
+  `neighbor` sees all of them), with no per-event prompt.
+- **`neighbor` changes settings for everyone.** `neighbor` is a default
+  grant. As NAP-NEIGHBOR requires, `create`, `leave` and a `setOffer` that
+  widens access ask the user. A napplet with `neighbor` can mute authors or
+  narrow an offer without asking, and that applies to every napplet, since neighborhoods are the
+  device's, not the napplet's.
   `resource` lets it fetch content by hash; a fetched blob is kept here, but
   not served to other phones (the runtime design, §7.11).
 - **Napplet-supplied addresses are validated.** A relay URL a napplet names
@@ -348,9 +384,10 @@ security shape is:
 | **Identity / link spoofing** | Pretends to be a linked peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
 | **Stolen or relayed invitation** | Joins a link meant for someone else | The secret is single use and expires in 15 minutes; the setup proof binds both link keys and the URL, so a relayed answer is useless elsewhere (§4). A stolen, unused invitation still works: it is a bearer secret, so hand it over in person. Out-of-band verification is an open proposal. |
-| **DoS on the link service** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-address pacing (2 requests/s, bursts of 20, then 429) and an 8 KiB body cap; setup costs one HMAC check, and every other route a Schnorr check before anything is stored (§3.3). |
+| **DoS on the link service** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-address pacing (2 requests/s, bursts of 20, then 429), a global pace (50/s, bursts of 200), 64 in flight, an 8 KiB body cap, 4 relay sockets per link; Nearby caps 32 ephemeral links and 12 setups a minute. Setup costs one HMAC check, and every other route a Schnorr check before anything is stored (§3.3). |
+| **Flooding a neighborhood** | Fills a neighborhood's store to push out real posts | Each neighborhood keeps at most 10 000 events and 256 MiB of blobs here, oldest out first; events a peer returns must match the request; leaving deletes what only that neighborhood held ([policy.md](../nap-neighbor/policy.md#limits)). |
 | **Stranger writing to your event store** | Gets data into a store you may not own | Link setup never touches the event store. The relay is loopback only (§3.2); the scoped relay admits only a link carrying the neighborhood named. |
-| **Revoked peer keeps reading** | A peer whose link ended keeps streaming | Every link service request is NIP-98-signed by a link this device still holds, and a scoped relay connection lasts at most 20 s per exchange, so an ended link stops reading at once (§3.3). |
+| **Revoked peer keeps reading** | A peer whose link ended keeps streaming | Every link service request is NIP-98-signed by a link this device still holds. An open scoped relay socket closes when its link ends or stops carrying the neighborhood (§3.3). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static, no capability API; per-nsite origin isolation; WebView never resolves `.fips` (§5.1). |
 | **Malicious napplet** | Untrusted program asks for more than it should, or tries to go around the seam | Opaque-origin iframe; every capability mediated and checked per call against the user's grants; no key material in the iframe; refused calls are logged (§5.2). |
 | **A napplet publishing as you** | A granted `relay`/`outbox`/`neighbor` napplet posts without asking | By design and said in words at install; revocable per capability, effective on the next call; how far a neighborhood post travels is the neighborhood's reach, set by the user. |

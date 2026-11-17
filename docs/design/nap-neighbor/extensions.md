@@ -66,17 +66,18 @@ neighborhood event. Where this device gets `napplet-updates`, then:
   manifest stays in the neighborhood, so an app store reading it sees that
   someone around holds that napplet.
 
-**Exposing what is held.** Where this device sends `napplet-updates`, it
-also answers for every napplet it holds — manifest stored and `index.html`
-in storage, installed or not — without pushing anything:
+**Exposing what is installed.** Where this device sends `napplet-updates`,
+it also answers for every napplet **installed** here (in the Library, with
+its manifest stored and `index.html` in storage), without pushing
+anything:
 
 - a linked neighbor's backlog request for napplet manifests gets them;
 - its blob request gets their `index.html` and icon.
 
-Code: `HeldNapplets` in `updates.rs`. Only napplets: no nsites, and no
-other file in storage, is reachable this way. If
-the neighborhood can't supply them, the public servers are tried, unless
-the phone is mesh-only.
+Code: `HeldNapplets` in `updates.rs`. Only installed napplets, and only
+those two files: not a napplet merely cached here, no nsite, and no other
+file in storage. If the neighborhood can't supply them, the public servers
+are tried, unless the phone is mesh-only.
 
 ## nsite-updates
 
@@ -113,9 +114,10 @@ places, in order (`ExtensionSource` in `neighbor/updates.rs`):
 3. **The public internet** (relays and Blossom servers), unless the phone
    is offline-only.
 
-A neighborhood holds only what someone shared into it: a version a
-neighbor updated to and shared. An app a neighbor merely has installed is
-not in scope, so it is not found there.
+A neighborhood holds what someone shared into it: a version a neighbor
+updated to and shared. On top of that, a linked neighbor answers for the
+napplets it has installed, where it shares `napplet-updates` (above). An
+nsite a neighbor merely has in its Library is not found there.
 
 Nobody outside a shared neighborhood is contacted. A share link
 (`myco://share/…`) still opens the app, but its holder fields are not

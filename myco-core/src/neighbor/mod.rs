@@ -1,7 +1,7 @@
 //! Neighborhoods on this device: NAP-NEIGHBOR's host side.
 //!
 //! A neighborhood is a propagation channel ("home", "festival") carried over
-//! the user's own peer connections; see `.planning/neighbour/` for the design
+//! the user's own peer connections; see `docs/design/nap-neighbor/` for the design
 //! and napplet/naps#146 for the napplet contract. This folder holds
 //! everything Myco-specific about it; the wire lives in
 //! `myco_napplet_runtime::nap::neighbor`.

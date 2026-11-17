@@ -35,7 +35,7 @@ cited inline.
 | `0` | profile metadata | Replaceable | napplet identity | **Published** — the user key's guest profile, on first launch (local relay, then the public relays) |
 | `10002` | NIP-65 relay list | Replaceable | napplet routing | **Published and read** — the user's own (the configured relays) on first launch; other authors' lists drive NAP-OUTBOX plans, fetched and cached when missing |
 | `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | **Read** — an app author's list rides along with its manifest lookup, a `blossom:` URL's `as=` author's is fetched when missing; kept in the local relay, tried after a manifest's `server` tags and before the defaults. The user's own drives NAP-UPLOAD |
-| `37516` | neighborhood link offer (placeholder number) | Param-replaceable (`d` = `offer`) | neighborhoods (layer 2) | **Published and read** — signed by a link key, exchanged with one linked peer over the link service `:4873`, never stored in the relay |
+| `37516` | neighborhood link offer (Myco's, placeholder number) | Param-replaceable (`d` = `offer`) | neighborhoods (layer 2) | **Published and read** — signed by a link key, exchanged with one linked peer over the link service `:4873`, never stored in the relay |
 | `27235` | NIP-98 HTTP auth | Regular | neighborhoods (layer 2) | **Published and read** — signed by a link key on every link service request after setup; never stored |
 | `24242` | Blossom auth | Regular | blob store | **Published** — authorises uploads to a custom Blossom server |
 | `37195` | FIPS overlay advert | Param-replaceable (`d`) | FIPS discovery | Future public peering |
@@ -274,10 +274,12 @@ Layer 2 has its own small vocabulary, carried point-to-point, never passed on:
 
 | Kind | Name | Signed by | Carried how |
 | --- | --- | --- | --- |
-| `37516` | link offer — the endpoints one side serves on a link (`link`, `relay`, with read/write/own flags), optional `name` tag | the link key | in the `/setup` exchange, then `GET <npub>.fips:4873/nh/{pk}/offer` |
-| `27235` | NIP-98 auth for a link service request | the link key | `Authorization` header on `/nh/{pk}/…` |
+| `37516` | link offer — the endpoints one side serves on a link (`link`, `relay`, with read/write/own flags), `name` tag in setup only | the link key | in the `/setup` or `/nh/nearby` exchange, then `GET <npub>.fips:4873/nh/{pk}/offer` |
+| `27235` | NIP-98 auth for a link service request, with a `nonce` tag (and a `payload` tag on `POST`) | the link key | `Authorization` header on `/nh/…` |
 
-`37516` is a placeholder until the neighborhood protocol has a number.
+`37516` is **Myco's**: NAP-NEIGHBOR leaves the peering protocol out of
+scope, so no spec defines it. The number is a placeholder until the
+neighborhood protocol has one.
 Kinds `9101` / `9102` / `9103` (pair request / accept / remove) are gone with
 pairing.
 

@@ -295,6 +295,36 @@ pub(crate) fn may_dial(
     }
 }
 
+/// Whether a URL a peer handed us (a service in a link offer) may be dialled
+/// outside an [`HttpClient`], as a WebSocket is: a mesh peer (a `.fips` name
+/// or a mesh address) or a public internet host, judged before any lookup.
+/// The addresses a name resolves to are judged by [`may_connect_peer`].
+pub(crate) fn may_dial_peer(url: &reqwest::Url) -> Result<(), String> {
+    let allow_loopback = cfg!(test);
+    if may_dial(Reach::Mesh, url, allow_loopback).is_ok() {
+        return Ok(());
+    }
+    may_dial(Reach::Internet, url, allow_loopback)?;
+    let literal = match url.host() {
+        Some(nostr::types::url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Some(nostr::types::url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
+        _ => None,
+    };
+    match literal {
+        Some(ip) if !may_connect_peer(ip) => Err("not a public or mesh address".into()),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a connection to `ip` may be made for a URL a peer handed us: a
+/// mesh address, or a globally routable one outside this device's network.
+/// Loopback only in host tests.
+pub(crate) fn may_connect_peer(ip: IpAddr) -> bool {
+    (cfg!(test) && ip.is_loopback())
+        || is_mesh_address(ip)
+        || (!is_private_ip(ip) && crate::public_nodes::is_public_ip(ip) && !is_own_network(ip))
+}
+
 /// A FIPS mesh name: `<npub>.fips`.
 fn is_mesh_name(name: &str) -> bool {
     name.trim_end_matches('.')

@@ -41,8 +41,18 @@ const RATE_PER_SEC: f64 = 2.0;
 const RATE_BURST: f64 = 20.0;
 
 /// Sources remembered at once. Past this, idle (full) buckets are dropped,
-/// so a peer dialling from many addresses can't grow the table.
+/// then the least recently used, so a peer dialling from many addresses
+/// can't grow the table.
 const MAX_SOURCES: usize = 1024;
+
+/// Sustained requests per second from every source together, and the burst:
+/// a peer with many addresses still shares this one.
+const GLOBAL_PER_SEC: f64 = 50.0;
+const GLOBAL_BURST: f64 = 200.0;
+
+/// Requests in flight at once; past it, 503. A WebSocket counts only until
+/// its upgrade is answered.
+const MAX_IN_FLIGHT: usize = 64;
 
 /// Per-source token bucket. A source that empties it is told to slow down
 /// (429), not banned: a mesh address costs nothing to replace, so there is
@@ -52,34 +62,73 @@ struct Bucket {
     last: Instant,
 }
 
-#[derive(Default)]
+impl Bucket {
+    fn full(burst: f64, now: Instant) -> Self {
+        Self {
+            tokens: burst,
+            last: now,
+        }
+    }
+
+    /// Refill at `rate` up to `burst`, then take a token if there is one.
+    fn take(&mut self, rate: f64, burst: f64, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * rate).min(burst);
+        self.last = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
 pub(crate) struct Limiter {
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
+    global: Mutex<Option<Bucket>>,
+    in_flight: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for Limiter {
+    fn default() -> Self {
+        Self {
+            buckets: Mutex::default(),
+            global: Mutex::default(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
+        }
+    }
 }
 
 impl Limiter {
-    /// Take a token for `ip`, or `false` if its bucket is empty.
+    /// Take a token for `ip` and one from the global bucket, or `false` if
+    /// either is empty.
     fn take(&self, ip: IpAddr, now: Instant) -> bool {
         let mut buckets = self.buckets.lock().unwrap();
-        if buckets.len() >= MAX_SOURCES {
+        if buckets.len() >= MAX_SOURCES && !buckets.contains_key(&ip) {
             buckets.retain(|_, b| {
                 let refilled =
                     b.tokens + now.saturating_duration_since(b.last).as_secs_f64() * RATE_PER_SEC;
                 refilled < RATE_BURST
             });
+            // Still full of busy sources: the least recently used goes.
+            if buckets.len() >= MAX_SOURCES {
+                if let Some(oldest) = buckets.iter().min_by_key(|(_, b)| b.last).map(|(k, _)| *k) {
+                    buckets.remove(&oldest);
+                }
+            }
         }
-        let bucket = buckets.entry(ip).or_insert(Bucket {
-            tokens: RATE_BURST,
-            last: now,
-        });
-        let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * RATE_PER_SEC).min(RATE_BURST);
-        bucket.last = now;
-        if bucket.tokens < 1.0 {
+        let bucket = buckets
+            .entry(ip)
+            .or_insert_with(|| Bucket::full(RATE_BURST, now));
+        if !bucket.take(RATE_PER_SEC, RATE_BURST, now) {
             return false;
         }
-        bucket.tokens -= 1.0;
-        true
+        drop(buckets);
+        self.global
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| Bucket::full(GLOBAL_BURST, now))
+            .take(GLOBAL_PER_SEC, GLOBAL_BURST, now)
     }
 }
 
@@ -92,6 +141,9 @@ async fn pace(
     if !limiter.take(from.ip(), Instant::now()) {
         return (StatusCode::TOO_MANY_REQUESTS, "slow down").into_response();
     }
+    let Ok(_permit) = limiter.in_flight.clone().try_acquire_owned() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
+    };
     next.run(request).await
 }
 
@@ -154,5 +206,48 @@ mod tests {
         let later = t + Duration::from_secs(60);
         limiter.take(ip(1), later);
         assert!(limiter.buckets.lock().unwrap().len() <= MAX_SOURCES);
+    }
+
+    fn many(i: usize) -> IpAddr {
+        IpAddr::from((i as u128 | 0xfd00 << 112).to_be_bytes())
+    }
+
+    #[test]
+    fn a_table_of_busy_sources_drops_the_least_recently_used() {
+        let limiter = Limiter::default();
+        let t = Instant::now();
+        // Every bucket spent from, none refilled: none is idle.
+        for i in 0..MAX_SOURCES {
+            limiter.take(many(i), t + Duration::from_micros(i as u64));
+        }
+        let now = t + Duration::from_micros(MAX_SOURCES as u64);
+        let newcomer = IpAddr::from([10, 0, 0, 1]);
+        limiter.take(newcomer, now);
+        let buckets = limiter.buckets.lock().unwrap();
+        assert_eq!(buckets.len(), MAX_SOURCES);
+        assert!(buckets.contains_key(&newcomer));
+        assert!(!buckets.contains_key(&many(0)), "the oldest went");
+    }
+
+    #[test]
+    fn every_source_together_shares_one_budget() {
+        let limiter = Limiter::default();
+        let t = Instant::now();
+        let took = (0..(GLOBAL_BURST as usize + 50))
+            .filter(|i| limiter.take(many(*i), t))
+            .count();
+        assert_eq!(took, GLOBAL_BURST as usize);
+        assert!(limiter.take(many(9999), t + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn requests_in_flight_are_capped() {
+        let limiter = Limiter::default();
+        let held: Vec<_> = (0..MAX_IN_FLIGHT)
+            .map(|_| limiter.in_flight.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert!(limiter.in_flight.clone().try_acquire_owned().is_err());
+        drop(held);
+        assert!(limiter.in_flight.clone().try_acquire_owned().is_ok());
     }
 }

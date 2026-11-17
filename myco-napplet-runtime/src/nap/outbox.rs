@@ -102,11 +102,22 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
         Ok(authors) => authors,
         Err(e) => return message.to_error(e),
     };
-    let hints = match hint_lanes(options) {
+    let (hints, addresses) = match hint_lanes(options) {
         Ok(hints) => hints,
         Err(e) => return message.to_error(e),
     };
     let timeout = timeout_in(options, DEFAULT_READ_TIMEOUT);
+    // Named neighborhoods are read through the host, never as lanes.
+    let from_addresses = if addresses.is_empty() {
+        Vec::new()
+    } else {
+        match crate::nap::neighbor::route::read(ctx, session, &addresses, &[Filter::new().id(id)])
+            .await
+        {
+            Ok(events) => events,
+            Err(e) => return message.to_error(e.as_str()),
+        }
+    };
 
     let plan = ctx
         .outbox
@@ -119,7 +130,7 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
     );
     // One id is one event, and an event never changes: the first lane to
     // have it — this device's included — is the answer.
-    let answers = ctx
+    let mut answers = ctx
         .lanes
         .query_early(
             &lanes,
@@ -132,6 +143,7 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
             &session.work(),
         )
         .await;
+    answers.push((RelayLane::Local, Some(from_addresses)));
 
     let mut found: Option<Event> = None;
     let mut hints_for: Vec<String> = Vec::new();
@@ -186,7 +198,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
         }
     }
     let authors = dedupe_keys(authors);
-    let hints = match hint_lanes(options) {
+    let (hints, addresses) = match hint_lanes(options) {
         Ok(hints) => hints,
         Err(e) => return message.to_error(e),
     };
@@ -195,6 +207,15 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
         .and_then(|o| o.get("limit"))
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
+    // Named neighborhoods are read through the host, never as lanes.
+    let from_addresses = if addresses.is_empty() {
+        Vec::new()
+    } else {
+        match crate::nap::neighbor::route::read(ctx, session, &addresses, &filters).await {
+            Ok(events) => events,
+            Err(e) => return message.to_error(e.as_str()),
+        }
+    };
 
     let plan = ctx
         .outbox
@@ -205,7 +226,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
             .chain(plan.lanes.iter().cloned())
             .chain(hints),
     );
-    let answers = ctx
+    let mut answers = ctx
         .lanes
         .query_early(
             &lanes,
@@ -215,6 +236,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
             &session.work(),
         )
         .await;
+    answers.push((RelayLane::Local, Some(from_addresses)));
 
     let mut incomplete = !plan.missing_authors.is_empty();
     let (events, hints_by_id) = merge(answers, &mut incomplete);
@@ -265,18 +287,36 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         }
     }
     let authors = dedupe_keys(authors);
-    let hints = match hint_lanes(options) {
+    let (hints, addresses) = match hint_lanes(options) {
         Ok(hints) => hints,
         Err(e) => return closed(e),
     };
+    if !addresses.is_empty() && !session.is_granted("neighbor") {
+        return closed(super::neighbor::NeighborError::Denied.as_str().to_string());
+    }
 
-    let out =
+    let mut out =
         match crate::nap::open_subscription(ctx, session, "outbox", &sub_id, &filters, Vec::new())
             .await
         {
             Ok(backlog) => backlog,
             Err(reason) => return closed(reason),
         };
+    // Named neighborhoods followed through the host, as `relay.subscribe`
+    // on each address is.
+    if !addresses.is_empty() {
+        match crate::nap::neighbor::route::follow(
+            ctx, session, "outbox", &sub_id, &filters, &addresses,
+        )
+        .await
+        {
+            Ok(frames) => out.extend(frames),
+            Err(e) => {
+                session.unsubscribe_in("outbox", &sub_id);
+                return closed(e.as_str().to_string());
+            }
+        }
+    }
 
     if let Err(e) = ctx
         .lanes
@@ -488,19 +528,13 @@ fn dedupe(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane> {
 /// ten is already more than any real list.
 pub const MAX_HINT_RELAYS: usize = 10;
 
-/// `options.relays` for a read. `neighborhood:` addresses are read with
-/// `relay.subscribe`, which keeps a neighborhood's view apart; a read that
-/// merges lanes cannot, so it refuses them rather than ignore them.
+/// `options.relays` for a read: relay lanes, and `neighborhood:` addresses,
+/// which are read through the host as `relay.subscribe` on the address is
+/// ([`crate::nap::neighbor::route::read`]). NAP-NEIGHBOR accepts them here.
 fn hint_lanes(
     options: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Result<Vec<RelayLane>, String> {
-    let (lanes, addresses) = hint_lanes_and_addresses(options)?;
-    if !addresses.is_empty() {
-        return Err(
-            "neighborhood addresses are read with relay.subscribe, not outbox reads".to_string(),
-        );
-    }
-    Ok(lanes)
+) -> Result<(Vec<RelayLane>, Vec<String>), String> {
+    hint_lanes_and_addresses(options)
 }
 
 /// `options.relays`, validated, with `neighborhood:` addresses set apart for
@@ -1195,7 +1229,7 @@ mod tests {
             m
         };
         let ten = urls(MAX_HINT_RELAYS);
-        assert_eq!(hint_lanes(Some(&ten)).unwrap().len(), MAX_HINT_RELAYS);
+        assert_eq!(hint_lanes(Some(&ten)).unwrap().0.len(), MAX_HINT_RELAYS);
         let eleven = urls(MAX_HINT_RELAYS + 1);
         let err = hint_lanes(Some(&eleven)).unwrap_err();
         assert_eq!(err, "at most 10 relays may be named");

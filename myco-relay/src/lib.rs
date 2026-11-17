@@ -114,7 +114,7 @@ impl RelayStore {
 
     /// [`RelayStore::open`] with an explicit LMDB map size — the production
     /// path with `MAP_SIZE`; tests shrink it to make a save fail.
-    fn open_with_map_size(dir: impl AsRef<Path>, map_size: usize) -> anyhow::Result<Self> {
+    pub fn open_with_map_size(dir: impl AsRef<Path>, map_size: usize) -> anyhow::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         let lmdb_dir = dir.join("lmdb");
         std::fs::create_dir_all(&lmdb_dir)?;

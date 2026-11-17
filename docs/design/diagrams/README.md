@@ -1,6 +1,7 @@
 # Design diagrams
 
-Visuals for the Myco design. The **intro** set is current. The **technical**
+Visuals for the Myco design. The **intro** set is current but for
+intro-02's wording. The **technical**
 set was drawn from the first plan and has not been redrawn since; each row
 says what has moved. Treat the docs as authoritative where they disagree.
 Structure mirrors `reference/fips/docs/design/diagrams/`.
@@ -12,7 +13,7 @@ Two images, redrawn around the ideas a newcomer has to get.
 | File | What it shows |
 | --- | --- |
 | [intro-01-your-apps.svg](intro-01-your-apps.svg) | Your home screen in the middle; tap an icon and the app opens full-screen as its own Recents card — a map on the left, a chat on the right — no browser, no tabs, no Myco chrome. Works offline; one window per app. |
-| [intro-02-what-it-is.svg](intro-02-what-it-is.svg) | One room: the FIPS mesh forms out of whoever is in range (grey); you bump phones to build a **Circle** of people you trust on top of it (indigo); apps come from your Circle and what you do in them travels your Circle. Ben is reached *through a stranger's phone* — the mesh carries the packets, the Circle decides who they are for; Dan is out of range and still in it. **Stale wording:** the Circle is now **neighborhoods** carried on links set up from invitations ([nap-neighbor/](../nap-neighbor/README.md)); the picture's point — the mesh carries packets, your own links decide who they are for — still holds. |
+| [intro-02-what-it-is.svg](intro-02-what-it-is.svg) | One room: the FIPS mesh forms out of whoever is in range (grey); on top of it, the people you share a neighborhood with (indigo); apps and what you do in them travel through them. Ben is reached *through a stranger's phone* — the mesh carries the packets, your links decide who they are for; Dan is out of range and still linked. **Stale wording:** the picture says "Circle", which neighborhoods replaced ([nap-neighbor/](../nap-neighbor/README.md)). |
 
 ### Technical (design docs)
 
@@ -26,7 +27,7 @@ Two images, redrawn around the ideas a newcomer has to get.
 | [06-nsite-data-model.svg](06-nsite-data-model.svg) | What an nsite *is*: an author-signed manifest event (kind 15128/35128) mapping paths → sha256, plus the content-addressed Blossom blobs. |
 | [07-relay-mesh-fanout.svg](07-relay-mesh-fanout.svg) | Event fanout: each accepted event is re-broadcast to all *other* peers (source-excluded, deduped, hop-budgeted); events fan out, blobs stay pull-only. **Obsolete:** the relay no longer fans anything out to other phones. Everything, app manifests included, travels in neighborhoods, passed on link to link ([nap-neighbor/](../nap-neighbor/README.md), [extensions.md](../nap-neighbor/extensions.md)). |
 | [08-two-layer-propagation.svg](08-two-layer-propagation.svg) | The load-bearing split: Layer A (FIPS live-path routing) vs Layer B (nsite store-and-forward that survives partition); announce-manifest vs pull-blob. |
-| [09-identity-model.svg](09-identity-model.svg) | The two identities un-conflated: the device key (mesh/BLE/relay address, three derived forms) vs the external nsite-author key; holder ≠ author. **Stale:** the napplet **user key** is a third; and each link has its own **link key**; see [concepts.md § Keys](../core/concepts.md#keys). |
+| [09-identity-model.svg](09-identity-model.svg) | The two identities un-conflated: the device key (mesh/BLE/link service address, three derived forms) vs the external nsite-author key; holder ≠ author. **Stale:** the napplet **user key** is a third; and each link has its own **link key**; see [concepts.md § Keys](../core/concepts.md#keys). |
 
 **What the technical set still gets right,** and what has moved since:
 

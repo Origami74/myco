@@ -1372,12 +1372,18 @@ impl AppRuntime {
                 self.rev += 1;
             }
             NativeAppAction::NearbyHeard { secret } => {
-                let bytes = hex::decode(secret.trim()).ok();
-                if let (Some(svc), Some(Ok(secret))) = (
-                    &self.link_service,
-                    bytes.map(<crate::neighbor::nearby::Secret>::try_from),
-                ) {
-                    svc.nearby.hear(secret, std::time::Instant::now());
+                // One secret, or several comma-separated: the radio batches
+                // what it heard so a flood of adverts is one dispatch.
+                if let Some(svc) = &self.link_service {
+                    let now = std::time::Instant::now();
+                    for one in secret.split(',').take(64) {
+                        let bytes = hex::decode(one.trim()).ok();
+                        if let Some(Ok(secret)) =
+                            bytes.map(<crate::neighbor::nearby::Secret>::try_from)
+                        {
+                            svc.nearby.hear(secret, now);
+                        }
+                    }
                 }
                 // Nothing on screen changes.
             }
@@ -1408,10 +1414,19 @@ impl AppRuntime {
     /// gone. Peers are not told; they drop the link once it stays silent.
     fn forget_nearby(&self) {
         if let Some(svc) = &self.link_service {
-            let ended = crate::neighbor::nearby::end_all(svc);
-            if !ended.is_empty() {
+            if let Some(ended) = crate::neighbor::nearby::end_all(svc) {
                 tracing::info!(links = ended.len(), "node cycled: nearby forgotten");
+                self.forget_nearby_content(svc);
             }
+        }
+    }
+
+    /// The `nearby` neighborhood's content goes with its links, off the
+    /// reducer thread.
+    fn forget_nearby_content(&self, svc: &crate::neighbor::service::LinkService) {
+        if let Some(rt) = self.rt.as_ref() {
+            let svc = svc.clone();
+            rt.spawn(async move { crate::neighbor::nearby::forget_content(&svc).await });
         }
     }
 
@@ -1425,7 +1440,10 @@ impl AppRuntime {
         if on {
             return;
         }
-        let ended = crate::neighbor::nearby::end_all(&svc);
+        let Some(ended) = crate::neighbor::nearby::end_all(&svc) else {
+            return;
+        };
+        self.forget_nearby_content(&svc);
         if let Some(rt) = self.rt.as_ref() {
             for link in ended {
                 rt.spawn(async move {
@@ -2364,9 +2382,26 @@ impl AppRuntime {
     ) {
         use crate::neighbor::extensions::{MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
         neighbors.set_kept_blobs(content.blobs());
+        // Only napplets in the Library: one merely cached here is not
+        // exposed.
+        let library = Arc::downgrade(content);
         neighbors.set_held(crate::neighbor::updates::HeldNapplets {
             relay: content.cache_relay(),
             blobs: content.cache_blobs(),
+            installed: Arc::new(move || {
+                let Some(content) = library.upgrade() else {
+                    return Vec::new();
+                };
+                content
+                    .library_snapshot()
+                    .into_iter()
+                    .filter(|i| i.kind == crate::content::LibraryKind::Napplet)
+                    .filter_map(|i| {
+                        let author = nostr::PublicKey::parse(&i.author_npub).ok()?;
+                        Some((author, i.d_tag))
+                    })
+                    .collect()
+            }),
         });
         // Where each extension's apps are looked for: opening a site,
         // installing a napplet, carrying the release APK.
@@ -2502,28 +2537,30 @@ impl AppRuntime {
             ));
 
             // NAP-NEIGHBOR: neighborhoods keep their events here, apart from
-            // the user's own relay.
-            let neighborhood_store: Arc<dyn nsite_deck::RelayBackend> =
-                match myco_relay::RelayStore::open(
+            // the user's own relay: one store per neighborhood.
+            let neighborhood_stores: Arc<dyn crate::neighbor::data::EventStores> =
+                Arc::new(crate::neighbor::data::LmdbStores::open(
                     Path::new(&self.data_dir).join("neighborhood-relay"),
-                ) {
-                    Ok(store) => Arc::new(store),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "neighborhood store unavailable; kept in memory");
-                        Arc::new(myco_relay::RelayStore::in_memory())
-                    }
-                };
+                    &Path::new(&self.data_dir).join(crate::neighbor::data::SCOPES_FILE),
+                ));
 
-            let neighborhood_blobs: Arc<dyn nsite_deck::BlobStore> =
-                match myco_blossom::FsBlobStore::open(
-                    Path::new(&self.data_dir).join("neighborhood-blobs"),
-                ) {
-                    Ok(store) => Arc::new(store),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "neighborhood blob store unavailable");
-                        Arc::new(crate::neighbor::data::NoBlobs)
-                    }
-                };
+            let neighborhood_fs = match myco_blossom::FsBlobStore::open(
+                Path::new(&self.data_dir).join("neighborhood-blobs"),
+            ) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "neighborhood blob store unavailable");
+                    None
+                }
+            };
+            let neighborhood_blobs: Arc<dyn nsite_deck::BlobStore> = match &neighborhood_fs {
+                Some(store) => store.clone(),
+                None => Arc::new(crate::neighbor::data::NoBlobs),
+            };
+            // What leaves every neighborhood is deleted, not only hidden.
+            let neighborhood_prune = Arc::new(crate::neighbor::data::StorePrune {
+                blobs: neighborhood_fs,
+            });
 
             let neighbors = Arc::new(crate::neighbor::Neighbors::open(
                 Path::new(&self.data_dir),
@@ -2532,11 +2569,12 @@ impl AppRuntime {
                         self.link_service.as_ref().map(|s| s.links.clone()),
                     )),
                     asker: Arc::new(crate::neighbor::NoAsker),
-                    scoped_store: neighborhood_store,
+                    scoped_stores: neighborhood_stores,
                     scoped_blobs: neighborhood_blobs,
                     links: self.link_service.as_ref().map(|s| s.links.clone()),
                 },
             ));
+            neighbors.set_prune(neighborhood_prune);
             self.neighbors = Some(neighbors.clone());
             // The link relay can answer now.
             if let Some(svc) = &self.link_service {

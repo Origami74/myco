@@ -160,7 +160,7 @@ Now:
 - **Reach past one link** comes from the neighborhood's publish hops: a
   device passes a neighborhood event on to its other links carrying that
   neighborhood. No peer list is polled.
-- **Setting up a link** is a one-time invitation (`https://napplet.link/neighborhood/join?invite=…`), not a pairing
+- **Setting up a link** is a one-time invitation (`https://napplet.link/neighborhood/join#invite=…`), not a pairing
   card ([nap-neighbor/links.md](../nap-neighbor/links.md)).
 
 ## 4. Why any source is trustworthy

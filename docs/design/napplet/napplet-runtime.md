@@ -329,7 +329,8 @@ together.
 
 #### napplet.link
 
-A shareable link for an intent, for any archetype. Myco defines it; no NAP does.
+A shareable link for an intent, for any archetype but the shell-reserved ones. Myco
+defines it; no NAP does.
 
 ```text
 https://napplet.link/<archetype>/<intent>?<params>
@@ -355,6 +356,14 @@ convention and the user's default:
 - From inside a napplet, `link.open` of a napplet.link takes the same path after NAP-LINK's
   rate limit. The napplet hears `opened`, or `denied` with the resolver's reason
   (`no handler`). It never hears an `intent.invoke.result`.
+
+**Shell-reserved archetypes.** `neighborhood` is reserved for the shell:
+`napplet.link/neighborhood/join` (and `napplet:neighborhood/join`) is a neighborhood
+invitation, which Myco's shell handles itself, before the resolver. It is never resolved
+to a napplet, so no napplet can claim it or receive the invitation. Its payload rides in
+the fragment (`#invite=…`), so napplet.link's web host never sees it; the older
+`?invite=` is read too ([nap-neighbor/links.md](../nap-neighbor/links.md#invitations)).
+NAP-INTENT has no such notion yet; Myco reserves it on its own.
 
 **Fallback.** When nothing installed handles the role, Myco shows "No app here opens
 \<role\>" with **Open in browser**. The browser is picked with a `CATEGORY_APP_BROWSER`
@@ -931,11 +940,11 @@ implements; a switch turned off on the app's sheet stays off. The vendored
 `@napplet/shim` already installs `window.napplet.link` and `window.napplet.theme`, so
 the Myco prelude supplement needed nothing for either.
 
-**`neighbor` is a default grant.** NAP-NEIGHBOR tells a napplet only which
-neighborhoods it was granted, and none are granted without the user: a napplet's
-`neighbor.create` asks first, and neighborhoods the user starts in the shell are
-granted to no napplet. Using an address needs `neighbor` as well as the calling
-domain's grant. See [nap-neighbor/napplet-api.md](../nap-neighbor/napplet-api.md).
+**`neighbor` is a default grant.** As NAP-NEIGHBOR says, a napplet with it sees every
+neighborhood the user carries, and the peers in each, under its own ids. `create`,
+`leave` and a widening `setOffer` ask the user first; `mute` and a narrowing `setOffer`
+don't, and apply for every napplet. Using an address needs `neighbor` as well as the
+calling domain's grant. See [nap-neighbor/napplet-api.md](../nap-neighbor/napplet-api.md).
 
 **`NAP-UPLOAD` shipped** (upstream draft, [napplet/naps PR #33](https://github.com/napplet/naps/pull/33), not merged; Myco's notes in [`NAP-UPLOAD.md`](NAP-UPLOAD.md)), Blossom only. A
 napplet hands over bytes; the shell finds the user's servers (kind 10063, else
@@ -972,9 +981,9 @@ side in [nap-neighbor/](../nap-neighbor/README.md)). It replaces NAP-MESH, Myco'
 earlier hop-limited `mesh.publish` / `mesh.subscribe` domain, which is gone along with
 its App reach setting.
 
-The `neighbor` domain carries no data. It lists the neighborhoods a napplet was granted,
-the peers carrying each, and a `neighborhood://` address per neighborhood, minted per
-napplet. The napplet hands that address to `relay.subscribe`, `outbox.publish`,
+The `neighbor` domain carries no data. It lists every neighborhood the user carries (a
+napplet with `neighbor` sees all of them), the peers carrying each, and a
+`neighborhood://` address per neighborhood, minted per napplet. The napplet hands that address to `relay.subscribe`, `outbox.publish`,
 `resource` (`xs=`) or `upload` (`destination`), and the host routes it — caught before
 lane validation, never dialled.
 
@@ -1155,11 +1164,12 @@ and marks the entry `preinstalled`:
 
 | Default | Address | Published `requires` | Expected set |
 |---|---|---|---|
-| DingDong | `d=dingdong` | none | `mesh` |
-| AppStore | `d=discover` | `outbox`, `theme` | `mesh`, `outbox`, `theme` |
+| DingDong | `d=dingdong` | none | none |
+| AppStore | `d=discover` | `outbox`, `theme` | `outbox`, `theme` |
+| Chronofeed | `d=chronofeed` | as expected | `identity`, `outbox`, `relay`, `resource`, `theme` |
+| Simple Profile, Noris, Composer | `d=simpleprofile`, `d=noris`, `d=composer` | as expected | `identity`, `inc`, `outbox`, `relay`, `resource`, `theme` |
 
-Both expected sets still list `mesh`, from when NAP-MESH existed. This build no longer
-implements it, so it grants nothing. The first open, and any update from the same author that declares no
+The last four are seeded on new installs only. The first open, and any update from the same author that declares no
 more than the expected set, is granted what it declares with no sheet; anything beyond it
 goes through the sheet above. The expected set is also read at every open and review
 (`library_grants`), for any entry still marked preinstalled: an expected set widened in a
@@ -1192,8 +1202,9 @@ this device's relay and internet relays (`outbox.rs`).
 
 What people nearby share now travels through NAP-NEIGHBOR. A napplet gets a
 `neighborhood://` address and hands it to `relay.subscribe` or `outbox.publish`; the host
-routes it over links ([nap-neighbor/](../nap-neighbor/README.md)). Outbox reads refuse
-addresses.
+routes it over links ([nap-neighbor/](../nap-neighbor/README.md)). Outbox reads accept
+addresses too, as NAP-NEIGHBOR says, and read them as `relay.subscribe` on the address
+does.
 
 The user's own list still names **no** `.fips` relay. A `ws://<npub>.fips` URL is the device
 key, and the list is signed by the user key: one inside the other is the link D3 keeps

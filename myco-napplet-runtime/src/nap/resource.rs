@@ -15,7 +15,9 @@
 //! the public servers when reachable — and what comes back is **stored**
 //! before it is handed over. The second ask, from this or any napplet, is
 //! local. Other phones are not asked: a neighborhood's blobs are reached
-//! through its `neighborhood://` address. See
+//! through its `neighborhood://` address, and stay in that neighborhood —
+//! never put in this store, where a plain `blossom:` ask from any napplet
+//! would find them. See
 //! `docs/design/napplet/napplet-runtime.md` §7.11 before changing the fetch
 //! order or the keep rule.
 //!
@@ -483,9 +485,12 @@ async fn fetch_blossom(ctx: &NapContext, session: &Session, url: &str) -> Result
                     format!("{} bytes, cap is {MAX_BYTES}", fetched.len()),
                 ));
             }
-            if let Err(e) = ctx.blobs.put(&fetched).await {
-                tracing::warn!(sha = %sha, error = %e, "resource: could not store a fetched blob");
-            }
+            // Not put in the device's store: there any napplet could read it
+            // by hash alone. The host keeps it in the neighborhood's scope;
+            // the window host reads it back through the address
+            // ([`neighborhood_bytes`]).
+            ctx.https_memory
+                .remember_neighborhood(session.identity(), &sha, &addresses);
             fetched
         }
         None => {
@@ -759,6 +764,55 @@ pub struct HttpsMemory {
 struct MemoryInner {
     recent: HashMap<(NappletIdentity, String), Remembered>,
     started: HashMap<NappletIdentity, VecDeque<Instant>>,
+    /// Blobs a napplet was delivered from a neighborhood, by hash: the
+    /// addresses they came through. They are not in the device's store.
+    neighborhood: HashMap<(NappletIdentity, String), (Vec<String>, Instant)>,
+}
+
+/// The most neighborhood deliveries remembered, across every napplet.
+const MAX_NEIGHBORHOOD_REMEMBERED: usize = 1024;
+
+/// The bytes of a blob `napplet` was delivered from a neighborhood, read
+/// again through the address it came by: how the window host serves it, as
+/// it is in no device-wide store. `None` without the `neighbor` grant, or
+/// when the neighborhood no longer has it.
+pub async fn neighborhood_bytes(
+    ctx: &NapContext,
+    napplet: &NappletIdentity,
+    granted: bool,
+    sha256: &str,
+) -> Option<Vec<u8>> {
+    let sha = sha256.to_ascii_lowercase();
+    let addresses = ctx.https_memory.neighborhood_addresses(napplet, &sha)?;
+    crate::nap::neighbor::route::blob(ctx, napplet, granted, &addresses, &sha).await
+}
+
+impl HttpsMemory {
+    fn remember_neighborhood(&self, napplet: &NappletIdentity, sha: &str, addresses: &[String]) {
+        let mut inner = self.inner.lock().unwrap();
+        let known = &mut inner.neighborhood;
+        if known.len() >= MAX_NEIGHBORHOOD_REMEMBERED {
+            if let Some(oldest) = known
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(key, _)| key.clone())
+            {
+                known.remove(&oldest);
+            }
+        }
+        known.insert(
+            (napplet.clone(), sha.to_string()),
+            (addresses.to_vec(), Instant::now()),
+        );
+    }
+
+    fn neighborhood_addresses(&self, napplet: &NappletIdentity, sha: &str) -> Option<Vec<String>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .neighborhood
+            .get(&(napplet.clone(), sha.to_string()))
+            .map(|(addresses, _)| addresses.clone())
+    }
 }
 
 struct Remembered {

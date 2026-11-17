@@ -72,7 +72,7 @@ dispatch(actionJson) → stateJson
 | `set_custom_blossom` | `url`: String | Point the blob store at a **custom Blossom server**, or back at the built-in one with an empty `url`. |
 | `set_aware_data_paths` | `count`: u8 | Report how many concurrent Wi-Fi Aware data paths this chipset supports (`Characteristics.getNumberOfSupportedDataPaths()`), which is what the Aware UDP socket pool is sized to. |
 | `create_neighborhood` | `name`: String, `autoAccept`: bool | Start a neighborhood (random id), or with `autoAccept` join the one derived from that name. |
-| `create_link_invite` | `neighborhoods`: Vec<String>, `from`: Option<String> | Make a one-time link invitation carrying these neighborhood ids (hex); it appears as `neighborhoods.invite`, a `https://napplet.link/neighborhood/join?invite=…` for a QR code, share link or NFC tag. `from` is the inviter's name, shown on the other phone. |
+| `create_link_invite` | `neighborhoods`: Vec<String>, `from`: Option<String> | Make a one-time link invitation carrying these neighborhood ids (hex); it appears as `neighborhoods.invite`, a `https://napplet.link/neighborhood/join#invite=…` for a QR code, share link or NFC tag. `from` is the inviter's name, shown on the other phone. |
 | `clear_link_invite` | — | Drop the shown invitation (it still expires on its own). |
 | `join_link` | `invite`: String, `accept`: Vec<String>, `name`: Option<String> | Join a link from a scanned invitation, accepting `accept` of its neighborhoods. `name` goes to the inviter only. Spawn-not-block; the outcome lands in `neighborhoods.status`. |
 | `answer_link_neighborhood` | `linkId`: String, `neighborhood`: String, `accept`: bool | Answer a neighborhood a peer asked to add to a link. |

@@ -66,6 +66,11 @@ impl Neighbors {
         let _ = self.scoped.kept.set(kept);
     }
 
+    /// Delete what no neighborhood keeps any more. Set once.
+    pub fn set_prune(&self, prune: Arc<dyn super::data::Prune>) {
+        let _ = self.scoped.prune.set(prune);
+    }
+
     /// Share a new version under `extension`: in every neighborhood this
     /// device shares it in, keep the manifest and `files` in scope and
     /// publish the manifest like any neighborhood event — to every link
@@ -82,11 +87,11 @@ impl Neighbors {
                 tracing::warn!(error = %e, "could not put an update's files in scope");
                 continue;
             }
-            if !self.scoped.has(n, &manifest) {
-                if let Err(e) = self.scoped.add_shared(n, manifest.clone()).await {
-                    tracing::warn!(error = %e, "could not keep an update manifest");
-                    continue;
-                }
+            // Kept as this device's own, even if it was pulled here before:
+            // given to peers asking from now on.
+            if let Err(e) = self.scoped.add_shared(n, manifest.clone()).await {
+                tracing::warn!(error = %e, "could not keep an update manifest");
+                continue;
             }
             let hops = record.policy.publish_hops;
             if hops > 0 {
@@ -113,18 +118,25 @@ impl Neighbors {
     }
 }
 
-/// The napplets this device holds — its manifest stored and its files in
-/// storage, installed or not — exposed to linked neighbors in each
-/// neighborhood where it shares `napplet-updates`. Nothing is pushed: a
-/// neighbor's backlog request is answered with the manifests, and its blob
-/// request with their files (`index.html` and icon). Nothing else in
-/// storage is reachable this way.
+/// The napplets installed on this device — in the Library, with the
+/// version's manifest stored and its files in storage — exposed to linked
+/// neighbors in each neighborhood where it shares `napplet-updates`.
+/// Nothing is pushed: a neighbor's backlog request is answered with the
+/// manifests, and its blob request with their `index.html` and icon. Nothing
+/// else in storage is reachable this way: not a napplet only cached here,
+/// nor any other file of an installed one.
 pub struct HeldNapplets {
     /// Manifests: kept and cached, read as one.
     pub relay: Arc<dyn nsite_deck::RelayBackend>,
     /// Files: kept and cached, read as one.
     pub blobs: Arc<dyn nsite_deck::BlobStore>,
+    /// The napplet slots installed now.
+    pub installed: Installed,
 }
+
+/// The napplet slots installed now, read when asked: author and `d` tag
+/// (`None` for an author's root napplet).
+pub type Installed = Arc<dyn Fn() -> Vec<(PublicKey, Option<String>)> + Send + Sync>;
 
 /// The napplet manifest kinds that name a slot.
 fn napplet_kinds() -> [nostr::Kind; 2] {
@@ -135,7 +147,22 @@ fn napplet_kinds() -> [nostr::Kind; 2] {
 }
 
 impl HeldNapplets {
-    /// Napplet manifests matching `filters` whose entry file is here.
+    /// The installed napplets' manifests among `events`.
+    fn installed_among(&self, events: Vec<Event>) -> Vec<myco_napplet_runtime::NappletManifest> {
+        let installed = (self.installed)();
+        events
+            .into_iter()
+            .filter_map(|e| myco_napplet_runtime::NappletManifest::from_event(e).ok())
+            .filter(|m| {
+                installed
+                    .iter()
+                    .any(|(author, d)| *author == m.author && *d == m.d_tag)
+            })
+            .collect()
+    }
+
+    /// Installed napplets' manifests matching `filters` whose entry file is
+    /// here.
     pub async fn manifests(&self, filters: &[nostr::Filter]) -> Vec<Event> {
         let narrowed: Vec<nostr::Filter> = filters
             .iter()
@@ -153,19 +180,17 @@ impl HeldNapplets {
         if narrowed.is_empty() {
             return Vec::new();
         }
+        let found = self.relay.query(&narrowed).await.unwrap_or_default();
         let mut out = Vec::new();
-        for event in self.relay.query(&narrowed).await.unwrap_or_default() {
-            let Ok(m) = myco_napplet_runtime::NappletManifest::from_event(event.clone()) else {
-                continue;
-            };
+        for m in self.installed_among(found) {
             if self.blobs.has(&m.artifact).await {
-                out.push(event);
+                out.push(m.event);
             }
         }
         out
     }
 
-    /// A file of a napplet held here: its `index.html` or icon.
+    /// A file of a napplet installed here: its `index.html` or icon.
     pub async fn file(&self, sha256: &str) -> Option<Vec<u8>> {
         if !self.names(sha256).await {
             return None;
@@ -178,16 +203,13 @@ impl HeldNapplets {
         self.names(sha256).await && self.blobs.has(sha256).await
     }
 
-    /// Whether some held napplet's manifest names `sha256` as its entry or
-    /// icon.
+    /// Whether some installed napplet's manifest names `sha256` as its
+    /// entry or icon.
     async fn names(&self, sha256: &str) -> bool {
         let all = [nostr::Filter::new().kinds(napplet_kinds())];
-        self.relay
-            .query(&all)
-            .await
-            .unwrap_or_default()
+        let found = self.relay.query(&all).await.unwrap_or_default();
+        self.installed_among(found)
             .into_iter()
-            .filter_map(|e| myco_napplet_runtime::NappletManifest::from_event(e).ok())
             .any(|m| m.artifact == sha256 || m.icon.as_ref().is_some_and(|i| i.sha256 == sha256))
     }
 }
@@ -284,7 +306,7 @@ impl nsite_deck::PeerSource for ExtensionSource {
             if !record.policy.gets(self.extension) {
                 continue;
             }
-            let mut found = neighbors.link_backlog(record.id, &filters).await;
+            let mut found = neighbors.kept(record.id, &filters).await;
             if found.is_empty() {
                 found = neighbors.ask_links(record.id, &filters).await;
             }

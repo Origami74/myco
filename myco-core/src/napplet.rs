@@ -1116,17 +1116,27 @@ impl NappletHost {
             }
             live.session.clone()
         };
-        {
+        let (napplet, neighbor) = {
             let session = session.lock().await;
             if !session.is_granted("resource") || !session.was_delivered_blob(&key) {
                 return None;
             }
-        }
-        self.ctx
+            (session.identity().clone(), session.is_granted("neighbor"))
+        };
+        if let Some(bytes) = self
+            .ctx
             .blobs
             .get(&sha256_hex.to_ascii_lowercase())
             .await
             .ok()?
+        {
+            return Some(bytes);
+        }
+        // Delivered from a neighborhood, so in none of the device's stores.
+        myco_napplet_runtime::nap::resource::neighborhood_bytes(
+            &self.ctx, &napplet, neighbor, sha256_hex,
+        )
+        .await
     }
 
     /// Wait for frames this window should be sent unprompted, up to `timeout`.

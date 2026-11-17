@@ -147,8 +147,15 @@ class BleRadio(context: Context) {
     private val scanWithoutPsm = AtomicInteger()
     private val scanPsmAddrs = ConcurrentHashMap.newKeySet<String>()
 
-    /** Per advertiser, the nearby secret last reported and when. */
-    private val heardSecrets = ConcurrentHashMap<String, Pair<String, Long>>()
+    /** Per advertiser, the nearby secret last reported, when, and when the
+     *  address was last seen. Pruned by [pruneHeardSecrets]. */
+    private val heardSecrets = ConcurrentHashMap<String, HeardSecret>()
+
+    private class HeardSecret(
+        val secret: String,
+        val reportedMs: Long,
+        @Volatile var seenMs: Long,
+    )
     private val scanNoPsmAddrs = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var scanSummaryTask: ScheduledFuture<*>? = null
 
@@ -203,6 +210,12 @@ class BleRadio(context: Context) {
     private fun pruneNodePrefixes(now: Long) {
         if (nodePrefixByMac.size < PREFIX_PRUNE_AT) return
         nodePrefixByMac.entries.removeIf { now - it.value.lastSeenMs > PREFIX_TTL_MS }
+    }
+
+    /** Forget advertisers not seen for [HEARD_ADDR_TTL_MS]: addresses rotate,
+     *  so without this the map grows one entry per rotation per peer. */
+    private fun pruneHeardSecrets(now: Long) {
+        heardSecrets.entries.removeIf { now - it.value.seenMs > HEARD_ADDR_TTL_MS }
     }
 
     /** Adopt the current Aware set; a rebuilt radio would otherwise start
@@ -464,8 +477,15 @@ class BleRadio(context: Context) {
         // key the 2-byte PSM service-data on a 16-bit UUID (PSM_SD_UUID16) so it
         // sits alongside the full 128-bit FIPS service UUID (used for the scan
         // filter): ~3 (flags) + 18 (128-bit UUID) + 6 (16-bit service-data) = 27B.
-        // The nearby secret rides right after the PSM: 2 + 4 bytes of service
-        // data fill the 31-byte PDU exactly (3 flags + 18 UUID + 10).
+        // The nearby secret rides right after the PSM, in the same
+        // service-data entry, so it costs only its 4 bytes:
+        //   flags 3 + 128-bit UUID list (2+16) 18 + service data
+        //   (2 header + 2 UUID16 + 2 PSM + 4 secret) 10 = 31, the whole PDU.
+        // No headroom, and none to be had: the flags are added by Android for
+        // a connectable advert, and fips nodes on Linux/macOS scan for the
+        // 128-bit FIPS UUID and read the PSM from this entry (they take the
+        // first two bytes and ignore the rest). Nothing more can be added to
+        // the primary advert; anything new belongs in the scan response.
         val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte()) +
             (nearbySecretField ?: ByteArray(0))
         val advData = AdvertiseData.Builder()
@@ -631,14 +651,23 @@ class BleRadio(context: Context) {
         } else 0
         // The peer's nearby secret, right after the PSM. Reported when it
         // changes for that advertiser, and again every 20 s while it is still
-        // heard (the core forgets heard secrets after a minute), not on every
-        // sighting.
+        // heard (the core forgets heard secrets after a minute, and counts a
+        // secret heard again and again as a real phone's), not on every
+        // sighting. A change is reported at most once per
+        // [SECRET_CHANGE_MIN_MS] per address, so a beacon cycling secrets
+        // floods nothing; the core rate-limits new secrets on top.
         if (sd != null && sd.size >= 2 + NEARBY_SECRET_BYTES) {
             val secret = sd.copyOfRange(2, 2 + NEARBY_SECRET_BYTES).joinToString("") { "%02x".format(it) }
             val now = SystemClock.elapsedRealtime()
             val last = heardSecrets[addr]
-            if (last == null || last.first != secret || now - last.second > SECRET_REPORT_EVERY_MS) {
-                heardSecrets[addr] = secret to now
+            last?.seenMs = now
+            val report = when {
+                last == null -> heardSecrets.size < MAX_HEARD_ADDRS
+                last.secret == secret -> now - last.reportedMs > SECRET_REPORT_EVERY_MS
+                else -> now - last.reportedMs > SECRET_CHANGE_MIN_MS
+            }
+            if (report) {
+                heardSecrets[addr] = HeardSecret(secret, now, now)
                 onNearbySecret?.invoke(secret)
             }
         }
@@ -721,6 +750,7 @@ class BleRadio(context: Context) {
 
     /** Summarise the last window of scan reports; scheduled from [startScanning]. */
     private fun logScanSummary() {
+        pruneHeardSecrets(SystemClock.elapsedRealtime())
         val withPsm = scanWithPsm.getAndSet(0)
         val withoutPsm = scanWithoutPsm.getAndSet(0)
         val silent = scanNoPsmAddrs.minus(scanPsmAddrs)
@@ -1102,6 +1132,16 @@ class BleRadio(context: Context) {
         /** Bytes of nearby secret after the PSM in the primary advert. */
         const val NEARBY_SECRET_BYTES = 4
         private const val SECRET_REPORT_EVERY_MS = 20_000L
+        /** A changed secret from one address is reported at most this often. */
+        private const val SECRET_CHANGE_MIN_MS = 5_000L
+        /** Advertisers not seen for this long are forgotten. */
+        private const val HEARD_ADDR_TTL_MS = 60_000L
+        /** Most advertisers tracked at once; past it new ones wait for a prune. */
+        private const val MAX_HEARD_ADDRS = 128
+
+        /** Whether a radio is running now. */
+        val running: Boolean
+            get() = instance?.stopped == false
 
         @Volatile
         private var nearbySecretField: ByteArray? = null

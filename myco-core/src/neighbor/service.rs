@@ -104,13 +104,20 @@ impl LinkService {
     }
 
     /// The link a NIP-98 header proves, for one of our link keys and a
-    /// request at `/nh/{pk}/{rest}`.
-    fn authorized(&self, headers: &HeaderMap, method: &str, pk: &str, rest: &str) -> Option<Link> {
+    /// request at `/nh/{pk}/{rest}` with `body`.
+    fn authorized(
+        &self,
+        headers: &HeaderMap,
+        method: &str,
+        pk: &str,
+        rest: &str,
+        body: &[u8],
+    ) -> Option<Link> {
         let header = headers.get("authorization")?.to_str().ok()?;
         let signer = self
             .link_urls(pk)
             .iter()
-            .find_map(|url| check_http_auth(header, method, &format!("{url}/{rest}")))?;
+            .find_map(|url| check_http_auth(header, method, &format!("{url}/{rest}"), body))?;
         let link = self.links.by_peer(&signer).filter(|l| l.own_pk() == pk)?;
         self.links.mark_seen(&link.id);
         Some(link)
@@ -170,6 +177,11 @@ async fn nearby(State(svc): State<LinkService>, request: axum::extract::Request)
         )
             .into_response(),
         Err(super::nearby::Refusal::Refused) => refused(),
+        Err(super::nearby::Refusal::Busy) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({ "error": "busy" })),
+        )
+            .into_response(),
     }
 }
 
@@ -200,7 +212,7 @@ async fn offer(
     Path(pk): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(link) = svc.authorized(&headers, "GET", &pk, "offer") else {
+    let Some(link) = svc.authorized(&headers, "GET", &pk, "offer", &[]) else {
         return refused();
     };
     // No name in any offer: a nearby peer gets none at all, other links got
@@ -233,7 +245,7 @@ async fn neighborhoods(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(link) = svc.authorized(&headers, "POST", &pk, "neighborhoods") else {
+    let Some(link) = svc.authorized(&headers, "POST", &pk, "neighborhoods", &body) else {
         return refused();
     };
     let Ok(change) = serde_json::from_slice::<Change>(&body) else {
@@ -287,8 +299,9 @@ async fn end(
     State(svc): State<LinkService>,
     Path(pk): Path<String>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
-    let Some(link) = svc.authorized(&headers, "POST", &pk, "end") else {
+    let Some(link) = svc.authorized(&headers, "POST", &pk, "end", &body) else {
         return refused();
     };
     svc.links.end(&link.id);
@@ -316,9 +329,15 @@ async fn relay(
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
     let rest = format!("relay?{}", query.unwrap_or_default());
-    let Some(link) = svc.authorized(&headers, "GET", &pk, &rest) else {
+    let Some(link) = svc.authorized(&headers, "GET", &pk, &rest, &[]) else {
         return refused();
     };
+    let Some(slot) = svc.links.relay_slot(&link.id) else {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many sockets").into_response();
+    };
+    let ws = ws
+        .max_message_size(MAX_RELAY_MESSAGE)
+        .max_frame_size(MAX_RELAY_MESSAGE);
     let Some(n) = NeighborhoodId::from_hex(&scope.n) else {
         return refused();
     };
@@ -328,7 +347,8 @@ async fn relay(
     if !link.neighborhoods.contains(&n) || !neighbors.carries(n) {
         return refused();
     }
-    ws.on_upgrade(move |socket| relay_session(socket, neighbors, link, n, scope.ttl))
+    let guard = SocketGuard::new(svc.links.clone(), slot);
+    ws.on_upgrade(move |socket| relay_session(socket, neighbors, link, n, scope.ttl, guard))
 }
 
 async fn relay_session(
@@ -337,6 +357,7 @@ async fn relay_session(
     link: Link,
     n: NeighborhoodId,
     ttl: u8,
+    mut guard: SocketGuard,
 ) {
     use axum::extract::ws::Message;
     use tokio::sync::broadcast::error::RecvError;
@@ -344,9 +365,26 @@ async fn relay_session(
     let mut open: BTreeMap<String, Vec<nostr::Filter>> = BTreeMap::new();
     let mut live = neighbors.live_events();
     loop {
+        let idle_at = guard.idle_at();
         let replies: Vec<serde_json::Value> = tokio::select! {
+            // The link ended or stopped carrying `n`: so does this socket.
+            still = guard.changed(&link.id, n) => {
+                if !still {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+                continue;
+            }
+            _ = tokio::time::sleep_until(idle_at), if open.is_empty() => {
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
             frame = socket.recv() => {
                 let Some(Ok(frame)) = frame else { return };
+                if !guard.on_frame(&link.id, n) {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
                 let Message::Text(text) = frame else {
                     continue;
                 };
@@ -364,8 +402,25 @@ async fn relay_session(
                             continue;
                         };
                         let id = event.id.to_hex();
-                        let took = neighbors.receive(n, event, &link.id, ttl).await;
-                        vec![serde_json::json!(["OK", id, took, ""])]
+                        // Only where this side offers relay writes.
+                        if !neighbors.offer(n).is_some_and(|o| o.relay_write) {
+                            vec![serde_json::json!([
+                                "OK", id, false, "restricted: no relay writes here"
+                            ])]
+                        } else {
+                            let took = neighbors.receive(n, event, &link.id, ttl).await;
+                            vec![serde_json::json!(["OK", id, took, ""])]
+                        }
+                    }
+                    Some("REQ") if !neighbors.offer(n).is_some_and(|o| o.relay_read) => {
+                        // Only where this side offers relay reads.
+                        let sub = msg.get(1).cloned().unwrap_or_default();
+                        if let Some(sub) = sub.as_str() {
+                            open.remove(sub);
+                        }
+                        vec![serde_json::json!([
+                            "CLOSED", sub, "restricted: no relay reads here"
+                        ])]
                     }
                     Some("REQ") => {
                         let sub = msg.get(1).cloned().unwrap_or_default();
@@ -398,11 +453,16 @@ async fn relay_session(
                 }
             }
             kept = live.recv(), if !open.is_empty() => match kept {
-                Ok((id, event)) if id == n && neighbors.link_may_see(&link.id, n, &event) => {
+                // Only what may be passed on: a push like a forward, which
+                // the peer keeps as pulled. And only while reads are offered.
+                Ok(kept)
+                    if neighbors.link_may_see(&link.id, n, &kept)
+                        && neighbors.offer(n).is_some_and(|o| o.relay_read) =>
+                {
                     let any = nostr::filter::MatchEventOptions::new();
                     open.iter()
-                        .filter(|(_, fs)| fs.iter().any(|f| f.match_event(&event, any)))
-                        .map(|(sub, _)| serde_json::json!(["EVENT", sub, event]))
+                        .filter(|(_, fs)| fs.iter().any(|f| f.match_event(&kept.event, any)))
+                        .map(|(sub, _)| serde_json::json!(["EVENT", sub, kept.event]))
                         .collect()
                 }
                 Ok(_) | Err(RecvError::Lagged(_)) => continue,
@@ -419,6 +479,72 @@ async fn relay_session(
 
 /// Most subscriptions one link relay connection keeps open.
 const MAX_OPEN_REQS: usize = 16;
+
+/// The largest message or frame a link relay socket reads.
+pub const MAX_RELAY_MESSAGE: usize = 64 * 1024;
+/// How long a link relay socket with no open subscription may sit with
+/// nothing from the peer before it is closed.
+pub const RELAY_IDLE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Sustained frames per second a peer may send on one relay socket, and the
+/// burst it may spend at once. Past it the socket is closed.
+const FRAMES_PER_SEC: f64 = 20.0;
+const FRAME_BURST: f64 = 100.0;
+
+/// What keeps one link relay socket honest: it holds one of its link's
+/// sockets ([`super::link::RelaySlot`]), lives only while the link carries
+/// its neighborhood, closes when idle, and paces the peer's frames.
+pub(crate) struct SocketGuard {
+    links: Arc<Links>,
+    changes: tokio::sync::watch::Receiver<u64>,
+    _slot: super::link::RelaySlot,
+    last_frame: tokio::time::Instant,
+    tokens: f64,
+    refilled: tokio::time::Instant,
+}
+
+impl SocketGuard {
+    fn new(links: Arc<Links>, slot: super::link::RelaySlot) -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            changes: links.watch(),
+            links,
+            _slot: slot,
+            last_frame: now,
+            tokens: FRAME_BURST,
+            refilled: now,
+        }
+    }
+
+    /// Waits for the links to change, then whether `link_id` still carries
+    /// `n`. `false` too when the links are gone.
+    async fn changed(&mut self, link_id: &str, n: NeighborhoodId) -> bool {
+        if self.changes.changed().await.is_err() {
+            return false;
+        }
+        self.links.carries(link_id, n)
+    }
+
+    /// When this socket counts as idle.
+    fn idle_at(&self) -> tokio::time::Instant {
+        self.last_frame + RELAY_IDLE
+    }
+
+    /// A frame came from the peer: whether to go on reading. Not when the
+    /// link no longer carries `n`, nor when the peer is over its pace.
+    fn on_frame(&mut self, link_id: &str, n: NeighborhoodId) -> bool {
+        let now = tokio::time::Instant::now();
+        self.last_frame = now;
+        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * FRAMES_PER_SEC).min(FRAME_BURST);
+        self.refilled = now;
+        if self.tokens < 1.0 {
+            tracing::debug!(link = %link_id, "link relay socket over its pace; closed");
+            return false;
+        }
+        self.tokens -= 1.0;
+        self.links.carries(link_id, n)
+    }
+}
 
 // --- link blobs -----------------------------------------------------------------
 
@@ -438,7 +564,7 @@ async fn blob(
     headers: HeaderMap,
 ) -> Response {
     let rest = format!("blob/{sha256}?{}", query.unwrap_or_default());
-    let Some(link) = svc.authorized(&headers, "GET", &pk, &rest) else {
+    let Some(link) = svc.authorized(&headers, "GET", &pk, &rest, &[]) else {
         return refused();
     };
     let Some(n) = NeighborhoodId::from_hex(&scope.n) else {
@@ -470,7 +596,7 @@ async fn blob_head(
     headers: HeaderMap,
 ) -> Response {
     let rest = format!("blob/{sha256}?{}", query.unwrap_or_default());
-    let Some(link) = svc.authorized(&headers, "HEAD", &pk, &rest) else {
+    let Some(link) = svc.authorized(&headers, "HEAD", &pk, &rest, &[]) else {
         return StatusCode::FORBIDDEN.into_response();
     };
     let Some(n) = NeighborhoodId::from_hex(&scope.n) else {
@@ -517,7 +643,7 @@ pub async fn keep_in_touch(links: Arc<Links>) {
                     return;
                 }
                 links.mark_seen(&link.id);
-                if let Ok(bytes) = resp.bytes().await {
+                if let Ok(bytes) = read_capped(resp, MAX_ANSWER).await {
                     if let Ok(offer) = serde_json::from_slice::<nostr::Event>(&bytes) {
                         links.update_offer(&link.id, offer);
                     }
@@ -527,20 +653,57 @@ pub async fn keep_in_touch(links: Arc<Links>) {
     }
 }
 
+/// The largest answer read from a peer's link service: an offer or a setup
+/// answer is a few signed events.
+pub const MAX_ANSWER: usize = 64 * 1024;
+
+/// A response's body, refused once it passes `limit` bytes: read as it
+/// streams, so a peer cannot make us hold more.
+pub(super) async fn read_capped(
+    mut resp: reqwest::Response,
+    limit: usize,
+) -> anyhow::Result<Vec<u8>> {
+    if resp.content_length().is_some_and(|n| n > limit as u64) {
+        anyhow::bail!("answer larger than {limit} bytes");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > limit {
+            anyhow::bail!("answer larger than {limit} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 // --- the joining side ----------------------------------------------------------
 
-/// The client a URL is reached with: the mesh for `.fips`, the internet
-/// otherwise.
+/// The client a URL is reached with: the mesh for `.fips` and mesh
+/// addresses, the internet otherwise. Either refuses what its reach does not
+/// cover (see [`crate::http`]).
 pub(super) fn client_for(url: &str) -> crate::http::HttpClient {
-    let host = reqwest::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
-        .unwrap_or_default();
-    if host.ends_with(".fips") {
+    let parsed = reqwest::Url::parse(url).ok();
+    let mesh = match parsed.as_ref().and_then(|u| u.host()) {
+        Some(nostr::types::url::Host::Domain(d)) => d.trim_end_matches('.').ends_with(".fips"),
+        Some(nostr::types::url::Host::Ipv6(v6)) => {
+            crate::http::is_mesh_address(std::net::IpAddr::V6(v6))
+        }
+        _ => false,
+    };
+    if mesh {
         crate::http::shared_mesh()
     } else {
         crate::http::shared_internet()
     }
+}
+
+/// Whether a link URL a peer handed us may be dialled at all: a mesh peer or
+/// a public host (see [`crate::http::may_dial_peer`]).
+fn dialable(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .map_err(|e| e.to_string())
+        .and_then(|u| crate::http::may_dial_peer(&u))
+        .is_ok()
 }
 
 /// Join a link from a scanned [`LinkOffer`], accepting `accept` of its
@@ -558,6 +721,10 @@ pub async fn join(
         else {
             anyhow::bail!("the invitation has expired");
         };
+        if !dialable(url) {
+            last = anyhow::anyhow!("{url}: not dialled");
+            continue;
+        }
         let sent = match client_for(url).post(&format!("{url}/setup")) {
             Ok(req) => {
                 req.header("content-type", "application/json")
@@ -572,7 +739,8 @@ pub async fn join(
         };
         match sent {
             Ok(resp) if resp.status().is_success() => {
-                let response: SetupResponse = serde_json::from_slice(&resp.bytes().await?)?;
+                let response: SetupResponse =
+                    serde_json::from_slice(&read_capped(resp, MAX_ANSWER).await?)?;
                 return links
                     .finish(joining, &response)
                     .map_err(|why| anyhow::anyhow!("their answer was not valid: {why:?}"));
@@ -599,9 +767,14 @@ pub async fn call(
         .filter(|s| s.kind == "link")
         .map(|s| s.url)
         .collect();
+    let body = body.map(|b| serde_json::to_vec(&b)).transpose()?;
     let mut last = anyhow::anyhow!("the peer offers no link URL");
     for base in urls {
         let url = format!("{base}/{rest}");
+        if !dialable(&url) {
+            last = anyhow::anyhow!("{url}: not dialled");
+            continue;
+        }
         let req = match client_for(&url).request(method.clone(), &url) {
             Ok(req) => req,
             Err(e) => {
@@ -609,11 +782,15 @@ pub async fn call(
                 continue;
             }
         };
-        let req = req.header("authorization", http_auth(&keys, method.as_str(), &url));
+        let signed = body.as_deref().unwrap_or_default();
+        let req = req.header(
+            "authorization",
+            http_auth(&keys, method.as_str(), &url, signed),
+        );
         let req = match &body {
             Some(b) => req
                 .header("content-type", "application/json")
-                .body(serde_json::to_vec(b)?),
+                .body(b.clone()),
             None => req,
         };
         match req.send().await {
@@ -744,7 +921,7 @@ mod tests {
         let url = format!("{BASE}{path}");
         let signed = |keys: &nostr::Keys| {
             Request::get(&path)
-                .header("authorization", http_auth(keys, "GET", &url))
+                .header("authorization", http_auth(keys, "GET", &url, b""))
                 .body(Body::empty())
                 .unwrap()
         };
@@ -773,7 +950,12 @@ mod tests {
             add: vec![club.clone()],
             remove: vec![home.id],
         };
-        let auth = http_auth(&bob.keys(), "POST", &url);
+        let auth = http_auth(
+            &bob.keys(),
+            "POST",
+            &url,
+            &serde_json::to_vec(&change).unwrap(),
+        );
         let (status, body) = send(&svc, post_json(&path, &change, Some(auth))).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let changed: Changed = serde_json::from_value(body).unwrap();
@@ -792,7 +974,8 @@ mod tests {
             add: Vec::new(),
             remove: vec![home.id],
         };
-        let auth = http_auth(&bob.keys(), "POST", &format!("{BASE}{path}"));
+        let body = serde_json::to_vec(&change).unwrap();
+        let auth = http_auth(&bob.keys(), "POST", &format!("{BASE}{path}"), &body);
         let (status, _) = send(&svc, post_json(&path, &change, Some(auth))).await;
         assert_eq!(status, StatusCode::OK);
         assert!(svc.links.all().is_empty(), "nothing shared, so no link");
@@ -803,7 +986,7 @@ mod tests {
         let svc = service();
         let bob = linked(&svc, &home()).await;
         let path = format!("/nh/{}/end", bob.peer);
-        let auth = http_auth(&bob.keys(), "POST", &format!("{BASE}{path}"));
+        let auth = http_auth(&bob.keys(), "POST", &format!("{BASE}{path}"), b"");
         let req = Request::post(&path)
             .header("authorization", auth)
             .body(Body::empty())

@@ -76,7 +76,7 @@ async fn device_with(direct: Arc<dyn DirectPeers>, connect_info: bool) -> Device
         Seams {
             peers: Arc::new(super::LinkPeers(Some(links.clone()))),
             asker: Arc::new(Yes),
-            scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
+            scoped_stores: Arc::new(crate::neighbor::data::MemStores::default()),
             scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             links: Some(links.clone()),
         },
@@ -633,9 +633,11 @@ async fn a_napplet_held_but_never_pushed_is_exposed_where_updates_are_sent() {
         .files(&[("/index.html", b"<!doctype html><p>not here</p>".as_slice())])
         .build();
     relay.publish(missing.manifest.clone()).await.unwrap();
-    alice
-        .neighbors
-        .set_held(super::updates::HeldNapplets { relay, blobs });
+    alice.neighbors.set_held(super::updates::HeldNapplets {
+        relay,
+        blobs,
+        installed: installed(&[&held.manifest, &missing.manifest]),
+    });
 
     let napplets = vec![Filter::new().kinds([
         Kind::from(myco_napplet_runtime::KIND_ROOT),
@@ -649,7 +651,7 @@ async fn a_napplet_held_but_never_pushed_is_exposed_where_updates_are_sent() {
         .unwrap();
     let mut got = Vec::new();
     for _ in 0..100 {
-        got = bob.neighbors.link_backlog(id, &napplets).await;
+        got = bob.neighbors.kept(id, &napplets).await;
         if got.iter().any(|e| e.id == held.manifest.id) {
             break;
         }
@@ -1004,8 +1006,11 @@ async fn hold_napplet(dev: &Device) -> nostr::Event {
     for (_, bytes) in &held.blobs {
         blobs.put(bytes).await.unwrap();
     }
-    dev.neighbors
-        .set_held(super::updates::HeldNapplets { relay, blobs });
+    dev.neighbors.set_held(super::updates::HeldNapplets {
+        relay,
+        blobs,
+        installed: installed(&[&held.manifest]),
+    });
     held.manifest
 }
 
@@ -1077,4 +1082,357 @@ async fn around_you_open_before_a_peer_comes_in_reach_sees_its_napplets() {
         arrives(&mut feed, held.id).await,
         "answerer sees dialer's napplet"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_links_relay_sockets_are_capped_and_close_when_the_link_ends() {
+    use futures_util::StreamExt as _;
+    let (alice, bob, _, _) = linked_club().await;
+    let id = club_id(&alice);
+    let link = bob.svc.links.all().remove(0);
+    let url = super::wire::scoped(&super::wire::relay_urls(&link)[0], id, 0);
+    let mut sockets = Vec::new();
+    for _ in 0..super::link::MAX_RELAY_SOCKETS {
+        sockets.push(super::wire::open(&link, &url).await.unwrap());
+    }
+    assert!(
+        super::wire::open(&link, &url).await.is_err(),
+        "one socket too many is refused"
+    );
+    // Alice ends the link on her side: every socket closes, without waiting
+    // for the peer to say anything.
+    let theirs = alice.svc.links.all().remove(0);
+    assert!(alice.svc.links.end(&theirs.id));
+    for mut ws in sockets {
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => return,
+                    Some(Ok(m)) if m.is_close() => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the socket closed with the link");
+    }
+}
+
+// --- What a peer is given -------------------------------------------------------
+
+/// The napplet slots of `manifests`, as the Library would list them.
+fn installed(manifests: &[&nostr::Event]) -> super::updates::Installed {
+    let slots: Vec<(nostr::PublicKey, Option<String>)> = manifests
+        .iter()
+        .map(|m| {
+            let parsed = myco_napplet_runtime::NappletManifest::from_event((*m).clone()).unwrap();
+            (parsed.author, parsed.d_tag)
+        })
+        .collect();
+    Arc::new(move || slots.clone())
+}
+
+/// Alice — Bob — Carol in one Club: Bob linked to both, Alice and Carol not
+/// to each other. Alice's address and Carol's.
+async fn chain() -> (Device, Device, Device, String, String) {
+    let (alice, bob, carol) = (device().await, device().await, device().await);
+    let a = club(&alice).await;
+    join_club(&alice, &bob).await;
+    let c = join_club(&bob, &carol).await;
+    (alice, bob, carol, a, c)
+}
+
+/// Whether `text` is kept in `n`'s own view on this device, within a few
+/// seconds.
+async fn kept_here(n: &Neighbors, id: super::id::NeighborhoodId, text: &str) -> bool {
+    for _ in 0..100 {
+        if n.kept(id, &kind1()).await.iter().any(|e| e.content == text) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// The texts `feed` brings until `stop` comes (or 10 s pass).
+async fn until(feed: &mut myco_napplet_runtime::nap::neighbor::Feed, stop: &str) -> Vec<String> {
+    use futures_util::StreamExt as _;
+    let mut seen: Vec<String> = feed.backlog.iter().map(|e| e.content.clone()).collect();
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while !seen.iter().any(|s| s == stop) {
+            match feed.live.next().await {
+                Some(e) => seen.push(e.content),
+                None => return,
+            }
+        }
+    })
+    .await;
+    seen
+}
+
+/// Bob holds `marker` as his own; Carol's subscription on Bob is open once
+/// it has come. Returns her feed.
+async fn carol_listens(
+    bob: &Device,
+    carol: &Device,
+    carol_addr: &str,
+) -> myco_napplet_runtime::nap::neighbor::Feed {
+    let id = club_id(bob);
+    bob.neighbors
+        .scoped
+        .add_shared(id, note("marker"))
+        .await
+        .unwrap();
+    let mut feed = carol
+        .neighbors
+        .subscribe(&app(), carol_addr, kind1())
+        .await
+        .unwrap();
+    assert!(
+        until(&mut feed, "marker")
+            .await
+            .iter()
+            .any(|s| s == "marker"),
+        "Carol follows Bob"
+    );
+    feed
+}
+
+/// Close (one hop, nothing passed on): Alice's post reaches Bob, and Bob
+/// gives it to nobody — not in a backlog, not following an open `REQ`.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_a_post_stops_at_the_next_device() {
+    let (alice, bob, carol, alice_addr, carol_addr) = chain().await;
+    let id = club_id(&alice);
+    for d in [&alice, &bob, &carol] {
+        d.neighbors.set_policy(id, 1, 1, false);
+    }
+    let mut feed = carol_listens(&bob, &carol, &carol_addr).await;
+
+    alice
+        .neighbors
+        .publish(&app(), &alice_addr, note("from alice"))
+        .await
+        .unwrap();
+    assert!(
+        kept_here(&bob.neighbors, id, "from alice").await,
+        "Bob has it"
+    );
+    // Bob's own post after it, on the same open REQ: once it is in, Alice's
+    // would have been too.
+    bob.neighbors
+        .scoped
+        .add_shared(id, note("after"))
+        .await
+        .unwrap();
+    let seen = until(&mut feed, "after").await;
+    assert!(seen.iter().any(|s| s == "after"), "{seen:?}");
+    assert!(
+        !seen.iter().any(|s| s == "from alice"),
+        "not live through Bob: {seen:?}"
+    );
+    assert!(
+        !bob.neighbors
+            .link_backlog(id, &kind1())
+            .await
+            .iter()
+            .any(|e| e.content == "from alice"),
+        "not in Bob's backlog"
+    );
+    assert!(!carol
+        .neighbors
+        .kept(id, &kind1())
+        .await
+        .iter()
+        .any(|e| e.content == "from alice"));
+}
+
+/// Wide (the default: three hops, passed on): Alice's post reaches Carol
+/// through Bob, and Bob serves it to anyone asking. What Carol only pulled
+/// she passes on to nobody.
+#[tokio::test(flavor = "multi_thread")]
+async fn wide_a_post_travels_on_within_its_hops() {
+    let (alice, bob, carol, alice_addr, carol_addr) = chain().await;
+    let id = club_id(&alice);
+    let mut feed = carol_listens(&bob, &carol, &carol_addr).await;
+    alice
+        .neighbors
+        .publish(&app(), &alice_addr, note("from alice"))
+        .await
+        .unwrap();
+    let seen = until(&mut feed, "from alice").await;
+    assert!(seen.iter().any(|s| s == "from alice"), "{seen:?}");
+    assert!(
+        bob.neighbors
+            .link_backlog(id, &kind1())
+            .await
+            .iter()
+            .any(|e| e.content == "from alice"),
+        "in Bob's backlog"
+    );
+    let pulled = carol
+        .neighbors
+        .kept(id, &kind1())
+        .await
+        .into_iter()
+        .find(|e| e.content == "marker")
+        .unwrap();
+    assert!(!carol
+        .neighbors
+        .link_backlog(id, &kind1())
+        .await
+        .iter()
+        .any(|e| e.id == pulled.id));
+}
+
+/// With an extension's sharing off, its events leave this device by no path.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_extension_not_shared_is_not_forwarded_followed_or_served() {
+    use super::extensions::NSITE_UPDATES;
+    let (alice, bob, alice_addr, bob_addr) = linked_club().await;
+    let id = club_id(&alice);
+    alice
+        .neighbors
+        .set_extension(id, NSITE_UPDATES, true, false);
+    let site = EventBuilder::new(Kind::from(nsite_deck::KIND_NAMED), "")
+        .tags([nostr::Tag::identifier("blog")])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let both = vec![
+        Filter::new().kind(Kind::TextNote),
+        Filter::new().kind(Kind::from(nsite_deck::KIND_NAMED)),
+    ];
+    alice
+        .neighbors
+        .scoped
+        .add_shared(id, note("marker"))
+        .await
+        .unwrap();
+    let mut feed = bob
+        .neighbors
+        .subscribe(&app(), &bob_addr, both.clone())
+        .await
+        .unwrap();
+    assert!(until(&mut feed, "marker")
+        .await
+        .iter()
+        .any(|s| s == "marker"));
+
+    // Published (forwarded, and live on Bob's REQ), then a note after it on
+    // the same REQ.
+    alice
+        .neighbors
+        .publish(&app(), &alice_addr, site.clone())
+        .await
+        .unwrap();
+    alice
+        .neighbors
+        .scoped
+        .add_shared(id, note("after"))
+        .await
+        .unwrap();
+    assert!(until(&mut feed, "after").await.iter().any(|s| s == "after"));
+    assert!(bob
+        .neighbors
+        .kept(id, &both)
+        .await
+        .iter()
+        .all(|e| e.id != site.id));
+    assert!(alice
+        .neighbors
+        .link_backlog(id, &both)
+        .await
+        .iter()
+        .all(|e| e.id != site.id));
+    // Sharing on again: served.
+    alice.neighbors.set_extension(id, NSITE_UPDATES, true, true);
+    assert!(alice
+        .neighbors
+        .link_backlog(id, &both)
+        .await
+        .iter()
+        .any(|e| e.id == site.id));
+}
+
+/// An offer without relay reads refuses a peer's `REQ`; one without relay
+/// writes refuses its `EVENT`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_offer_decides_whether_peers_read_and_write() {
+    use myco_napplet_runtime::nap::neighbor::Offer;
+    let (alice, bob, _, _) = linked_club().await;
+    let id = club_id(&alice);
+    alice
+        .neighbors
+        .scoped
+        .add_shared(id, note("held"))
+        .await
+        .unwrap();
+    assert_eq!(bob.neighbors.ask_links(id, &kind1()).await.len(), 1);
+    let link = bob.svc.links.carrying(id).remove(0);
+    let token = alice.neighbors.list(&app()).await.remove(0).id;
+
+    let writes_only = Offer {
+        relay_write: true,
+        ..Offer::default()
+    };
+    alice
+        .neighbors
+        .set_offer(&app(), &token, writes_only)
+        .await
+        .unwrap();
+    assert!(
+        bob.neighbors.ask_links(id, &kind1()).await.is_empty(),
+        "no reads"
+    );
+    assert!(super::wire::send(&link, id, 0, &note("in")).await.unwrap());
+
+    let reads_only = Offer {
+        relay_read: true,
+        ..Offer::default()
+    };
+    alice
+        .neighbors
+        .set_offer(&app(), &token, reads_only)
+        .await
+        .unwrap();
+    assert!(
+        !super::wire::send(&link, id, 0, &note("refused"))
+            .await
+            .unwrap(),
+        "no writes"
+    );
+    assert!(!alice
+        .neighbors
+        .kept(id, &kind1())
+        .await
+        .iter()
+        .any(|e| e.content == "refused"));
+    assert!(!bob.neighbors.ask_links(id, &kind1()).await.is_empty());
+}
+
+/// A napplet only cached here, not in the Library, is not exposed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_napplet_not_installed_is_not_exposed() {
+    use nsite_deck::{BlobStore as _, RelayBackend as _};
+    let (alice, _bob, _, _) = linked_club().await;
+    let id = club_id(&alice);
+    let held = myco_napplet_runtime::testing::build_test_napplet();
+    let relay = Arc::new(nsite_deck::testing::MemRelay::new());
+    let blobs = Arc::new(nsite_deck::testing::MemBlobs::new());
+    relay.publish(held.manifest.clone()).await.unwrap();
+    for (_, bytes) in &held.blobs {
+        blobs.put(bytes).await.unwrap();
+    }
+    alice.neighbors.set_held(super::updates::HeldNapplets {
+        relay,
+        blobs,
+        installed: installed(&[]),
+    });
+    assert!(alice
+        .neighbors
+        .link_backlog(id, &napplet_kinds())
+        .await
+        .is_empty());
+    let (sha, _) = held.blobs[0].clone();
+    assert_eq!(alice.neighbors.link_blob(id, &sha).await, None);
 }

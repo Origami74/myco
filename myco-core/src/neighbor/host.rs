@@ -88,7 +88,7 @@ pub struct Seams {
     pub peers: Arc<dyn PeerDirectory>,
     pub asker: Arc<dyn Asker>,
     /// Where neighborhood events are stored.
-    pub scoped_store: Arc<dyn nsite_deck::RelayBackend>,
+    pub scoped_stores: Arc<dyn super::data::EventStores>,
     /// Where their blobs are stored.
     pub scoped_blobs: Arc<dyn nsite_deck::BlobStore>,
     /// Links, if this device has them.
@@ -120,11 +120,7 @@ impl Neighbors {
             store: Mutex::new(s),
             peers: seams.peers,
             asker: seams.asker,
-            scoped: Arc::new(super::data::Scoped::open(
-                data_dir,
-                seams.scoped_store,
-                seams.scoped_blobs,
-            )),
+            scoped: super::data::Scoped::open(data_dir, seams.scoped_stores, seams.scoped_blobs),
             links: seams.links,
             on_update: std::sync::OnceLock::new(),
             held: std::sync::OnceLock::new(),
@@ -327,11 +323,19 @@ impl Neighbors {
         if id == super::nearby::id() {
             return false;
         }
-        self.change(|s| {
+        let known = self.change(|s| {
             let before = s.neighborhoods.len();
             s.neighborhoods.retain(|r| r.id != id);
             s.neighborhoods.len() != before
-        })
+        });
+        // Its content goes too, off this thread.
+        if known {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let scoped = self.scoped.clone();
+                handle.spawn(async move { scoped.forget(id).await });
+            }
+        }
+        known
     }
 
     /// Set how far a neighborhood pushes uploaded blobs. The Neighbors tab's.
@@ -377,12 +381,30 @@ fn keep_nearby(s: &mut Store) -> bool {
         s.neighborhoods.retain(|r| r.id != id);
         true
     } else if !s.nearby_off && !here {
-        s.neighborhoods
-            .insert(0, Record::new(id, super::nearby::NAME, true));
+        s.neighborhoods.insert(0, nearby_record());
+        true
+    } else if let Some(r) = s
+        .get_mut(id)
+        .filter(|r| r.policy == store::Policy::default())
+    {
+        // Written before `nearby` had its own reach: the general default
+        // then, never the user's choice.
+        r.policy = nearby_record().policy;
         true
     } else {
         false
     }
+}
+
+/// The `nearby` neighborhood as the runtime starts it. Everyone in reach is
+/// a stranger, so its reach is narrow: a publish goes to those in reach and
+/// no further, and nothing from others is passed on. Extensions are shared
+/// (what "Around you" shows is what devices in reach hold).
+fn nearby_record() -> Record {
+    let mut r = Record::new(super::nearby::id(), super::nearby::NAME, true);
+    r.policy.publish_hops = 1;
+    r.policy.pass_on = false;
+    r
 }
 
 /// Whether `new` offers anything `old` doesn't.
@@ -495,10 +517,6 @@ impl NeighborHost for Neighbors {
     ) -> Result<(), NeighborError> {
         let key = napplet_key(napplet);
         let record = self.granted(&key, neighborhood)?;
-        // The user turns Nearby off in the shell; a napplet can't.
-        if record.id == super::nearby::id() {
-            return Err(NeighborError::Unsupported);
-        }
         let ask = Ask::Leave {
             napplet: key,
             name: record.name.clone(),
@@ -506,7 +524,14 @@ impl NeighborHost for Neighbors {
         if !self.asker.confirm(ask).await {
             return Err(NeighborError::Cancelled);
         }
+        // Leaving `nearby` is turning Nearby off, as the shell's switch does
+        // (the link service ends its links on its next tick).
+        if record.id == super::nearby::id() {
+            self.set_nearby(false);
+            return Ok(());
+        }
         self.change(|s| s.neighborhoods.retain(|r| r.id != record.id));
+        self.forget_content(record.id).await;
         Ok(())
     }
 
@@ -632,7 +657,7 @@ mod tests {
         Seams {
             peers,
             asker,
-            scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
+            scoped_stores: Arc::new(crate::neighbor::data::MemStores::default()),
             scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             links: None,
         }
@@ -910,7 +935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_napplet_cannot_create_invite_set_the_offer_of_or_leave_nearby() {
+    async fn a_napplet_cannot_create_invite_or_set_the_offer_of_nearby() {
         let (n, asker, _) = open(true);
         n.set_nearby(true);
         let nearby = n.list(&app("chat")).await.remove(0);
@@ -933,10 +958,6 @@ mod tests {
                 .unwrap_err(),
             NeighborError::Unsupported
         );
-        assert_eq!(
-            n.leave(&app("chat"), &nearby.id).await.unwrap_err(),
-            NeighborError::Unsupported
-        );
         assert!(asker.1.lock().unwrap().is_empty(), "nobody was asked");
         assert!(n.nearby_on());
         // Nor the shell's leave or rename.
@@ -945,5 +966,41 @@ mod tests {
         assert_eq!(n.records()[0].name, "nearby");
         // A neighborhood the user made called "nearby" is just a neighborhood.
         assert!(n.create(&app("chat"), new("nearby", false)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_napplet_leaving_nearby_turns_it_off_once_the_user_agrees() {
+        let (n, asker, _) = open(false);
+        n.set_nearby(true);
+        let nearby = n.list(&app("chat")).await.remove(0);
+        assert_eq!(
+            n.leave(&app("chat"), &nearby.id).await.unwrap_err(),
+            NeighborError::Cancelled
+        );
+        assert!(n.nearby_on(), "declined: still on");
+        asker.0.store(true, Ordering::Relaxed);
+        n.leave(&app("chat"), &nearby.id).await.unwrap();
+        assert!(matches!(
+            asker.1.lock().unwrap().last(),
+            Some(Ask::Leave { name, .. }) if name == "nearby"
+        ));
+        assert!(!n.nearby_on());
+        assert!(n.records().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nearby_reaches_only_those_in_reach_and_passes_nothing_on() {
+        let (n, _, d) = open(true);
+        n.set_nearby(true);
+        let policy = n.records()[0].policy.clone();
+        assert_eq!((policy.publish_hops, policy.pass_on), (1, false));
+        assert!(policy.shares(super::super::extensions::NAPPLET_UPDATES));
+        // A record written with the general default is narrowed on open.
+        let mut s = store::load(&store::path(&d));
+        s.neighborhoods[0].policy = store::Policy::default();
+        store::save(&store::path(&d), &s).unwrap();
+        let asker = Arc::new(Answer(AtomicBool::new(true), Mutex::new(Vec::new())));
+        let again = Neighbors::open(&d, seams(Arc::new(Fixed(Vec::new())), asker));
+        assert_eq!(again.records()[0].policy, policy);
     }
 }
