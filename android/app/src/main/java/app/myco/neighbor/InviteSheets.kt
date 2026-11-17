@@ -248,81 +248,6 @@ fun InviteSheet(
 }
 
 /**
- * **Join a neighborhood** — the "Add an app" sheet's shape: a live scanner,
- * tap a friend's phone, or paste an invitation. Whatever arrives goes
- * through [onScanned] (MainActivity's one router for `myco://` codes), which
- * opens the confirm sheet.
- */
-@Composable
-private fun InviteChoiceRow(name: String, picked: Boolean, onToggle: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        border = if (picked) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
-        modifier = Modifier
-            .fillMaxWidth()
-            .toggleable(value = picked, role = Role.Checkbox, onValueChange = { onToggle() }),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp).height(60.dp),
-        ) {
-            Checkbox(checked = picked, onCheckedChange = null)
-            Spacer(Modifier.size(12.dp))
-            Text(
-                name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = if (picked) FontWeight.Bold else FontWeight.Normal,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                if (picked) "Inviting" else "Not included",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun JoinSheet(onScanned: (String) -> Unit, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    DisposableEffect(Unit) {
-        NfcReader.begin()
-        onDispose { NfcReader.stop() }
-    }
-    // An invitation read by NFC lands in MainActivity, not here: close when
-    // one is waiting to be confirmed.
-    val incoming = IncomingInvite.pending.value
-    LaunchedEffect(incoming) { if (incoming != null) onDismiss() }
-    val take: (String) -> Unit = { text ->
-        if (InvitePreview.read(text) != null) {
-            onScanned(text)
-        } else {
-            Toast.makeText(context, "That isn't a neighborhood invitation", Toast.LENGTH_SHORT).show()
-        }
-    }
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text("Join a neighborhood", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            Box(modifier = Modifier.fillMaxWidth().height(300.dp)) {
-                ScanPanel(onScanned = take)
-            }
-            Spacer(Modifier.height(12.dp))
-            TapCard("Or tap a friend's phone", "Hold the backs together to join")
-            Spacer(Modifier.height(12.dp))
-            PasteCodeButton(label = "Paste an invitation", onPaste = take)
-        }
-    }
-}
-
-/**
  * The invitation that just arrived: who it's from and which neighborhoods
  * it carries, each kept or not, then Join.
  */
@@ -424,6 +349,37 @@ private fun TapCard(title: String, subtitle: String) {
                 Text(title, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleSmall)
                 Text(subtitle, color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.bodySmall)
             }
+        }
+    }
+}
+
+@Composable
+private fun InviteChoiceRow(name: String, picked: Boolean, onToggle: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        border = if (picked) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(value = picked, role = Role.Checkbox, onValueChange = { onToggle() }),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp).height(60.dp),
+        ) {
+            Checkbox(checked = picked, onCheckedChange = null)
+            Spacer(Modifier.size(12.dp))
+            Text(
+                name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (picked) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                if (picked) "Inviting" else "Not included",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

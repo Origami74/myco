@@ -313,11 +313,7 @@ fun AppsScreen(
     }
 
     if (showAdd) {
-        AddAppSheet(
-            siteCount = state.sites.size,
-            onScanned = { showAdd = false; onScanned(it) },
-            onDismiss = { showAdd = false },
-        )
+        ScanSheet(state = state, onScanned = onScanned, onDismiss = { showAdd = false })
     }
 
     // Review is driven by state, not by a local flag: a fetch may finish while
@@ -1496,69 +1492,6 @@ private fun ShareQrSheet(target: ShareTarget, onDismiss: () -> Unit) {
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * **Add an app** — a bottom sheet mirroring the share sheet, but with a live
- * camera scanner in place of the QR (you're the one reading a friend's code).
- * A scan, a pasted link, or an NFC tap (handled passively by the OS) all route
- * through [onScanned] → MainActivity.handleScannedText.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AddAppSheet(siteCount: Int, onScanned: (String) -> Unit, onDismiss: () -> Unit) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    // Claim foreground NFC reader mode while we're up — a modal sheet's own window
-    // misses the OS's passive tap dispatch, so the Activity reads the tag directly.
-    DisposableEffect(Unit) {
-        NfcReader.begin()
-        onDispose { NfcReader.stop() }
-    }
-    // A camera scan routes through onScanned (which dismisses us); an NFC tap is read
-    // into MainActivity — either way close the sheet when a new app shows up, to
-    // reveal it downloading in the grid behind us.
-    val baselineSites = remember { siteCount }
-    LaunchedEffect(siteCount) {
-        if (siteCount > baselineSites) onDismiss()
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text("Add an app", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            Box(modifier = Modifier.fillMaxWidth().height(300.dp)) {
-                ScanPanel(onScanned = onScanned)
-            }
-            Spacer(Modifier.height(12.dp))
-            // Same breathing NFC bubble as the share sheet — here you're the reader.
-            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    NfcPulseBubble(size = 44.dp)
-                    Column {
-                        Text(
-                            "Or tap a friend's phone",
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            style = MaterialTheme.typography.titleSmall,
-                        )
-                        Text(
-                            "Hold the backs together to add their app",
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            PasteCodeButton(label = "Paste a link", onPaste = onScanned)
         }
     }
 }

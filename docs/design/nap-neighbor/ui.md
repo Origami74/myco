@@ -55,6 +55,8 @@ Apps · Neighbors · Settings · Dev.
 
 ## Join
 
+- The scan sheet, the same one Apps opens to add an app: it takes an
+  invitation or an app share and the shell routes each.
 - Scan a QR, tap phones, or open a `https://napplet.link/neighborhood/join?invite=…` link.
 - Shows who is inviting and to which neighborhoods. Pick which to accept.
 - A **Not private** note: people in a neighborhood can pass posts on.

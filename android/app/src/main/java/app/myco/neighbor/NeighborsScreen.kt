@@ -212,7 +212,7 @@ fun NeighborsScreen(
         InviteSheet(state = state, client = client, preselect = emptyList(), onDismiss = { inviting = false })
     }
     if (joining) {
-        JoinSheet(onScanned = onScanned, onDismiss = { joining = false })
+        app.myco.ui.screens.ScanSheet(state = state, onScanned = onScanned, onDismiss = { joining = false })
     }
     nh.peers.firstOrNull { it.key == person }?.let { p ->
         PersonSheet(p, nh, client, onDismiss = { person = null })
