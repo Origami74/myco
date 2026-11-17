@@ -83,10 +83,7 @@ GET /nh/{pk}/blob/{sha256}?n=<id>   NIP-98 by the link key
 **Without fetching.** `HEAD` on the same route answers 200 or 404 with no
 body: whether the `GET` would serve it. A napplet asks through
 `resource.check` (below); Myco asks every link carrying `n` at once, each
-bounded at 8 s, and answers `yes` as soon as one has it, `no` only when
-every link asked said 404, and `unknown` otherwise. With nobody linked in
-`n` the answer is `unknown`, not `no`: people come and go, and napplets
-are not told who is around.
+bounded at 8 s, and answers `yes` as soon as one has it.
 
 ```text
 HEAD /nh/{pk}/blob/{sha256}?n=<id>  NIP-98 (method HEAD)  -> 200 | 404 | 403

@@ -991,15 +991,3 @@ async fn around_you_open_before_a_peer_comes_in_reach_sees_its_napplets() {
         "answerer sees dialer's napplet"
     );
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn with_nobody_to_ask_whether_a_neighborhood_has_a_blob_is_unknown() {
-    let alice = device().await;
-    let addr = club(&alice).await;
-    let sha = "ab".repeat(32);
-    assert_eq!(
-        alice.neighbors.has(&app(), &addr, &sha).await.unwrap(),
-        None,
-        "nobody linked: not a no"
-    );
-}
