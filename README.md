@@ -78,9 +78,10 @@ Myco lets them hand it to you in person.**
    *other* apps on your phone reach the mesh too, turn on **Settings › Mesh ›
    Allow other apps to use mesh**. That one does use Android's VPN slot.
 
-   Then check your name — the phone's own name is filled in; edit it right
-   there if you like, and tap **Use this name**. It is what the people you
-   invite, or who invite you, see. It is never broadcast over Bluetooth. The **camera** is asked for only when you scan a code.
+   Myco gives you a generated name, like "teal juno". It is what the people
+   you invite see; change it in **Settings** if you like. It is never
+   broadcast over Bluetooth, and phones that meet nearby never see it. The
+   **camera** is asked for only when you scan a code.
    **Notifications** are optional: turn them on in **Settings › Permissions**.
 3. **Join their neighborhood**, in the **Neighbors** tab. They tap
    **Invite**; you tap **Join** and scan the code on their screen, or hold

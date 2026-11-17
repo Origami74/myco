@@ -1371,12 +1371,6 @@ impl AppRuntime {
                 self.set_nearby(enabled);
                 self.rev += 1;
             }
-            NativeAppAction::SetNearbyName { name } => {
-                if let Some(svc) = &self.link_service {
-                    svc.nearby.set_name(Some(name));
-                }
-                // Nothing on screen changes.
-            }
             NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
                 if let (Some(n), Some(id)) = (
                     self.neighbors(),
@@ -1398,6 +1392,17 @@ impl AppRuntime {
             let _ = self.napplet_context();
         }
         self.neighbors.clone()
+    }
+
+    /// The node stops or starts: nearby starts over, every ephemeral link
+    /// gone. Peers are not told; they drop the link once it stays silent.
+    fn forget_nearby(&self) {
+        if let Some(svc) = &self.link_service {
+            let ended = crate::neighbor::nearby::end_all(svc);
+            if !ended.is_empty() {
+                tracing::info!(links = ended.len(), "node cycled: nearby forgotten");
+            }
+        }
     }
 
     /// Turn Nearby on or off. Off forgets the `nearby` neighborhood and
@@ -2708,6 +2713,7 @@ impl AppRuntime {
             return;
         }
         self.start_pending = false;
+        self.forget_nearby();
         // Rebuild the node if a prior stop consumed it (BLE toggled off then on).
         // A capability report that arrived since the last build is picked up
         // here — this is the "next node start" the Aware pool is resized at.
@@ -2858,6 +2864,7 @@ impl AppRuntime {
     fn stop_node(&mut self) {
         // An explicit stop cancels a start that was queued behind an earlier one.
         self.start_pending = false;
+        self.forget_nearby();
         // Ask the rx loop to drain. Dropping the sender would do it too; sending
         // says so explicitly, and a closed receiver just means the task is
         // already on its way out.

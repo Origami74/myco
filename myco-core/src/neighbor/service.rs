@@ -195,15 +195,9 @@ async fn offer(
     let Some(link) = svc.authorized(&headers, "GET", &pk, "offer") else {
         return refused();
     };
-    // A nearby peer knows us only by what the offer says, so its offer
-    // keeps carrying our name; other links got it in the invitation.
-    let name = link.ephemeral.as_ref().and_then(|_| svc.nearby.name());
-    axum::Json(super::link::sign_offer(
-        &link.keys(),
-        &svc.offer(&pk),
-        name.as_deref(),
-    ))
-    .into_response()
+    // No name in any offer: a nearby peer gets none at all, other links got
+    // it in the invitation.
+    axum::Json(super::link::sign_offer(&link.keys(), &svc.offer(&pk), None)).into_response()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

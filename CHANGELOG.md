@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **No name step in setup.** Myco uses its generated name (like "teal
+  juno") until you set one in Settings. The phone's own name is no longer
+  the default: it often carries a real name.
+- **Nearby is anonymous.** Phones that meet nearby never see a name, and
+  nearby starts over (every nearby link and what it knew, forgotten) as
+  soon as nobody is in reach, and when the mesh is turned off or on.
+
 ### Fixed
 
 - **A neighborhood subscription follows people as they come and go.** It

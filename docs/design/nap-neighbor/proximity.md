@@ -67,6 +67,10 @@ A link set up without a secret, for one encounter.
 - **When it ends.** About 5 minutes after the peer stops being direct.
   Also when the peer is in reach but stops answering for 2 minutes (it
   restarted and forgot the link); it is then set up afresh.
+- **Forgotten, all at once,** as soon as nobody is directly in reach, and
+  whenever the node stops or starts. Every ephemeral link ends, with
+  everything nearby knew about it; the peers are not told. The next
+  meeting is between strangers, on fresh link keys.
 - **Not kept.** Ephemeral links are dropped when Myco starts.
 - **Presence** works as on any link: the 30 s offer check makes "Here now".
 
@@ -80,12 +84,12 @@ POST http://<server npub>.fips:4873/nh/nearby
 Authorization: Nostr <NIP-98 over this URL, signed by the caller's new link key>
 
 { "pk":    "<caller's new link key, hex>",
-  "offer": <caller's offer, kind 37516, signed by that key, name tag>,
+  "offer": <caller's offer, kind 37516, signed by that key, no name>,
   "n":     ["<id of nearby>", "<other auto-accepted ids it carries>"] }
 
 -> 200
 { "pk":    "<server's new link key, hex>",
-  "offer": <server's offer, signed by that key, name tag>,
+  "offer": <server's offer, signed by that key, no name>,
   "n":     ["<ids both carry>"] }
 ```
 
@@ -104,9 +108,9 @@ caller lost its side. The auth plane's per-address rate limit applies.
 
 ## Names
 
-Each side's offer carries its display name, the one the user chose in the
-shell (`set_nearby_name`, sent on every start and rename). It goes only
-inside the offer, over the link. Never in a radio advert.
+None. A nearby offer never carries a name, and nothing nearby sends does.
+Napplets see nearby peers without one. Names travel only in invitations,
+to people the user chose to invite.
 
 ## Not yet
 

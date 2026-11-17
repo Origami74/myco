@@ -185,9 +185,6 @@ impl DirectPeers for SnapshotPeers {
 #[derive(Default)]
 pub struct Nearby {
     direct: OnceLock<Arc<dyn DirectPeers>>,
-    /// The name nearby offers carry: the one the user chose in the shell.
-    /// It travels only inside the offer, over the link — never in an advert.
-    name: Mutex<Option<String>>,
     /// Devices being dialed now, so two ticks don't link twice.
     dialing: Mutex<BTreeSet<String>>,
     /// Per ephemeral link, the neighborhoods already offered on it.
@@ -213,14 +210,6 @@ impl Nearby {
 
     fn who(&self, source: IpAddr) -> Option<DirectPeer> {
         self.direct.get()?.who(source)
-    }
-
-    pub fn set_name(&self, name: Option<String>) {
-        *self.name.lock().unwrap() = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-    }
-
-    pub fn name(&self) -> Option<String> {
-        self.name.lock().unwrap().clone()
     }
 }
 
@@ -305,7 +294,7 @@ pub fn answer(
     svc.links.mark_direct(&link.id, peer.reach, now);
     tracing::info!(link = %link.id, n = carried.len(), "nearby link set up");
     Some(NearbyResponse {
-        offer: sign_offer(&keys, &svc.offer(&pk), svc.nearby.name().as_deref()),
+        offer: sign_offer(&keys, &svc.offer(&pk), None),
         pk,
         n: carried.into_iter().collect(),
     })
@@ -321,7 +310,7 @@ pub async fn dial(svc: &LinkService, base: &str, peer: &DirectPeer) -> anyhow::R
     let keys = Keys::generate();
     let pk = keys.public_key().to_hex();
     let request = NearbyRequest {
-        offer: sign_offer(&keys, &svc.offer(&pk), svc.nearby.name().as_deref()),
+        offer: sign_offer(&keys, &svc.offer(&pk), None),
         pk,
         n: ours.iter().map(|s| s.id).collect(),
     };
@@ -411,13 +400,16 @@ pub fn plan(own: &str, direct: &[DirectPeer], links: &super::link::Links, now: I
     out
 }
 
-/// End every ephemeral link: Nearby was turned off.
+/// End every ephemeral link and forget all nearby knew: Nearby was turned
+/// off, nobody is in reach any more, or the node stopped or started. The
+/// next peer in reach meets this device as a stranger, on fresh link keys.
 pub fn end_all(svc: &LinkService) -> Vec<Link> {
     let all = svc.links.ephemeral();
     for link in &all {
         svc.links.end(&link.id);
     }
     svc.nearby.offered.lock().unwrap().clear();
+    svc.nearby.dialing.lock().unwrap().clear();
     all
 }
 
@@ -439,7 +431,15 @@ pub async fn tick(
         }
         return;
     }
-    let plan = plan(own, &svc.nearby.direct_peers(), &svc.links, now);
+    let direct = svc.nearby.direct_peers();
+    if direct.is_empty() {
+        // Nobody to tell: they are out of reach.
+        if !end_all(svc).is_empty() {
+            tracing::info!("nobody in reach: nearby forgotten");
+        }
+        return;
+    }
+    let plan = plan(own, &direct, &svc.links, now);
     for link_id in &plan.end {
         if let Some(link) = svc.links.all().into_iter().find(|l| &l.id == link_id) {
             svc.links.end(link_id);

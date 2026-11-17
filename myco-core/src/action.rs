@@ -245,10 +245,6 @@ pub enum NativeAppAction {
     /// Turn Nearby on or off: the `nearby` neighborhood and the ephemeral
     /// links to devices in reach that carry it. Kept with the neighborhoods.
     SetNearby { enabled: bool },
-    /// The name nearby peers see: the one the user chose in the shell. It
-    /// goes out only in this device's offer on ephemeral links, never in a
-    /// radio advert. Not persisted; the shell sends it on every start.
-    SetNearbyName { name: String },
     /// How far a neighborhood pushes uploaded blobs (0: not at all).
     SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
     /// Turn sharing (`share: true`) or getting (`share: false`) an

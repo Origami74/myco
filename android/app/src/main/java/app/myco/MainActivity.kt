@@ -61,14 +61,12 @@ import app.myco.onboarding.SystemAsk
 import app.myco.onboarding.TunnelWait
 import app.myco.onboarding.VpnConsent
 import app.myco.nfc.PairPresent
-import app.myco.share.DeviceName
 import app.myco.share.MycoLink
 import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
 import app.myco.ui.applyDeviceName
-import app.myco.ui.publishProvisionalName
 import app.myco.ui.intro.IntroScreen
 import app.myco.hotspot.HotspotService
 import app.myco.ui.onboarding.Confirmed
@@ -128,13 +126,12 @@ class MainActivity : ComponentActivity() {
     private val setupStep = mutableStateOf<SetupStep?>(null)
 
     /** Which steps this run of the popup has; set whenever it opens. */
-    private val setupPlan = mutableStateOf(SetupPlan(mesh = true, name = false))
+    private val setupPlan = mutableStateOf(SetupPlan(mesh = true))
 
     /** How this run's mesh steps went, for the segments behind the current one. */
     private val setupOutcome = mutableStateOf(MeshOutcome())
 
     /** The name the Name step's field starts with; read when the step opens. */
-    private val setupName = mutableStateOf("")
 
     /** Android refused nearby without asking; "Try again" opens app info instead. */
     private val setupNearbyBlocked = mutableStateOf(false)
@@ -271,10 +268,8 @@ class MainActivity : ComponentActivity() {
                             plan = setupPlan.value,
                             outcome = setupOutcome.value,
                             nearbyBlocked = setupNearbyBlocked.value,
-                            name = setupName.value,
                             onAction = ::onSetupAction,
                             onAsk = ::onSetupAsk,
-                            onSaveName = ::chooseName,
                         )
                     }
 
@@ -591,7 +586,6 @@ class MainActivity : ComponentActivity() {
         )
         val plan = MeshSetup.launchPlan(
             mesh,
-            nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false),
             entry = entry,
             connection = vpnWanted(),
         ) ?: return
@@ -612,9 +606,8 @@ class MainActivity : ComponentActivity() {
         if (first != null) goTo(first) else finishSetup()
     }
 
-    /** Show [step]; the Name step reads the name it offers as it opens. */
+    /** Show [step]. */
     private fun goTo(step: SetupStep) {
-        if (step == SetupStep.Name) setupName.value = offeredName()
         setupStep.value = step
     }
 
@@ -629,18 +622,10 @@ class MainActivity : ComponentActivity() {
         openSetup(
             MeshSetup.reopenPlan(
                 entry,
-                nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false),
                 connection = vpnWanted(),
             ),
         )
     }
-
-    /**
-     * The name the Name step's field starts with: a name the user set before,
-     * otherwise the phone's own name (Settings › About phone), otherwise the
-     * generated one — the same order the first-run name dialog used.
-     */
-    private fun offeredName(): String = DeviceName.current(this, core.state().ownNpub)
 
     private fun restoreSetup(state: Bundle) {
         setupStep.value = state.getString(STATE_SETUP_STEP)?.let { name ->
@@ -648,7 +633,6 @@ class MainActivity : ComponentActivity() {
         }
         setupPlan.value = SetupPlan(
             mesh = state.getBoolean(STATE_SETUP_PLAN_MESH, true),
-            name = state.getBoolean(STATE_SETUP_PLAN_NAME),
             entry = state.getString(STATE_SETUP_ENTRY)
                 ?.let { name -> SetupEntry.entries.firstOrNull { it.name == name } }
                 ?: SetupEntry.Launch,
@@ -659,7 +643,6 @@ class MainActivity : ComponentActivity() {
             connectionSkipped = state.getBoolean(STATE_SETUP_SKIPPED),
         )
         setupNearbyBlocked.value = state.getBoolean(STATE_SETUP_BLOCKED)
-        setupName.value = state.getString(STATE_SETUP_NAME).orEmpty()
         tunnelSince = state.getLong(STATE_PROMPT_AT)
         // The wait was a coroutine of the Activity that is gone; pick it up.
         if (setupStep.value == SetupStep.Connecting) waitForTunnel(since = tunnelSince)
@@ -669,13 +652,11 @@ class MainActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
         outState.putString(STATE_SETUP_STEP, setupStep.value?.name)
         outState.putBoolean(STATE_SETUP_PLAN_MESH, setupPlan.value.mesh)
-        outState.putBoolean(STATE_SETUP_PLAN_NAME, setupPlan.value.name)
         outState.putString(STATE_SETUP_ENTRY, setupPlan.value.entry.name)
         outState.putBoolean(STATE_SETUP_PLAN_CONNECTION, setupPlan.value.connection)
         outState.putBoolean(STATE_SETUP_REFUSED, setupOutcome.value.nearbyRefused)
         outState.putBoolean(STATE_SETUP_SKIPPED, setupOutcome.value.connectionSkipped)
         outState.putBoolean(STATE_SETUP_BLOCKED, setupNearbyBlocked.value)
-        outState.putString(STATE_SETUP_NAME, setupName.value)
         outState.putLong(STATE_PROMPT_AT, tunnelSince)
         asker.save(outState)
     }
@@ -746,26 +727,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** The mesh steps are over, however they ended: on to the name, or close. */
+    /** The mesh steps are over, however they ended: close the popup. */
     private fun endMeshSteps() {
         tunnelWait?.cancel()
         tunnelWait = null
         // Asked at all means asked: launch doesn't bring the mesh steps back.
         prefs.edit().putBoolean(PREF_SETUP_DONE, true).remove(PREF_SETUP_FIRST_RUN).apply()
-        val next = MeshSetup.afterMesh(setupPlan.value)
-        if (next != null) goTo(next) else finishSetup()
-    }
-
-    /**
-     * The Name step's answer: the field's content on "Use this name". The
-     * same path the first-run name dialog took: kept by
-     * [applyDeviceName], and remembered as answered.
-     */
-    private fun chooseName(picked: String) {
-        val name = picked.trim().take(DeviceName.MAX_LENGTH)
-        if (name.isEmpty()) return
-        applyDeviceName(this, core, core.state().ownNpub, name)
-        prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
         finishSetup()
     }
 
@@ -1007,13 +974,7 @@ class MainActivity : ComponentActivity() {
             // through resolves to the same name.
             val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
                 .getString("device_name", "").orEmpty()
-            // No name chosen yet (the setup popup's last step): keep the
-            // pseudonym, not the phone's own name.
-            if (prefs.getBoolean(PREF_NAME_CHOSEN, false) || stored.isNotBlank()) {
-                applyDeviceName(this, core, it, stored)
-            } else {
-                publishProvisionalName(core, it)
-            }
+            applyDeviceName(this, core, it, stored)
         }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.
@@ -1703,11 +1664,9 @@ class MainActivity : ComponentActivity() {
         private const val STATE_SETUP_STEP = "setup_step"
         private const val STATE_SETUP_PLAN_MESH = "setup_plan_mesh"
         private const val STATE_SETUP_PLAN_CONNECTION = "setup_plan_connection"
-        private const val STATE_SETUP_PLAN_NAME = "setup_plan_name"
         private const val STATE_SETUP_REFUSED = "setup_nearby_refused"
         private const val STATE_SETUP_SKIPPED = "setup_connection_skipped"
         private const val STATE_SETUP_ENTRY = "setup_entry"
-        private const val STATE_SETUP_NAME = "setup_name"
         private const val STATE_SETUP_BLOCKED = "setup_nearby_blocked"
         private const val STATE_PROMPT_AT = "setup_prompt_at"
 
@@ -1741,6 +1700,5 @@ class MainActivity : ComponentActivity() {
         /** Set once the setup popup's name step has been answered. Separate from
          *  [PREF_INTRO_SEEN] so replaying the intro doesn't re-ask it, and so an
          *  upgrade from a build that never asked still gets the question once. */
-        private const val PREF_NAME_CHOSEN = "name_chosen"
     }
 }

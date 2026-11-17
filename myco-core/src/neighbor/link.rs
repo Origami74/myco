@@ -823,6 +823,7 @@ impl Links {
     /// Drop a link.
     pub fn end(&self, link_id: &str) -> bool {
         self.direct.lock().unwrap().remove(link_id);
+        self.seen.lock().unwrap().remove(link_id);
         self.change(|saved| {
             let before = saved.links.len();
             saved.links.retain(|l| l.id != link_id);

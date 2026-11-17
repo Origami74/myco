@@ -733,8 +733,6 @@ async fn pair() -> Pair {
     let (alice_radio, bob_radio) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
     let alice = device_with(alice_radio.clone(), true).await;
     let bob = device_with(bob_radio.clone(), true).await;
-    alice.svc.nearby.set_name(Some("Alice".into()));
-    bob.svc.nearby.set_name(Some("Bob".into()));
     Pair {
         alice,
         bob,
@@ -809,8 +807,8 @@ async fn devices_in_reach_link_and_carry_only_the_auto_accepted_neighborhoods_bo
     assert_eq!(b[0].neighborhoods, both, "not Club, not Other");
     assert_eq!(a[0].ephemeral.as_ref().unwrap().device, BOB);
     assert_eq!(b[0].ephemeral.as_ref().unwrap().device, ALICE);
-    assert_eq!(a[0].name.as_deref(), Some("Bob"), "names come in the offer");
-    assert_eq!(b[0].name.as_deref(), Some("Alice"));
+    assert_eq!(a[0].name, None, "nearby offers carry no name");
+    assert_eq!(b[0].name, None);
 
     // A second tick links nobody twice.
     p.alice_tick().await;
@@ -829,7 +827,7 @@ async fn devices_in_reach_link_and_carry_only_the_auto_accepted_neighborhoods_bo
         .unwrap();
     let peers = p.alice.neighbors.peers(&app(), &nearby.id).await.unwrap();
     assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].name.as_deref(), Some("Bob"));
+    assert_eq!(peers[0].name, None, "nameless");
     assert_eq!(
         peers[0].link,
         Some(myco_napplet_runtime::nap::neighbor::LinkClass::Proximity)
@@ -930,6 +928,29 @@ async fn a_nearby_peer_gone_past_the_grace_period_is_dropped_on_both_sides() {
     super::nearby::tick(&p.bob.svc, BOB, &move |_| base.clone(), later).await;
     assert!(p.alice.svc.links.all().is_empty());
     assert!(p.bob.svc.links.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nobody_in_reach_nearby_forgets_at_once_and_meets_again_as_strangers() {
+    let p = pair().await;
+    p.in_reach();
+    p.alice_tick().await;
+    let first = p.alice.svc.links.ephemeral()[0].clone();
+
+    // Nobody in reach: no grace period, everything forgotten.
+    p.alice_radio.see(Vec::new());
+    p.alice_tick().await;
+    assert!(p.alice.svc.links.ephemeral().is_empty());
+    assert!(!p.alice.svc.links.reachable(&first.id));
+
+    // Back in reach: a new link on new keys, with no name either way.
+    p.in_reach();
+    p.alice_tick().await;
+    let again = p.alice.svc.links.ephemeral();
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, first.id);
+    assert_ne!(again[0].keys().public_key(), first.keys().public_key());
+    assert_eq!(again[0].name, None);
 }
 
 /// Bob holds a napplet he never shared, as `HeldNapplets` exposes it.
