@@ -32,6 +32,9 @@ pub struct NearbyView {
     pub id: String,
     /// Peers in reach on an ephemeral link now.
     pub peers: usize,
+    /// The nearby secret to advertise over BLE (8 hex chars), empty while
+    /// Nearby is off. Changes once used, and every few minutes.
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +155,8 @@ pub fn build(records: &[Record], links: &Links, nearby_on: bool) -> Neighborhood
             on: nearby_on,
             id: nearby_id.to_hex(),
             peers: all.iter().filter(|l| l.ephemeral.is_some()).count(),
+            // Filled in by the runtime, which holds it.
+            secret: String::new(),
         },
         invite: None,
         status: String::new(),

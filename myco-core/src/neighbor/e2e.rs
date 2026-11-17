@@ -753,6 +753,15 @@ impl Pair {
     fn in_reach(&self) {
         self.alice_radio.see(vec![direct(BOB)]);
         self.bob_radio.see(vec![direct(ALICE)]);
+        self.hear_adverts();
+    }
+
+    /// Each hears the other's current nearby secret, as from a BLE advert.
+    fn hear_adverts(&self) {
+        let now = std::time::Instant::now();
+        let (a, b) = (&self.alice.svc.nearby, &self.bob.svc.nearby);
+        a.hear(b.secret(now), now);
+        b.hear(a.secret(now), now);
     }
 
     /// Alice's tick, dialing Bob's loopback service.
@@ -928,6 +937,38 @@ async fn a_nearby_peer_gone_past_the_grace_period_is_dropped_on_both_sides() {
     super::nearby::tick(&p.bob.svc, BOB, &move |_| base.clone(), later).await;
     assert!(p.alice.svc.links.all().is_empty());
     assert!(p.bob.svc.links.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_hearing_their_secret_nobody_links() {
+    let p = pair().await;
+    p.alice_radio.see(vec![direct(BOB)]);
+    p.bob_radio.see(vec![direct(ALICE)]);
+    p.alice_tick().await;
+    assert!(p.alice.svc.links.all().is_empty());
+    assert!(p.bob.svc.links.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn told_a_secret_was_used_the_dialer_tries_again_with_the_next() {
+    let p = pair().await;
+    p.in_reach();
+    // Someone else got in with the secret Alice heard: Bob has a new one,
+    // which Alice hears a moment after her first try.
+    p.bob.svc.nearby.renew(std::time::Instant::now());
+    let (a, b) = (p.alice.svc.nearby.clone(), p.bob.svc.nearby.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let now = std::time::Instant::now();
+        a.hear(b.secret(now), now);
+    });
+    p.alice_tick().await;
+    assert_eq!(
+        p.alice.svc.links.ephemeral().len(),
+        1,
+        "linked on the next secret"
+    );
+    assert_eq!(p.bob.svc.links.ephemeral().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

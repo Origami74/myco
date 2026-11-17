@@ -33,6 +33,8 @@ object MycoCore {
                     // The public-node internet lane: on-screen state, and its
                     // socket pinned to the default internet network.
                     PublicNodesLane.start(app, it)
+                    // The nearby secret: advertised over BLE, heard ones passed in.
+                    NearbyBeacon.start(it)
                 }
             }
         }

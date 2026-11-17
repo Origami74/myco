@@ -160,8 +160,16 @@ async fn nearby(State(svc): State<LinkService>, request: axum::extract::Request)
         &body,
         std::time::Instant::now(),
     ) {
-        Some(response) => axum::Json(response).into_response(),
-        None => refused(),
+        Ok(response) => axum::Json(response).into_response(),
+        Err(super::nearby::Refusal::Used(proof)) => (
+            axum::http::StatusCode::CONFLICT,
+            axum::Json(super::nearby::UsedSecret {
+                error: "used".into(),
+                proof,
+            }),
+        )
+            .into_response(),
+        Err(super::nearby::Refusal::Refused) => refused(),
     }
 }
 

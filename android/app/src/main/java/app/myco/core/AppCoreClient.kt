@@ -1197,6 +1197,10 @@ object NativeActions {
         JSONObject().put("type", "create_neighborhood").put("name", name).put("autoAccept", autoAccept)
 
     /** Turn Nearby on or off: the `nearby` neighborhood and its links to phones in reach. */
+    /** A nearby secret (8 hex) heard in another phone's BLE advert. */
+    fun nearbyHeard(secret: String): JSONObject =
+        JSONObject().put("type", "nearby_heard").put("secret", secret)
+
     fun setNearby(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_nearby").put("enabled", enabled)
 

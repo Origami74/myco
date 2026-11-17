@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **No name step in setup.** Myco uses its generated name (like "teal
   juno") until you set one in Settings. The phone's own name is no longer
   the default: it often carries a real name.
+- **Nearby needs a secret heard over Bluetooth.** Each phone advertises a
+  short secret that works once: a phone sets up a nearby link only by
+  proving it heard it. Phones racing for the same one retry with the next.
+  It is not tied to the phone's mesh key. A phone reached only over the
+  local network no longer joins through Nearby, until mDNS carries the
+  secret too.
 - **Nearby is anonymous.** Phones that meet nearby never see a name, and
   nearby starts over (every nearby link and what it knew, forgotten) as
   soon as nobody is in reach, and when the mesh is turned off or on.

@@ -146,6 +146,9 @@ class BleRadio(context: Context) {
     private val scanWithPsm = AtomicInteger()
     private val scanWithoutPsm = AtomicInteger()
     private val scanPsmAddrs = ConcurrentHashMap.newKeySet<String>()
+
+    /** Per advertiser, the nearby secret last reported and when. */
+    private val heardSecrets = ConcurrentHashMap<String, Pair<String, Long>>()
     private val scanNoPsmAddrs = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var scanSummaryTask: ScheduledFuture<*>? = null
 
@@ -461,7 +464,10 @@ class BleRadio(context: Context) {
         // key the 2-byte PSM service-data on a 16-bit UUID (PSM_SD_UUID16) so it
         // sits alongside the full 128-bit FIPS service UUID (used for the scan
         // filter): ~3 (flags) + 18 (128-bit UUID) + 6 (16-bit service-data) = 27B.
-        val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte())
+        // The nearby secret rides right after the PSM: 2 + 4 bytes of service
+        // data fill the 31-byte PDU exactly (3 flags + 18 UUID + 10).
+        val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte()) +
+            (nearbySecretField ?: ByteArray(0))
         val advData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(FIPS_PARCEL_UUID)
@@ -623,6 +629,19 @@ class BleRadio(context: Context) {
         val psm = if (sd != null && sd.size >= 2) {
             (sd[0].toInt() and 0xFF) or ((sd[1].toInt() and 0xFF) shl 8) // 16-bit LE
         } else 0
+        // The peer's nearby secret, right after the PSM. Reported when it
+        // changes for that advertiser, and again every 20 s while it is still
+        // heard (the core forgets heard secrets after a minute), not on every
+        // sighting.
+        if (sd != null && sd.size >= 2 + NEARBY_SECRET_BYTES) {
+            val secret = sd.copyOfRange(2, 2 + NEARBY_SECRET_BYTES).joinToString("") { "%02x".format(it) }
+            val now = SystemClock.elapsedRealtime()
+            val last = heardSecrets[addr]
+            if (last == null || last.first != secret || now - last.second > SECRET_REPORT_EVERY_MS) {
+                heardSecrets[addr] = secret to now
+                onNearbySecret?.invoke(secret)
+            }
+        }
         // Only report a peer once its real PSM is known (it rides the
         // scan-response service data). A psm=0 sighting is the primary
         // advert without the scan response yet — reporting it makes the
@@ -1079,6 +1098,33 @@ class BleRadio(context: Context) {
 
         @Volatile
         private var nameField: String? = null
+
+        /** Bytes of nearby secret after the PSM in the primary advert. */
+        const val NEARBY_SECRET_BYTES = 4
+        private const val SECRET_REPORT_EVERY_MS = 20_000L
+
+        @Volatile
+        private var nearbySecretField: ByteArray? = null
+
+        /**
+         * The nearby secret to advertise (8 hex chars, from the core), or null
+         * while Nearby is off. A change re-issues the advert at once, so a
+         * used secret stops going out.
+         */
+        var nearbySecret: String?
+            get() = nearbySecretField?.joinToString("") { "%02x".format(it) }
+            set(value) {
+                val bytes = value?.takeIf { it.length == NEARBY_SECRET_BYTES * 2 }
+                    ?.chunked(2)?.mapNotNull { it.toIntOrNull(16)?.toByte() }
+                    ?.takeIf { it.size == NEARBY_SECRET_BYTES }?.toByteArray()
+                if (bytes.contentEquals(nearbySecretField)) return
+                nearbySecretField = bytes
+                instance?.reAdvertiseForName()
+            }
+
+        /** Called with a peer's nearby secret (8 hex) when it changes. */
+        @Volatile
+        var onNearbySecret: ((String) -> Unit)? = null
 
         /**
          * The display name this device broadcasts for itself, or null to

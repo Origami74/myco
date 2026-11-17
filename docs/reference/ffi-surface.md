@@ -85,6 +85,7 @@ dispatch(actionJson) → stateJson
 | `rename_neighborhood` | `neighborhood`: String, `name`: String | The user's local name for a neighborhood. |
 | `leave_neighborhood` | `neighborhood`: String | Stop carrying a neighborhood on every link, and forget it. |
 | `set_nearby` | `enabled`: bool | Turn Nearby on or off: the `nearby` neighborhood and the ephemeral links to devices in reach. Off ends those links. Kept in `neighborhoods.json`; shown as `neighborhoods.nearby`. |
+| `nearby_heard` | `secret`: String (8 hex) | A nearby secret heard in another phone's BLE advert; offered as a proof when setting up nearby links. The secret to advertise is `neighborhoods.nearby.secret`. |
 
 `Option<String>` fields are omitted when absent. `link` for an nsite is a
 pasted link or a bare `<host>` label; `pointer` for a napplet is an `naddr…` or

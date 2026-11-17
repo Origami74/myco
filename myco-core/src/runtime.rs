@@ -1371,6 +1371,16 @@ impl AppRuntime {
                 self.set_nearby(enabled);
                 self.rev += 1;
             }
+            NativeAppAction::NearbyHeard { secret } => {
+                let bytes = hex::decode(secret.trim()).ok();
+                if let (Some(svc), Some(Ok(secret))) = (
+                    &self.link_service,
+                    bytes.map(<crate::neighbor::nearby::Secret>::try_from),
+                ) {
+                    svc.nearby.hear(secret, std::time::Instant::now());
+                }
+                // Nothing on screen changes.
+            }
             NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
                 if let (Some(n), Some(id)) = (
                     self.neighbors(),
@@ -1443,6 +1453,9 @@ impl AppRuntime {
             }
         };
         let mut view = crate::neighbor::view::build(&records, &svc.links, nearby_on);
+        if nearby_on {
+            view.nearby.secret = hex::encode(svc.nearby.secret(std::time::Instant::now()));
+        }
         let ui = self.link_ui.lock().unwrap();
         view.invite = ui.invite.clone();
         view.status = ui.status.clone();

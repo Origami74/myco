@@ -74,10 +74,29 @@ A link set up without a secret, for one encounter.
 - **Not kept.** Ephemeral links are dropped when Myco starts.
 - **Presence** works as on any link: the 30 s offer check makes "Here now".
 
+## The nearby secret
+
+Each phone advertises a 4-byte secret over BLE, in the primary advert right
+after its L2CAP PSM (the service data under `0x9C90`: 2 bytes PSM, then 4
+bytes secret, which fills the 31-byte advert). Hearing it is the proof of
+being near. It is not derived from any key, so it does not depend on the
+FIPS npub.
+
+- **Used once.** The first setup that proves it wins, and a new secret is
+  advertised. Racing setups with the same secret get `409 used`, drop it
+  and try again with the next secret they hear, up to 8 rounds per dial;
+  the next tick starts over.
+- **Replaced** every 5 minutes if nobody used it, and whenever nearby
+  starts over (nobody in reach, node stopped or started, Nearby off).
+- **Heard secrets** are offered for a minute after they were last heard,
+  at most 16. The radio reports one when it changes and every 20 s while it
+  is still heard. A phone never offers its own.
+- **mDNS** can carry the same secret later, for the local network. Until
+  then a phone reached only over the LAN does not link through Nearby.
+
 ## Setup: `POST /nh/nearby`
 
-No secret. The FIPS session already authenticated the caller's device key,
-and the server checks the request came from it.
+The caller proves it heard the server's current secret.
 
 ```text
 POST http://<server npub>.fips:4873/nh/nearby
@@ -85,12 +104,16 @@ Authorization: Nostr <NIP-98 over this URL, signed by the caller's new link key>
 
 { "pk":    "<caller's new link key, hex>",
   "offer": <caller's offer, kind 37516, signed by that key, no name>,
-  "n":     ["<id of nearby>", "<other auto-accepted ids it carries>"] }
+  "n":     ["<id of nearby>", "<other auto-accepted ids it carries>"],
+  "proofs": ["<hex HMAC-SHA256(secret, \"myco-nearby:\" ‖ pk)>", …] }
 
 -> 200
 { "pk":    "<server's new link key, hex>",
   "offer": <server's offer, signed by that key, no name>,
   "n":     ["<ids both carry>"] }
+
+-> 409   proof i was for a secret already used or replaced: retry with the next
+{ "error": "used", "proof": i }
 ```
 
 The server refuses (`403 refused`, nothing more) unless:
@@ -102,6 +125,9 @@ The server refuses (`403 refused`, nothing more) unless:
 3. The NIP-98 header is signed by the `pk` in the body, for this URL.
 4. The offer is valid and signed by that key.
 5. `nearby` is among the ids both carry.
+6. One proof is for the current secret. Checked last and atomically, so a
+   refused request uses nothing up and of racing requests exactly one
+   wins.
 
 A request from a device that already has an ephemeral link replaces it: the
 caller lost its side. The auth plane's per-address rate limit applies.

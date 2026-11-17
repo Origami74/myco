@@ -28,6 +28,8 @@ data class NeighborhoodsState(
         val id: String = "",
         /** People in reach on a nearby link now. */
         val peers: Int = 0,
+        /** The nearby secret to advertise over BLE (8 hex), empty while off. */
+        val secret: String = "",
     )
 
     data class PeerNode(
@@ -119,6 +121,7 @@ data class NeighborhoodsState(
                         on = n?.optBoolean("on") ?: false,
                         id = n?.optString("id").orEmpty(),
                         peers = n?.optInt("peers") ?: 0,
+                        secret = n?.optString("secret").orEmpty(),
                     )
                 },
                 status = o.optString("status"),
