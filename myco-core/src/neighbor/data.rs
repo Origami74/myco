@@ -5,7 +5,8 @@
 //! into one lands in the user's own relay or in another neighborhood. One
 //! copy per event, with the set of neighborhoods it belongs to beside it.
 //! Links carry it to peers: a publish is forwarded on every link carrying the
-//! neighborhood, a subscription pulls from them, and a blob missing here is
+//! neighborhood, a subscription stays open on each of them (and on links
+//! that start carrying it later) while the napplet listens, and a blob missing here is
 //! asked of them (`GET /nh/{pk}/blob/{sha256}?n=`), verified and kept.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -159,6 +160,11 @@ impl Scoped {
             .into_iter()
             .filter(|e| self.holds(id, e))
             .collect())
+    }
+
+    /// Every event as it is kept, in whichever neighborhood.
+    pub(super) fn live(&self) -> broadcast::Receiver<(NeighborhoodId, Event)> {
+        self.live.subscribe()
     }
 
     fn feed(&self, id: NeighborhoodId) -> myco_napplet_runtime::seams::PulledEvents {
@@ -374,6 +380,22 @@ impl Neighbors {
         events
     }
 
+    /// New events kept in any neighborhood, for the link relay's open
+    /// subscriptions.
+    pub(super) fn live_events(&self) -> broadcast::Receiver<(NeighborhoodId, Event)> {
+        self.scoped.live()
+    }
+
+    /// Whether a new event in `n` may follow a linked peer's open `REQ`:
+    /// `link_id` still carries `n`, and its author is not muted here.
+    pub(super) fn link_may_see(&self, link_id: &str, n: NeighborhoodId, event: &Event) -> bool {
+        let carried = self
+            .links
+            .as_ref()
+            .is_some_and(|l| l.carrying(n).iter().any(|l| l.id == link_id));
+        carried && self.record(n).is_some_and(|r| unmuted(&r)(event))
+    }
+
     /// An event a linked peer sent into `n` with `ttl` hops left: checked,
     /// kept once, and passed on to the other links carrying `n` while hops
     /// and policy allow. `true` when it was taken (new or already held).
@@ -451,32 +473,82 @@ impl Neighbors {
             .unwrap_or_default()
     }
 
-    /// Ask every link carrying `n` for what matches; each event is kept in
-    /// `n` and reaches live subscribers as it arrives, not when the peer is
-    /// done. Not passed on.
-    fn pull_links(&self, n: NeighborhoodId, filters: Vec<Filter>) {
-        let Some(links) = &self.links else {
-            return;
-        };
-        for link in links.carrying(n) {
-            let filters = filters.clone();
-            let scoped = self.scoped.clone();
-            let links = links.clone();
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-            tokio::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    if !scoped.has(n, &event) {
-                        let _ = scoped.add(n, event).await;
+    /// Follow `filters` on every link carrying `n`, for as long as the
+    /// returned guard lives: a subscription on each peer stays open, one
+    /// opens on a link the moment it starts carrying `n` or comes back in
+    /// reach, and closes when the link ends or stops carrying `n`. Each event
+    /// is kept in `n` and reaches live subscribers as it arrives. Not passed
+    /// on.
+    fn follow_links(&self, n: NeighborhoodId, filters: Vec<Filter>) -> Option<AbortOnDrop> {
+        let links = self.links.clone()?;
+        let scoped = self.scoped.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let keep = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if !scoped.has(n, &event) {
+                    let _ = scoped.add(n, event).await;
+                }
+            }
+        });
+        let supervise = tokio::spawn(async move {
+            let _keep = AbortOnDrop(keep);
+            let mut changes = links.watch();
+            let mut following: BTreeMap<String, AbortOnDrop> = BTreeMap::new();
+            loop {
+                let carrying = links.carrying(n);
+                following.retain(|id, task| {
+                    !task.0.is_finished() && carrying.iter().any(|l| &l.id == id)
+                });
+                for link in carrying {
+                    if following.contains_key(&link.id) || !links.reachable(&link.id) {
+                        continue;
                     }
+                    let id = link.id.clone();
+                    let task = tokio::spawn(follow_link(
+                        links.clone(),
+                        link,
+                        n,
+                        filters.clone(),
+                        tx.clone(),
+                    ));
+                    following.insert(id, AbortOnDrop(task));
                 }
-            });
-            tokio::spawn(async move {
-                match super::wire::pull_into(&link, n, &filters, tx).await {
-                    Ok(_) => links.mark_seen(&link.id),
-                    Err(e) => tracing::debug!(link = %link.id, error = %e, "pull failed"),
-                }
-            });
-        }
+                // A link that drops out is retried when it is back in reach,
+                // and a quiet one now and then in case it never said.
+                let _ = tokio::time::timeout(RETRY_FOLLOW, changes.changed()).await;
+            }
+        });
+        Some(AbortOnDrop(supervise))
+    }
+}
+
+/// Follow one link until it fails, then wait a little: the supervisor in
+/// [`Neighbors::follow_links`] decides whether to try again.
+async fn follow_link(
+    links: Arc<super::link::Links>,
+    link: super::link::Link,
+    n: NeighborhoodId,
+    filters: Vec<Filter>,
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+) {
+    let id = link.id.clone();
+    let seen = links.clone();
+    let result = super::wire::follow(&link, n, &filters, tx, || seen.mark_seen(&id)).await;
+    if let Err(e) = result {
+        tracing::debug!(link = %link.id, error = %e, "could not follow peer");
+    }
+    tokio::time::sleep(RETRY_FOLLOW).await;
+}
+
+/// How long before a dropped or failed follow is tried again.
+const RETRY_FOLLOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Aborts its task when dropped.
+pub(super) struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -562,15 +634,19 @@ impl NeighborData for Neighbors {
                     .backlog(record.id, &filters)
                     .await
                     .map_err(failed)?;
-                // Subscribed before the pull starts, so nothing it brings is
-                // missed.
+                // Subscribed before peers are asked, so nothing they bring
+                // is missed.
                 let live = self.scoped.feed(record.id);
-                if record.policy.backlog_hops > 0 {
-                    self.pull_links(record.id, filters.clone());
-                }
+                // Peers followed for as long as the napplet listens.
+                let following = (record.policy.backlog_hops > 0)
+                    .then(|| self.follow_links(record.id, filters.clone()))
+                    .flatten();
                 Ok(Feed {
                     backlog: backlog.into_iter().filter(|e| keep(e)).collect(),
-                    live: Box::pin(live.filter(move |e| std::future::ready(keep(e)))),
+                    live: Box::pin(live.filter(move |e| {
+                        let _following = &following;
+                        std::future::ready(keep(e))
+                    })),
                 })
             }
             // Reading one peer's view is not supported yet.

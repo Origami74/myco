@@ -21,6 +21,7 @@
 //! Every refusal says only "refused": a stranger learns nothing about which
 //! check failed.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -336,43 +337,75 @@ async fn relay_session(
     ttl: u8,
 ) {
     use axum::extract::ws::Message;
-    while let Some(Ok(frame)) = socket.recv().await {
-        let Message::Text(text) = frame else {
-            continue;
-        };
-        let Ok(serde_json::Value::Array(msg)) = serde_json::from_str::<serde_json::Value>(&text)
-        else {
-            continue;
-        };
-        let replies: Vec<serde_json::Value> = match msg.first().and_then(|v| v.as_str()) {
-            Some("EVENT") => {
-                let Some(event) = msg
-                    .get(1)
-                    .and_then(|v| serde_json::from_value::<nostr::Event>(v.clone()).ok())
+    use tokio::sync::broadcast::error::RecvError;
+    // Open subscriptions: new events in `n` matching one follow it.
+    let mut open: BTreeMap<String, Vec<nostr::Filter>> = BTreeMap::new();
+    let mut live = neighbors.live_events();
+    loop {
+        let replies: Vec<serde_json::Value> = tokio::select! {
+            frame = socket.recv() => {
+                let Some(Ok(frame)) = frame else { return };
+                let Message::Text(text) = frame else {
+                    continue;
+                };
+                let Ok(serde_json::Value::Array(msg)) =
+                    serde_json::from_str::<serde_json::Value>(&text)
                 else {
                     continue;
                 };
-                let id = event.id.to_hex();
-                let took = neighbors.receive(n, event, &link.id, ttl).await;
-                vec![serde_json::json!(["OK", id, took, ""])]
+                match msg.first().and_then(|v| v.as_str()) {
+                    Some("EVENT") => {
+                        let Some(event) = msg
+                            .get(1)
+                            .and_then(|v| serde_json::from_value::<nostr::Event>(v.clone()).ok())
+                        else {
+                            continue;
+                        };
+                        let id = event.id.to_hex();
+                        let took = neighbors.receive(n, event, &link.id, ttl).await;
+                        vec![serde_json::json!(["OK", id, took, ""])]
+                    }
+                    Some("REQ") => {
+                        let sub = msg.get(1).cloned().unwrap_or_default();
+                        let filters: Vec<nostr::Filter> = msg
+                            .iter()
+                            .skip(2)
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+                        let mut out: Vec<serde_json::Value> = neighbors
+                            .link_backlog(n, &filters)
+                            .await
+                            .into_iter()
+                            .map(|e| serde_json::json!(["EVENT", sub, e]))
+                            .collect();
+                        out.push(serde_json::json!(["EOSE", sub]));
+                        if let Some(sub) = sub.as_str() {
+                            if open.len() < MAX_OPEN_REQS || open.contains_key(sub) {
+                                open.insert(sub.to_string(), filters);
+                            }
+                        }
+                        out
+                    }
+                    Some("CLOSE") => {
+                        if let Some(sub) = msg.get(1).and_then(|v| v.as_str()) {
+                            open.remove(sub);
+                        }
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
             }
-            Some("REQ") => {
-                let sub = msg.get(1).cloned().unwrap_or_default();
-                let filters: Vec<nostr::Filter> = msg
-                    .iter()
-                    .skip(2)
-                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                    .collect();
-                let mut out: Vec<serde_json::Value> = neighbors
-                    .link_backlog(n, &filters)
-                    .await
-                    .into_iter()
-                    .map(|e| serde_json::json!(["EVENT", sub, e]))
-                    .collect();
-                out.push(serde_json::json!(["EOSE", sub]));
-                out
-            }
-            _ => Vec::new(),
+            kept = live.recv(), if !open.is_empty() => match kept {
+                Ok((id, event)) if id == n && neighbors.link_may_see(&link.id, n, &event) => {
+                    let any = nostr::filter::MatchEventOptions::new();
+                    open.iter()
+                        .filter(|(_, fs)| fs.iter().any(|f| f.match_event(&event, any)))
+                        .map(|(sub, _)| serde_json::json!(["EVENT", sub, event]))
+                        .collect()
+                }
+                Ok(_) | Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return,
+            },
         };
         for reply in replies {
             if socket.send(Message::text(reply.to_string())).await.is_err() {
@@ -381,6 +414,9 @@ async fn relay_session(
         }
     }
 }
+
+/// Most subscriptions one link relay connection keeps open.
+const MAX_OPEN_REQS: usize = 16;
 
 // --- link blobs -----------------------------------------------------------------
 

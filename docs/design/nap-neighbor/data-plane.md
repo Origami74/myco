@@ -24,11 +24,13 @@ ws://<npub>.fips:4873/nh/{pk}/relay?n=<neighborhood id>&ttl=<hops>
 ```
 
 - Admits only a link that carries `n`.
-- `REQ` answers from that neighborhood's view.
+- `REQ` answers from that neighborhood's view, then `EOSE`, and stays open:
+  new events kept in `n` that match follow until `CLOSE` or the socket
+  ends, while the link still carries `n`. Up to 16 open per connection.
 - `EVENT` is kept once and passed on to the other links carrying `n` while
   `ttl > 0` and policy allows.
-- One connection per exchange (send one event, or pull until `EOSE`), with a
-  20 s cap.
+- A send or a one-off pull uses one connection per exchange, with a 20 s cap.
+  A followed subscription keeps its connection.
 - The client dials the peer's relay URLs from its offer, FIPS first.
 
 ## Publish and subscribe
@@ -36,7 +38,7 @@ ws://<npub>.fips:4873/nh/{pk}/relay?n=<neighborhood id>&ttl=<hops>
 | Request | Neighborhood address | Peer address |
 | --- | --- | --- |
 | Publish | Kept in `n`; sent to every link carrying `n` with `ttl = publish hops − 1` | Kept in `n`; sent to that peer only, `ttl = 0` |
-| Subscribe | Local view, then a backlog pull from links carrying `n` (if backlog hops > 0), then live | Not supported yet |
+| Subscribe | Local view, then followed on every link carrying `n` (if backlog hops > 0), then live | Not supported yet |
 | Blob read | Local scoped store, then each link carrying `n` in turn | That peer only |
 | Upload | Kept in the local scoped store | Not supported |
 
@@ -44,6 +46,20 @@ ws://<npub>.fips:4873/nh/{pk}/relay?n=<neighborhood id>&ttl=<hops>
 - Each event id is passed on once per neighborhood.
 - Events by muted authors are hidden and not passed on.
 - Pulled backlog is kept and shown to live subscribers, not passed on.
+
+### Following peers
+
+A subscription is replicated to the peers for as long as the napplet
+listens:
+
+- **On subscribe**, it opens on every reachable link carrying `n`.
+- **A peer who joins or comes back in reach** gets it too. A link starting,
+  ending, changing what it carries, or answering again after
+  2 min of silence wakes the subscription to check.
+- **A peer who leaves** has it closed: the link ended or stopped carrying
+  `n`.
+- **A dropped connection** is retried after 15 s while the link is in reach.
+- **The napplet closing it**, or its window closing, ends it on every peer.
 
 ## Blobs
 

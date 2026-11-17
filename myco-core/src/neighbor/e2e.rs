@@ -111,7 +111,14 @@ fn app() -> NappletIdentity {
 /// Alice starts "Club" and invites; Bob joins carrying it.
 async fn linked_club() -> (Device, Device, String, String) {
     let (alice, bob) = (device().await, device().await);
-    let club = alice
+    let club = club(&alice).await;
+    let bob_addr = join_club(&alice, &bob).await;
+    (alice, bob, club, bob_addr)
+}
+
+/// Alice's Club, by its address.
+async fn club(alice: &Device) -> String {
+    alice
         .neighbors
         .create(
             &app(),
@@ -121,14 +128,14 @@ async fn linked_club() -> (Device, Device, String, String) {
             },
         )
         .await
-        .unwrap();
-    let id = alice
-        .neighbors
-        .records()
-        .iter()
-        .find(|r| r.name == "Club")
         .unwrap()
-        .id;
+        .address
+        .unwrap()
+}
+
+/// Bob joins Alice's Club over a link; Bob's address for it.
+async fn join_club(alice: &Device, bob: &Device) -> String {
+    let id = club_id(alice);
     let offer = alice.svc.invite(
         vec![Shared {
             id,
@@ -162,16 +169,23 @@ async fn linked_club() -> (Device, Device, String, String) {
         id,
         name: "Club".into(),
     });
-    let bob_addr = bob
-        .neighbors
+    bob.neighbors
         .list(&app())
         .await
         .into_iter()
         .find(|n| n.name == "Club")
         .unwrap()
         .address
-        .unwrap();
-    (alice, bob, club.address.unwrap(), bob_addr)
+        .unwrap()
+}
+
+fn club_id(dev: &Device) -> super::id::NeighborhoodId {
+    dev.neighbors
+        .records()
+        .iter()
+        .find(|r| r.name == "Club")
+        .unwrap()
+        .id
 }
 
 fn note(text: &str) -> nostr::Event {
@@ -241,6 +255,67 @@ async fn a_publish_crosses_the_link_and_a_pull_brings_it_back() {
     .unwrap_or(false)
         || feed.backlog.iter().any(|e| e.content == "from alice");
     assert!(got, "Alice's event reached Bob");
+}
+
+/// Whether an event with `text` comes on `feed` within `secs`.
+async fn next(feed: &mut myco_napplet_runtime::nap::neighbor::Feed, text: &str, secs: u64) -> bool {
+    use futures_util::StreamExt as _;
+    tokio::time::timeout(Duration::from_secs(secs), async {
+        while let Some(e) = feed.live.next().await {
+            if e.content == text {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_subscription_follows_a_peer_who_joins_later_until_the_link_ends() {
+    let (alice, bob) = (device().await, device().await);
+    let addr = club(&alice).await;
+    // Alice listens before anyone else is in the Club.
+    let a = alice.neighbors.clone();
+    let mut feed = a.subscribe(&app(), &addr, kind1()).await.unwrap();
+    // Bob joins holding an event he never published to Alice.
+    join_club(&alice, &bob).await;
+    let id = club_id(&bob);
+    bob.neighbors
+        .scoped
+        .add_shared(id, note("held by bob"))
+        .await
+        .unwrap();
+    assert!(
+        next(&mut feed, "held by bob", 10).await,
+        "Bob's backlog reached the open subscription"
+    );
+
+    // What Bob keeps later follows on its own.
+    bob.neighbors
+        .scoped
+        .add_shared(id, note("later"))
+        .await
+        .unwrap();
+    assert!(
+        next(&mut feed, "later", 10).await,
+        "a later event followed live"
+    );
+
+    // The link ends: nothing more comes from Bob.
+    let link = alice.svc.links.carrying(id)[0].id.clone();
+    alice.svc.links.end(&link);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    bob.neighbors
+        .scoped
+        .add_shared(id, note("after the end"))
+        .await
+        .unwrap();
+    assert!(
+        !next(&mut feed, "after the end", 2).await,
+        "the subscription on Bob closed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -541,12 +616,12 @@ async fn a_napplet_held_but_never_pushed_is_exposed_where_updates_are_sent() {
         Kind::from(myco_napplet_runtime::KIND_ROOT),
         Kind::from(myco_napplet_runtime::KIND_NAMED),
     ])];
-    let feed = bob
+    // Held open while it is followed: dropping it stops the pull.
+    let _feed = bob
         .neighbors
         .subscribe(&app(), &bob_addr, napplets.clone())
         .await
         .unwrap();
-    drop(feed);
     let mut got = Vec::new();
     for _ in 0..100 {
         got = bob.neighbors.link_backlog(id, &napplets).await;

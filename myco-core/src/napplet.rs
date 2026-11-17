@@ -1224,7 +1224,17 @@ impl NappletHost {
 
     /// Drop a window's session. Every later frame for it is ignored.
     pub fn close(&self, session_id: &str) {
-        self.sessions.lock().unwrap().remove(session_id);
+        let gone = self.sessions.lock().unwrap().remove(session_id);
+        if let Some(gone) = gone {
+            // Its live subscriptions end with it.
+            let session = gone.session.clone();
+            let ended = session.try_lock().map(|s| s.end_subscriptions()).is_ok();
+            if !ended {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async move { session.lock().await.end_subscriptions() });
+                }
+            }
+        }
         self.drop_intents_of(session_id);
     }
 

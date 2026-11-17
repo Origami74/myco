@@ -407,6 +407,9 @@ pub struct Links {
     /// When each ephemeral link's device was last directly in reach, and
     /// over what. This run only, like the links themselves.
     direct: Mutex<BTreeMap<String, (std::time::Instant, super::nearby::Reach)>>,
+    /// Bumped whenever a link starts, ends, changes what it carries, or
+    /// comes back in reach: what live subscriptions follow.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 /// How long after the last exchange a link still counts as reachable.
@@ -424,6 +427,7 @@ impl Links {
             saved: Mutex::new(saved),
             seen: Mutex::default(),
             direct: Mutex::default(),
+            changes: tokio::sync::watch::channel(0).0,
         };
         // Ephemeral links belong to an encounter, and the encounter ended
         // with the last run: whoever is still in reach links afresh.
@@ -451,15 +455,32 @@ impl Links {
         if let Err(e) = written {
             tracing::warn!(error = %e, "could not save links");
         }
+        drop(saved);
+        self.changed();
         out
+    }
+
+    fn changed(&self) {
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Told whenever a link starts, ends, changes what it carries, or comes
+    /// back in reach.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// Record that `link_id` just answered or called.
     pub fn mark_seen(&self, link_id: &str) {
-        self.seen
+        let back = self
+            .seen
             .lock()
             .unwrap()
-            .insert(link_id.to_string(), std::time::Instant::now());
+            .insert(link_id.to_string(), std::time::Instant::now())
+            .is_none_or(|t| t.elapsed() >= REACHABLE_FOR);
+        if back {
+            self.changed();
+        }
     }
 
     /// Whether `link_id` was in contact within [`REACHABLE_FOR`].
@@ -589,6 +610,7 @@ impl Links {
             };
             Ok((link, response))
         })
+        .inspect(|(link, _)| self.mark_seen(&link.id))
     }
 
     /// The joiner's side, before the request is sent: a fresh link key, the
@@ -652,6 +674,8 @@ impl Links {
             ephemeral: None,
         };
         self.change(|saved| saved.links.push(link.clone()));
+        // It just answered the setup.
+        self.mark_seen(&link.id);
         Ok(link)
     }
 

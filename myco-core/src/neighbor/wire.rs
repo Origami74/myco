@@ -8,8 +8,10 @@
 //! The server side admits only a link that carries `n`, then speaks plain
 //! NIP-01 scoped to that neighborhood: `REQ` answers from its view, `EVENT`
 //! is accepted into it and passed on to the other links carrying it while
-//! `ttl` lasts. The client side is the same thing dialled: send one event, or
-//! pull a backlog until `EOSE`.
+//! `ttl` lasts. A `REQ` stays open after `EOSE`: new events in the
+//! neighborhood that match it follow until `CLOSE` or the socket ends. The
+//! client side is the same thing dialled: send one event, pull a backlog
+//! until `EOSE`, or follow a subscription for as long as it is wanted.
 //!
 //! One connection per exchange for now. Links carry little until they carry
 //! a lot; a pool per link can come when they do.
@@ -185,6 +187,75 @@ pub async fn pull_into(
             Ok(Ok(sent)) => return Ok(sent),
             Ok(Err(e)) => last = e,
             Err(_) => last = anyhow::anyhow!("{url}: timed out"),
+        }
+    }
+    Err(last)
+}
+
+/// Hold a subscription open on the peer: what it holds in `n` matching
+/// `filters`, then whatever it gets later, each verified event to `tx` as it
+/// arrives. Returns when the peer or the network ends it, or `tx` is closed.
+/// `on_open` is called once the subscription is up.
+pub async fn follow(
+    link: &Link,
+    n: NeighborhoodId,
+    filters: &[Filter],
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    on_open: impl FnOnce(),
+) -> anyhow::Result<()> {
+    let mut last = anyhow::anyhow!("the peer offers no relay");
+    for url in relay_urls(link) {
+        let opened = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
+            let mut ws = open(link, &scoped(&url, n, 0)).await?;
+            let mut req = vec![serde_json::json!("REQ"), serde_json::json!("live")];
+            req.extend(
+                filters
+                    .iter()
+                    .map(|f| serde_json::to_value(f).unwrap_or_default()),
+            );
+            ws.send(Message::text(serde_json::Value::Array(req).to_string()))
+                .await?;
+            anyhow::Ok(ws)
+        })
+        .await;
+        let mut ws = match opened {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => {
+                last = e;
+                continue;
+            }
+            Err(_) => {
+                last = anyhow::anyhow!("{url}: timed out");
+                continue;
+            }
+        };
+        on_open();
+        loop {
+            tokio::select! {
+                frame = ws.next() => {
+                    let Some(frame) = frame else { return Ok(()) };
+                    let Message::Text(text) = frame? else {
+                        continue;
+                    };
+                    let v: serde_json::Value = serde_json::from_str(&text)?;
+                    match v[0].as_str() {
+                        Some("EVENT") => {
+                            if let Ok(e) = serde_json::from_value::<Event>(v[2].clone()) {
+                                if e.verify().is_ok() && tx.send(e).is_err() {
+                                    let _ = ws.close(None).await;
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        Some("CLOSED") => return Ok(()),
+                        _ => {}
+                    }
+                }
+                _ = tx.closed() => {
+                    let _ = ws.close(None).await;
+                    return Ok(());
+                }
+            }
         }
     }
     Err(last)

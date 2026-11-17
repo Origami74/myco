@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A neighborhood subscription follows people as they come and go.** It
+  asked the peers once, when it started, so someone who joined or came in
+  reach afterwards never showed up (AppStore's Around you stayed as it
+  was). It now stays open on every linked peer, opens on peers who arrive
+  later, and closes on those who leave and when the napplet or its window
+  closes.
 - **AppStore's Install on an app you already have shows its sheet with
   Open.** `intent.launch` opened an installed app directly, which did
   nothing visible when that app was already open (or was AppStore itself),

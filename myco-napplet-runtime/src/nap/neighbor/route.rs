@@ -72,7 +72,9 @@ pub async fn subscribe(
     // was the answer.
     if let Some(streamer) = session.streamer().cloned() {
         let sub_id = sub_id.to_string();
-        let mut live = feed.live;
+        // Ends when the subscription does, even while nothing arrives:
+        // dropping the feed is what lets go of the peers.
+        let mut live = futures_util::StreamExt::take_until(feed.live, handle.closed());
         (streamer.spawn)(Box::pin(async move {
             while let Some(event) = futures_util::StreamExt::next(&mut live).await {
                 if handle.is_closed() {

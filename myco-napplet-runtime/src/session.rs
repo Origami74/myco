@@ -196,6 +196,17 @@ pub const SEEN_PER_SUBSCRIPTION: usize = 4096;
 struct Generation {
     ids: HashSet<[u8; 32]>,
     closed: bool,
+    /// Woken when it ends (see [`SubscriptionHandle::closed`]).
+    waker: Option<std::task::Waker>,
+}
+
+impl Generation {
+    fn end(&mut self) {
+        self.closed = true;
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
 }
 
 type GenerationRef = Arc<Mutex<Generation>>;
@@ -251,7 +262,20 @@ impl SubscriptionHandle {
     /// End this generation: nothing more is delivered for it, by the backlog
     /// or the live path. Its registration is dropped at the next subscribe.
     pub fn close(&self) {
-        self.generation.lock().unwrap().closed = true;
+        self.generation.lock().unwrap().end();
+    }
+
+    /// Resolves once the subscription is over: closed, replaced, or failed.
+    pub fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let generation = self.generation.clone();
+        std::future::poll_fn(move |cx| {
+            let mut generation = generation.lock().unwrap();
+            if generation.closed {
+                return std::task::Poll::Ready(());
+            }
+            generation.waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        })
     }
 
     /// Whether the subscription is over.
@@ -633,7 +657,7 @@ impl Session {
         // the old one's backlog task can no longer deliver.
         let fresh: GenerationRef = Arc::default();
         if let Some(old) = self.seen.lock().unwrap().insert(key.clone(), fresh) {
-            old.lock().unwrap().closed = true;
+            old.lock().unwrap().end();
         }
         Arc::make_mut(&mut self.subscriptions).insert(key, filters);
         Ok(())
@@ -655,7 +679,15 @@ impl Session {
             Arc::make_mut(&mut self.sub_work).remove(&key);
         }
         if let Some(old) = self.seen.lock().unwrap().remove(&key) {
-            old.lock().unwrap().closed = true;
+            old.lock().unwrap().end();
+        }
+    }
+
+    /// End every subscription: the window is gone. Live deliveries stop and
+    /// whatever they hold (peers followed for a neighborhood) is let go.
+    pub fn end_subscriptions(&self) {
+        for (_, generation) in self.seen.lock().unwrap().drain() {
+            generation.lock().unwrap().end();
         }
     }
 
