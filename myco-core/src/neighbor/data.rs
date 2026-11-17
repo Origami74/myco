@@ -479,13 +479,25 @@ impl Neighbors {
     /// reach, and closes when the link ends or stops carrying `n`. Each event
     /// is kept in `n` and reaches live subscribers as it arrives. Not passed
     /// on.
-    fn follow_links(&self, n: NeighborhoodId, filters: Vec<Filter>) -> Option<AbortOnDrop> {
+    ///
+    /// An event already kept, which a peer sends again because it came (back)
+    /// in reach, goes to the returned receiver: the follower's own subscriber
+    /// sees it again, as a sign it can be fetched from someone now, without
+    /// learning who.
+    fn follow_links(
+        &self,
+        n: NeighborhoodId,
+        filters: Vec<Filter>,
+    ) -> Option<(AbortOnDrop, tokio::sync::mpsc::UnboundedReceiver<Event>)> {
         let links = self.links.clone()?;
         let scoped = self.scoped.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let (again_tx, again) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let keep = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                if !scoped.has(n, &event) {
+                if scoped.has(n, &event) {
+                    let _ = again_tx.send(event);
+                } else {
                     let _ = scoped.add(n, event).await;
                 }
             }
@@ -518,7 +530,7 @@ impl Neighbors {
                 let _ = tokio::time::timeout(RETRY_FOLLOW, changes.changed()).await;
             }
         });
-        Some(AbortOnDrop(supervise))
+        Some((AbortOnDrop(supervise), again))
     }
 }
 
@@ -643,9 +655,20 @@ impl NeighborData for Neighbors {
                 // is missed.
                 let live = self.scoped.feed(record.id);
                 // Peers followed for as long as the napplet listens.
-                let following = (record.policy.backlog_hops > 0)
+                let (following, again) = match (record.policy.backlog_hops > 0)
                     .then(|| self.follow_links(record.id, filters.clone()))
-                    .flatten();
+                    .flatten()
+                {
+                    Some((guard, again)) => (Some(guard), Some(again)),
+                    None => (None, None),
+                };
+                // What a peer coming in reach sends again, next to what is new.
+                let again = futures_util::stream::unfold(again, |rx| async move {
+                    let mut rx = rx?;
+                    let event = rx.recv().await?;
+                    Some((event, Some(rx)))
+                });
+                let live = futures_util::stream::select(live, again);
                 Ok(Feed {
                     backlog: backlog.into_iter().filter(|e| keep(e)).collect(),
                     live: Box::pin(live.filter(move |e| {

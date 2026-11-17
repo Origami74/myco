@@ -319,6 +319,31 @@ async fn an_open_subscription_follows_a_peer_who_joins_later_until_the_link_ends
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_event_already_kept_comes_again_from_a_peer_in_reach() {
+    let (alice, bob) = (device().await, device().await);
+    let addr = club(&alice).await;
+    join_club(&alice, &bob).await;
+    let id = club_id(&bob);
+    bob.neighbors
+        .scoped
+        .add_shared(id, note("held by bob"))
+        .await
+        .unwrap();
+    let a = alice.neighbors.clone();
+    let mut first = a.subscribe(&app(), &addr, kind1()).await.unwrap();
+    assert!(next(&mut first, "held by bob", 10).await, "kept by Alice");
+
+    // A later subscription has it from Alice's store, and once more from
+    // Bob: a sign someone in reach can serve it, without saying who.
+    let mut again = a.subscribe(&app(), &addr, kind1()).await.unwrap();
+    assert!(again.backlog.iter().any(|e| e.content == "held by bob"));
+    assert!(
+        next(&mut again, "held by bob", 10).await,
+        "Bob sent it again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_link_not_carrying_the_neighborhood_is_refused() {
     let (alice, bob, _, _) = linked_club().await;
     let other = super::id::NeighborhoodId::random();

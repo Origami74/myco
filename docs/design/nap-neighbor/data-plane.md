@@ -61,6 +61,15 @@ listens:
 - **A dropped connection** is retried after 15 s while the link is in reach.
 - **The napplet closing it**, or its window closing, ends it on every peer.
 
+The napplet never sees who is in reach. It sees events:
+
+- **New ones** are kept and delivered.
+- **Ones already kept** are delivered again when a peer in reach sends
+  them. That is the napplet's sign that someone can serve them now, for
+  example to ask `resource.check` again.
+- **Nobody in reach** means the subscription has only the backlog, then
+  EOSE at once.
+
 ## Blobs
 
 A blob read that misses here is asked of the links carrying `n`, one at a
