@@ -906,3 +906,88 @@ async fn a_nearby_peer_gone_past_the_grace_period_is_dropped_on_both_sides() {
     assert!(p.alice.svc.links.all().is_empty());
     assert!(p.bob.svc.links.all().is_empty());
 }
+
+/// Bob holds a napplet he never shared, as `HeldNapplets` exposes it.
+async fn hold_napplet(dev: &Device) -> nostr::Event {
+    use nsite_deck::{BlobStore as _, RelayBackend as _};
+    let held = myco_napplet_runtime::testing::build_test_napplet();
+    let relay = Arc::new(nsite_deck::testing::MemRelay::new());
+    let blobs = Arc::new(nsite_deck::testing::MemBlobs::new());
+    relay.publish(held.manifest.clone()).await.unwrap();
+    for (_, bytes) in &held.blobs {
+        blobs.put(bytes).await.unwrap();
+    }
+    dev.neighbors
+        .set_held(super::updates::HeldNapplets { relay, blobs });
+    held.manifest
+}
+
+fn napplet_kinds() -> Vec<Filter> {
+    vec![Filter::new().kinds([
+        Kind::from(myco_napplet_runtime::KIND_ROOT),
+        Kind::from(myco_napplet_runtime::KIND_NAMED),
+    ])]
+}
+
+async fn nearby_addr(dev: &Device) -> String {
+    dev.neighbors
+        .list(&app())
+        .await
+        .into_iter()
+        .find(|n| n.name == "nearby")
+        .unwrap()
+        .address
+        .unwrap()
+}
+
+async fn arrives(feed: &mut myco_napplet_runtime::nap::neighbor::Feed, id: nostr::EventId) -> bool {
+    use futures_util::StreamExt as _;
+    feed.backlog.iter().any(|e| e.id == id)
+        || tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(e) = feed.live.next().await {
+                if e.id == id {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn around_you_open_before_a_peer_comes_in_reach_sees_its_napplets() {
+    // The one who dials listens.
+    let p = pair().await;
+    let held = hold_napplet(&p.bob).await;
+    let addr = nearby_addr(&p.alice).await;
+    let mut feed = p
+        .alice
+        .neighbors
+        .subscribe(&app(), &addr, napplet_kinds())
+        .await
+        .unwrap();
+    p.in_reach();
+    p.alice_tick().await;
+    assert!(
+        arrives(&mut feed, held.id).await,
+        "dialer sees answerer's napplet"
+    );
+
+    // The one who answers listens.
+    let p = pair().await;
+    let held = hold_napplet(&p.alice).await;
+    let addr = nearby_addr(&p.bob).await;
+    let mut feed = p
+        .bob
+        .neighbors
+        .subscribe(&app(), &addr, napplet_kinds())
+        .await
+        .unwrap();
+    p.in_reach();
+    p.alice_tick().await;
+    assert!(
+        arrives(&mut feed, held.id).await,
+        "answerer sees dialer's napplet"
+    );
+}

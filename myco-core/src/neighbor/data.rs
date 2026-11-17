@@ -533,9 +533,14 @@ async fn follow_link(
 ) {
     let id = link.id.clone();
     let seen = links.clone();
-    let result = super::wire::follow(&link, n, &filters, tx, || seen.mark_seen(&id)).await;
-    if let Err(e) = result {
-        tracing::debug!(link = %link.id, error = %e, "could not follow peer");
+    let result = super::wire::follow(&link, n, &filters, tx, || {
+        tracing::info!(link = %id, "following peer");
+        seen.mark_seen(&id)
+    })
+    .await;
+    match result {
+        Ok(()) => tracing::info!(link = %link.id, "stopped following peer"),
+        Err(e) => tracing::info!(link = %link.id, error = %e, "could not follow peer"),
     }
     tokio::time::sleep(RETRY_FOLLOW).await;
 }
