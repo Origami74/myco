@@ -11,7 +11,7 @@ links), `service.rs` (`POST /nh/nearby`).
 ## The neighborhood
 
 - **Named `nearby`, auto-accepted.** Its id is derived from the name like any
-  auto-accepted neighborhood's, so every Myco meets in the same one.
+  auto-accepted neighborhood's, so every runtime meets in the same one.
 - **Kept by the runtime.** Present while Nearby is on, gone when it is off.
   It is a normal record in `neighborhoods.json` and follows the normal
   storage rules.
@@ -105,7 +105,7 @@ Authorization: Nostr <NIP-98 over this URL, signed by the caller's new link key>
 { "pk":    "<caller's new link key, hex>",
   "offer": <caller's offer, kind 37516, signed by that key, no name>,
   "n":     ["<id of nearby>", "<other auto-accepted ids it carries>"],
-  "proofs": ["<hex HMAC-SHA256(secret, \"myco-nearby:\" ‖ pk)>", …] }
+  "proofs": ["<hex HMAC-SHA256(secret, \"nap-neighbor:nearby:\" ‖ pk)>", …] }
 
 -> 200
 { "pk":    "<server's new link key, hex>",

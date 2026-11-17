@@ -1,4 +1,4 @@
-//! Nearby: Myco's proximity extension of NAP-NEIGHBOR.
+//! Nearby: the proximity extension of NAP-NEIGHBOR, as this runtime runs it.
 //!
 //! The `nearby` neighborhood is auto-accepted, named `nearby`, and kept by
 //! the runtime rather than the user: present while Nearby is on (the
@@ -16,7 +16,7 @@
 //!
 //! **The nearby secret.** Each device advertises a 4-byte [`Secret`] over
 //! BLE, next to its L2CAP PSM. A dialer proves it heard one: each proof is
-//! `HMAC(secret, "myco-nearby:" ‖ its new link key)`. A secret works once:
+//! `HMAC(secret, "nap-neighbor:nearby:" ‖ its new link key)`. A secret works once:
 //! the first setup that proves it wins and a new secret is advertised;
 //! anyone racing with the same one is told `used` and tries again with the
 //! next secret it hears, as many rounds as it takes. A secret is also
@@ -210,7 +210,7 @@ fn fresh_secret() -> Secret {
 pub fn proof(secret: &Secret, pk: &str) -> String {
     hex::encode(super::link::hmac_sha256(
         secret,
-        format!("myco-nearby:{pk}").as_bytes(),
+        format!("nap-neighbor:nearby:{pk}").as_bytes(),
     ))
 }
 
