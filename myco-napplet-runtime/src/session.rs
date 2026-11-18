@@ -71,10 +71,12 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// tooling (the Vite plugin and `napplet deploy`) keeps only the upstream NAP
 /// domains in a manifest's `requires` and drops Myco-only ones, so no napplet
 /// published with it can *ask* for `neighbor` — and a grant that can only
-/// come from `requires` could never be given. It grants little by itself: a
-/// napplet sees only the neighborhoods the user picked for it (and, with the
-/// proximity extension, `nearby`, which anyone in range can read anyway). Each neighborhood is its own grant, held by the
-/// host, not here.
+/// come from `requires` could never be given. It is not small: neighborhoods
+/// are not tied to napplets, so a napplet holding it sees and posts into
+/// every neighborhood on the device, as the user, and can mute an author in
+/// one for every napplet (`docs/design/nap-neighbor/napplet-api.md`,
+/// "Grants"). What it can't do is learn who is in one, or use another
+/// napplet's ids or addresses.
 ///
 /// `inc` and `intent` cost nothing to grant either. `intent` asks the shell to
 /// open another napplet by role, and where it goes is the user's decision: a
