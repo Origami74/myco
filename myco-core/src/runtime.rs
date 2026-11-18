@@ -2583,6 +2583,7 @@ impl AppRuntime {
                 },
             ));
             neighbors.set_prune(neighborhood_prune);
+            neighbors.set_runtime(handle.clone());
             self.neighbors = Some(neighbors.clone());
             // The link relay can answer now.
             if let Some(svc) = &self.link_service {

@@ -81,6 +81,9 @@ pub struct Neighbors {
     /// The napplets this device holds, exposed to linked neighbors where it
     /// shares `napplet-updates` (see [`super::updates::HeldNapplets`]).
     pub(super) held: std::sync::OnceLock<Arc<super::updates::HeldNapplets>>,
+    /// The runtime that deletes a left neighborhood's content. The shell's
+    /// Leave arrives on the JNI thread, which is not inside any runtime.
+    rt: std::sync::OnceLock<tokio::runtime::Handle>,
 }
 
 /// What [`Neighbors::open`] reaches the world through.
@@ -124,7 +127,14 @@ impl Neighbors {
             links: seams.links,
             on_update: std::sync::OnceLock::new(),
             held: std::sync::OnceLock::new(),
+            rt: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The runtime [`Neighbors::forget`] deletes content on when called
+    /// from outside one.
+    pub fn set_runtime(&self, handle: tokio::runtime::Handle) {
+        let _ = self.rt.set(handle);
     }
 
     /// Run `f` on the store and save it.
@@ -330,9 +340,15 @@ impl Neighbors {
         });
         // Its content goes too, off this thread.
         if known {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let scoped = self.scoped.clone();
-                handle.spawn(async move { scoped.forget(id).await });
+            let handle = tokio::runtime::Handle::try_current()
+                .ok()
+                .or_else(|| self.rt.get().cloned());
+            match handle {
+                Some(handle) => {
+                    let scoped = self.scoped.clone();
+                    handle.spawn(async move { scoped.forget(id).await });
+                }
+                None => tracing::warn!("no runtime: a left neighborhood's content stays"),
             }
         }
         known

@@ -1947,6 +1947,37 @@ mod tests {
         assert!(fresh.query(&[Filter::new()]).await.unwrap().is_empty());
     }
 
+    /// The shell's Leave arrives on the JNI thread, outside any runtime:
+    /// the content still goes, on the runtime the host was given.
+    #[test]
+    fn leaving_from_outside_a_runtime_deletes_the_content() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let n = open();
+        let (club, kept) = rt.block_on(async {
+            let club = create(&n, "Club").await;
+            let kept = note("club only");
+            n.publish(&app(), &club, kept.clone()).await.unwrap();
+            (club, kept)
+        });
+        let id = n.records()[0].id;
+        assert!(n.scoped.has(id, &kept));
+        n.set_runtime(rt.handle().clone());
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(n.forget(id));
+        rt.block_on(async {
+            for _ in 0..200 {
+                if !n.scoped.has(id, &kept) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("{club}: content kept after leaving");
+        });
+    }
+
     #[tokio::test]
     async fn replaceable_and_deleted_stay_inside_their_neighborhood() {
         let d = dir();
