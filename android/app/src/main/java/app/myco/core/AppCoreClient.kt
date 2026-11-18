@@ -796,6 +796,9 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
     fun dispatch(action: JSONObject): AppState =
         AppState.parse(NativeCore.dispatchJson(requireHandle(), action.toString()))
 
+    /** The nearby secret to advertise (8 hex), empty while Nearby is off. */
+    fun nearbySecret(): String = NativeCore.nearbySecret(requireHandle())
+
     /** The logged-in nsec, for the Account page's reveal. Empty while logged out. */
     fun revealNsec(): String = NativeCore.accountRevealNsec(requireHandle())
 
@@ -1196,11 +1199,11 @@ object NativeActions {
     fun createNeighborhood(name: String, autoAccept: Boolean): JSONObject =
         JSONObject().put("type", "create_neighborhood").put("name", name).put("autoAccept", autoAccept)
 
-    /** Turn Nearby on or off: the `nearby` neighborhood and its links to phones in reach. */
     /** A nearby secret (8 hex) heard in another phone's BLE advert. */
     fun nearbyHeard(secret: String): JSONObject =
         JSONObject().put("type", "nearby_heard").put("secret", secret)
 
+    /** Turn Nearby on or off: the `nearby` neighborhood and its links to phones in reach. */
     fun setNearby(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_nearby").put("enabled", enabled)
 

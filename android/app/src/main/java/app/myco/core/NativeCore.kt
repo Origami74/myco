@@ -47,6 +47,9 @@ internal object NativeCore {
     /** The logged-in `nsec1…`; empty while logged out. Show only after the warning. */
     external fun accountRevealNsec(handle: Long): String
 
+    /** The nearby secret to advertise (8 hex); empty while Nearby is off. */
+    external fun nearbySecret(handle: Long): String
+
     /** The account's avatar bytes; empty while there is none. */
     external fun accountAvatar(handle: Long): ByteArray
 

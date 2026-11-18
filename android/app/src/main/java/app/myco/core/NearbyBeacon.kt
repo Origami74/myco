@@ -76,7 +76,7 @@ object NearbyBeacon {
                 // starts with is at worst spent, which a dialer is told.
                 if (BleRadio.running) {
                     runCatching {
-                        val secret = client.state().neighborhoods.nearby.secret
+                        val secret = client.nearbySecret()
                         BleRadio.nearbySecret = secret.ifEmpty { null }
                         if (secret.isEmpty() || !foreground) next = SLOW_MS
                     }.onFailure {

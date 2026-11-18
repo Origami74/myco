@@ -125,11 +125,20 @@ class BleRadio(context: Context) {
     /** Last advertised name seen per address, so the log fires on change only. */
     private val lastAdvertName = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    /** Re-issue the advert so a changed [localName] reaches the scan response,
-     *  which is fixed at start time. No-op unless we are actually advertising. */
-    private fun reAdvertiseForName() {
-        if (!stopped && advertiseCallback != null) startAdvertising(advertisePsm)
+    /** Re-issue the advert so a changed nearby secret goes out. No-op unless
+     *  we are actually advertising. Runs on [retryExec], the thread every
+     *  other re-advertise runs on, so two never interleave their
+     *  stop-then-start and orphan an advertising set. */
+    private fun reAdvertise() {
+        runCatching {
+            retryExec.execute { if (!stopped && advertiseCallback != null) startAdvertising(advertisePsm) }
+        }
     }
+
+    /** Set once the stack refused the 31-byte advert as too large: from then
+     *  on it goes out without the nearby secret, so BLE peering (which needs
+     *  the PSM) keeps working and only Nearby is lost on this phone. */
+    @Volatile private var omitSecret = false
     private var advertiseRetries = 0
     // Scanner-retry state: a failed scan (Android throttles ~5 startScan/30s →
     // SCAN_FAILED_SCANNING_TOO_FREQUENTLY) used to be logged and abandoned, which
@@ -155,6 +164,10 @@ class BleRadio(context: Context) {
         val secret: String,
         val reportedMs: Long,
         @Volatile var seenMs: Long,
+        /** Sightings of this address, so a full table makes room by
+         *  dropping the least-seen one: a beacon rotating through made-up
+         *  addresses never builds a count, a real phone does. */
+        @Volatile var sightings: Int = 1,
     )
     private val scanNoPsmAddrs = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var scanSummaryTask: ScheduledFuture<*>? = null
@@ -216,6 +229,19 @@ class BleRadio(context: Context) {
      *  so without this the map grows one entry per rotation per peer. */
     private fun pruneHeardSecrets(now: Long) {
         heardSecrets.entries.removeIf { now - it.value.seenMs > HEARD_ADDR_TTL_MS }
+    }
+
+    /** Whether a new advertiser can be tracked: when the table is full, the
+     *  least-seen one (the newest on a tie) makes room. Refusing new ones
+     *  instead let one device rotating through 128 addresses keep every
+     *  real phone out. */
+    private fun makeRoomForAdvertiser(): Boolean {
+        if (heardSecrets.size < MAX_HEARD_ADDRS) return true
+        val out = heardSecrets.entries
+            .minWithOrNull(compareBy<Map.Entry<String, HeardSecret>>({ it.value.sightings }, { -it.value.reportedMs }))
+            ?: return true
+        heardSecrets.remove(out.key)
+        return true
     }
 
     /** Adopt the current Aware set; a rebuilt radio would otherwise start
@@ -443,15 +469,6 @@ class BleRadio(context: Context) {
         }.getOrNull()
     }
 
-    /** `s` as UTF-8, cut to at most [max] bytes on a character boundary. */
-    private fun truncateUtf8(s: String, max: Int): ByteArray {
-        var text = s
-        while (text.toByteArray(Charsets.UTF_8).size > max) {
-            text = text.dropLast(1)
-        }
-        return text.toByteArray(Charsets.UTF_8)
-    }
-
     fun startAdvertising(psm: Int) {
         if (stopped) return
         advertisePsm = psm
@@ -486,45 +503,37 @@ class BleRadio(context: Context) {
         // 128-bit FIPS UUID and read the PSM from this entry (they take the
         // first two bytes and ignore the rest). Nothing more can be added to
         // the primary advert; anything new belongs in the scan response.
+        val secret = nearbySecretField?.takeUnless { omitSecret }
         val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte()) +
-            (nearbySecretField ?: ByteArray(0))
+            (secret ?: ByteArray(0))
         val advData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(FIPS_PARCEL_UUID)
             .addServiceData(PSM_SD_PARCEL_UUID, psmLe)
             .build()
-        // The chosen name goes in the scan response's own 31 bytes, so the
-        // primary advert above is untouched and the PSM's delivery guarantee is
-        // unchanged. Null when no name has been pushed yet — advertise nothing
-        // rather than an empty string, so a scanner can tell "chose no name"
-        // from "advertised a blank one".
-        // <6-byte node_addr prefix><UTF-8 name>. Both or neither: a name with
-        // nobody attached to it is unattributable, and an address with no name
-        // says nothing the peer row did not already know.
-        // No name goes out over Bluetooth any more: a name is shared only
-        // inside a neighborhood invitation, with the person it is for. Older
-        // builds still advertise theirs; those are read, never sent.
-        val nodePrefix: ByteArray? = null
-        val scanResponse: AdvertiseData? = null
+        // No name goes out over Bluetooth: a name is shared only inside a
+        // neighborhood invitation, with the person it is for. Older builds
+        // still advertise theirs; those are read, never sent.
         val cb = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                 advertiseRetries = 0
                 BleHealth.advertiserExhausted = false
-                // Reports what actually went out, not what was configured: the
-                // scan response is only built when BOTH the name and the node
-                // address are known, and a log that claimed otherwise sent me
-                // hunting on the receiving device for a name never sent.
                 Log.i(TAG, "advertising PSM $psm (in primary advert)" +
-                    if (scanResponse != null) {
-                        ", name '$localName' as ${nodePrefix?.size ?: 0}B+name in scan response"
-                    } else {
-                        ", no scan response (name=$localName nodeAddr=$localNodeAddrHex)"
-                    })
+                    if (secret != null) " with the nearby secret" else ", no nearby secret")
                 if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, true)
             }
             override fun onStartFailure(errorCode: Int) {
                 Log.e(TAG, "advertise failed: $errorCode (1=DATA_TOO_LARGE, 2=TOO_MANY_ADVERTISERS)")
                 if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, false)
+                if (errorCode == ADVERTISE_FAILED_DATA_TOO_LARGE && secret != null && !omitSecret) {
+                    // The 31-byte advert has no headroom; a stack that sizes
+                    // the PDU differently refuses it. Without the PSM nobody
+                    // can dial us at all, so drop the secret, not the advert.
+                    Log.w(TAG, "advert too large with the nearby secret: advertising without it")
+                    omitSecret = true
+                    runCatching { retryExec.execute { if (!stopped) startAdvertising(advertisePsm) } }
+                    return
+                }
                 if (errorCode == ADVERTISE_FAILED_TOO_MANY_ADVERTISERS) {
                     // Every advertising slot is taken (usually Play Services'
                     // Nearby Share / Fast Pair). Flag it for the UI and retry.
@@ -535,11 +544,7 @@ class BleRadio(context: Context) {
         }
         advertiseCallback = cb
         try {
-            if (scanResponse != null) {
-                adv.startAdvertising(settings, advData, scanResponse, cb)
-            } else {
-                adv.startAdvertising(settings, advData, cb)
-            }
+            adv.startAdvertising(settings, advData, cb)
         } catch (e: Exception) {
             Log.e(TAG, "startAdvertising failed", e)
             if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, false)
@@ -661,13 +666,14 @@ class BleRadio(context: Context) {
             val now = SystemClock.elapsedRealtime()
             val last = heardSecrets[addr]
             last?.seenMs = now
+            last?.let { it.sightings = (it.sightings + 1).coerceAtMost(1_000_000) }
             val report = when {
-                last == null -> heardSecrets.size < MAX_HEARD_ADDRS
+                last == null -> makeRoomForAdvertiser()
                 last.secret == secret -> now - last.reportedMs > SECRET_REPORT_EVERY_MS
                 else -> now - last.reportedMs > SECRET_CHANGE_MIN_MS
             }
             if (report) {
-                heardSecrets[addr] = HeardSecret(secret, now, now)
+                heardSecrets[addr] = HeardSecret(secret, now, now, last?.sightings ?: 1)
                 onNearbySecret?.invoke(secret)
             }
         }
@@ -1126,9 +1132,6 @@ class BleRadio(context: Context) {
         @Volatile
         private var instance: BleRadio? = null
 
-        @Volatile
-        private var nameField: String? = null
-
         /** Bytes of nearby secret after the PSM in the primary advert. */
         const val NEARBY_SECRET_BYTES = 4
         private const val SECRET_REPORT_EVERY_MS = 20_000L
@@ -1136,7 +1139,7 @@ class BleRadio(context: Context) {
         private const val SECRET_CHANGE_MIN_MS = 5_000L
         /** Advertisers not seen for this long are forgotten. */
         private const val HEARD_ADDR_TTL_MS = 60_000L
-        /** Most advertisers tracked at once; past it new ones wait for a prune. */
+        /** Most advertisers tracked at once; past it the least-seen makes room. */
         private const val MAX_HEARD_ADDRS = 128
 
         /** Whether a radio is running now. */
@@ -1159,32 +1162,12 @@ class BleRadio(context: Context) {
                     ?.takeIf { it.size == NEARBY_SECRET_BYTES }?.toByteArray()
                 if (bytes.contentEquals(nearbySecretField)) return
                 nearbySecretField = bytes
-                instance?.reAdvertiseForName()
+                instance?.reAdvertise()
             }
 
         /** Called with a peer's nearby secret (8 hex) when it changes. */
         @Volatile
         var onNearbySecret: ((String) -> Unit)? = null
-
-        /**
-         * The display name this device broadcasts for itself, or null to
-         * broadcast none.
-         *
-         * Process-global rather than per-radio because the app asserts the name
-         * on every resume, which can happen before [BleService] has built a
-         * radio at all — held here, it is simply read by the next advert. Set
-         * while already advertising, it re-issues the advert, since the scan
-         * response is fixed at start time and a rename that waited for the next
-         * radio restart would look broken to whoever just made it.
-         */
-        var localName: String?
-            get() = nameField
-            set(value) {
-                val next = value?.trim()?.ifBlank { null }
-                if (next == nameField) return
-                nameField = next
-                instance?.reAdvertiseForName()
-            }
 
         @Volatile
         private var awarePrefixField: Set<String> = emptySet()
@@ -1208,21 +1191,6 @@ class BleRadio(context: Context) {
          *  see [connect]. */
         @Volatile
         var multipathCore: Boolean = false
-
-        @Volatile
-        private var nodeAddrField: String? = null
-
-        /** Our own `node_addr`, hex. Advertised beside [localName] so a scanner
-         *  can attribute the name to the peer row that address keys, whatever
-         *  transport that peer is ultimately carried on. */
-        var localNodeAddrHex: String?
-            get() = nodeAddrField
-            set(value) {
-                val next = value?.trim()?.ifBlank { null }
-                if (next == nodeAddrField) return
-                nodeAddrField = next
-                instance?.reAdvertiseForName()
-            }
 
         /** FIPS service UUID — must match fips-core. */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")

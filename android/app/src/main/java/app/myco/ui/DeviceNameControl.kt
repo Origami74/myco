@@ -1,8 +1,6 @@
 package app.myco.ui
 
 import android.content.Context
-import app.myco.ble.BleRadio
-import app.myco.core.AppCoreClient
 import app.myco.share.DeviceName
 
 /**
@@ -17,14 +15,9 @@ import app.myco.share.DeviceName
  */
 fun applyDeviceName(
     context: Context,
-    client: AppCoreClient,
     ownNpub: String,
     name: String,
 ): String {
     DeviceName.set(context, name)
-    val resolved = DeviceName.current(context, ownNpub)
-    // Harmless to re-assert, and it is what the advertised name is keyed on —
-    // a radio that came up before the identity was ready has none yet.
-    BleRadio.localNodeAddrHex = client.state().nodeAddrHex
-    return resolved
+    return DeviceName.current(context, ownNpub)
 }

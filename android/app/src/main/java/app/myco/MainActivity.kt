@@ -66,7 +66,6 @@ import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
-import app.myco.ui.applyDeviceName
 import app.myco.ui.intro.IntroScreen
 import app.myco.hotspot.HotspotService
 import app.myco.ui.onboarding.Confirmed
@@ -971,16 +970,6 @@ class MainActivity : ComponentActivity() {
         // passive NDEF dispatch can't reach us). Re-apply its current state here.
         NfcReader.onChanged = { runOnUiThread { updateNfcReader() } }
         updateNfcReader()
-        // Re-apply our memorable name (and the radio's node address). Done here
-        // (not just onCreate) in case the device identity wasn't ready yet at
-        // first launch.
-        core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
-            // Re-assert rather than set: passing the stored override back
-            // through resolves to the same name.
-            val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
-                .getString("device_name", "").orEmpty()
-            applyDeviceName(this, core, it, stored)
-        }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.
         reconcilePendingLinks()

@@ -282,6 +282,24 @@ pub extern "system" fn Java_app_myco_core_NativeCore_accountRevealNsec(
     jstr(&mut env, nsec)
 }
 
+/// The nearby secret to advertise (8 hex chars), or empty while Nearby is
+/// off. Outside the reducer so the 2 s beacon poll builds no state.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbySecret(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    let secret = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.nearby_secret()
+        }
+        None => String::new(),
+    };
+    jstr(&mut env, secret)
+}
+
 /// The account's avatar bytes; empty while there is none. Re-fetch when
 /// `account.avatarRev` changes.
 #[no_mangle]

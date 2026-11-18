@@ -129,6 +129,15 @@ external fun accountRevealNsec(handle): String   // "" while logged out
 external fun accountAvatar(handle): ByteArray    // empty while there is none
 ```
 
+### Nearby
+
+```kotlin
+external fun nearbySecret(handle): String        // 8 hex; "" while Nearby is off
+```
+
+Polled by `NearbyBeacon` every 2 s (10 s in the background) for the BLE
+advert, so it builds no state snapshot.
+
 The account's view (`account` in the state: status, npub, name, picture,
 `avatarRev`, …) rides the reducer; these two do not. The secret stays out of
 every state snapshot and is fetched only after the Account page's warning. The

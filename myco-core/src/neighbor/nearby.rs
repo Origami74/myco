@@ -113,9 +113,11 @@ pub trait DirectPeers: Send + Sync {
     }
 }
 
-/// Nobody: the default until the runtime wires the node in.
+/// Nobody in reach.
+#[cfg(test)]
 pub struct NoDirectPeers;
 
+#[cfg(test)]
 impl DirectPeers for NoDirectPeers {
     fn direct(&self) -> Vec<DirectPeer> {
         Vec::new()
@@ -266,7 +268,15 @@ struct Heard {
     secrets: BTreeMap<Secret, Sighting>,
     /// The current new-secret window: when it started, how many it took.
     window: Option<(Instant, usize)>,
+    /// Secrets turned away by a full window, and when. One heard again
+    /// within [`HEARD_FOR`] gets in past the window: a real phone's secret
+    /// is reported again every 20 s, a beacon's made-up ones never are, so a
+    /// beacon filling every window can no longer keep real phones out.
+    waiting: BTreeMap<Secret, Instant>,
 }
+
+/// Most secrets kept in [`Heard::waiting`].
+const MAX_WAITING: usize = 64;
 
 /// Why a setup was not answered with a link.
 #[derive(Debug, PartialEq, Eq)]
@@ -303,6 +313,7 @@ pub struct Nearby {
 
 impl Nearby {
     /// With `direct` deciding who is in reach.
+    #[cfg(test)]
     pub fn with(direct: Arc<dyn DirectPeers>) -> Self {
         let n = Self::default();
         n.set_direct(direct);
@@ -432,10 +443,23 @@ impl Nearby {
                     }
                     _ => (now, 0),
                 };
-                if taken >= NEW_PER_WINDOW {
+                let again = h
+                    .waiting
+                    .remove(&secret)
+                    .is_some_and(|t| now.saturating_duration_since(t) <= HEARD_FOR);
+                if taken >= NEW_PER_WINDOW && !again {
+                    if h.waiting.len() >= MAX_WAITING {
+                        let oldest = h.waiting.iter().min_by_key(|(_, t)| **t).map(|(k, _)| *k);
+                        if let Some(k) = oldest {
+                            h.waiting.remove(&k);
+                        }
+                    }
+                    h.waiting.insert(secret, now);
                     false
                 } else {
-                    h.window = Some((start, taken + 1));
+                    if !again {
+                        h.window = Some((start, taken + 1));
+                    }
                     if h.secrets.len() >= MAX_HEARD {
                         // Ones seen once go before repeated ones, then the
                         // stalest.
@@ -1430,6 +1454,29 @@ mod tests {
         let later = now + NEW_WINDOW;
         n.hear(99u32.to_be_bytes(), later);
         assert_eq!(n.heard(later).len(), NEW_PER_WINDOW + 1);
+    }
+
+    /// A beacon filling every window with made-up secrets can't keep a real
+    /// phone out: its secret, turned away once, gets in when heard again.
+    #[test]
+    fn a_real_secret_gets_past_a_beacon_filling_every_window() {
+        let n = Nearby::default();
+        let real = [7, 7, 7, 7];
+        let mut fake = 1000u32;
+        let mut beacon = |n: &Nearby, at: Instant| {
+            for _ in 0..NEW_PER_WINDOW {
+                n.hear(fake.to_be_bytes(), at);
+                fake += 1;
+            }
+        };
+        let t0 = Instant::now();
+        beacon(&n, t0);
+        n.hear(real, t0);
+        assert!(!n.heard(t0).contains(&real), "the window was full");
+        let t1 = t0 + Duration::from_secs(20);
+        beacon(&n, t1);
+        n.hear(real, t1);
+        assert!(n.heard(t1).contains(&real), "heard again: in");
     }
 
     #[test]
