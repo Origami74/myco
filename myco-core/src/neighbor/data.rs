@@ -484,15 +484,21 @@ impl Table {
         if !over {
             return Vec::new();
         }
-        let mut oldest: Vec<(u64, String)> = self
+        // Others' first, oldest first, then this device's own: a peer
+        // pushing thousands of events must not evict what we published
+        // (posts, shared update manifests) while its own are left.
+        let mut oldest: Vec<(bool, u64, String)> = self
             .keys
             .iter()
             .filter(|(key, _)| is_blob(key) == blobs)
-            .filter_map(|(key, ns)| ns.get(&n).map(|h| (h.seq, key.clone())))
+            .filter_map(|(key, ns)| {
+                ns.get(&n)
+                    .map(|h| (h.provenance().mine, h.seq, key.clone()))
+            })
             .collect();
         oldest.sort();
         let mut orphans = Vec::new();
-        for (_, key) in oldest {
+        for (_, _, key) in oldest {
             let usage = self.usage.get(&n).copied().unwrap_or_default();
             let under = if blobs {
                 usage.bytes <= quota.bytes / 10 * 9
@@ -764,6 +770,26 @@ impl Scoped {
             let mut table = self.table.lock().unwrap();
             for old in before_slot.iter().filter(|id| !now.contains(*id)) {
                 table.remove(old, n);
+            }
+        }
+        // A NIP-09 deletion took events out of `n`'s store: the table lets
+        // them go too, or `has` would go on saying yes and the quota would
+        // count them.
+        if event.kind == nostr::Kind::EventDeletion {
+            let named: Vec<nostr::EventId> = event.tags.event_ids().copied().collect();
+            if !named.is_empty() {
+                let still: HashSet<String> = store
+                    .query(&[Filter::new().ids(named.iter().copied())])
+                    .await?
+                    .into_iter()
+                    .map(|e| e.id.to_hex())
+                    .collect();
+                let mut table = self.table.lock().unwrap();
+                for id in named.iter().map(|id| id.to_hex()) {
+                    if !still.contains(&id) {
+                        table.remove(&id, n);
+                    }
+                }
             }
         }
         if evicted {
@@ -1951,6 +1977,29 @@ mod tests {
         assert!(scoped.scopes_blob(id, "ab"));
     }
 
+    /// A peer pushing past the quota evicts its own kind first: what this
+    /// device published stays, however old.
+    #[tokio::test]
+    async fn eviction_takes_others_events_before_ours() {
+        let n = open();
+        let club = create(&n, "Club").await;
+        let id = n.records()[0].id;
+        n.scoped.set_quota(Quota {
+            events: 10,
+            bytes: 100,
+        });
+        n.publish(&app(), &club, note("ours, oldest"))
+            .await
+            .unwrap();
+        for i in 0..20 {
+            n.receive(id, note(&format!("theirs {i}")), "link-x", 1)
+                .await;
+        }
+        let left = texts(&n, &club).await;
+        assert!(left.len() <= 10, "{left:?}");
+        assert!(left.iter().any(|t| t == "ours, oldest"), "{left:?}");
+    }
+
     #[tokio::test]
     async fn a_neighborhood_past_its_quota_drops_its_oldest() {
         let n = open();
@@ -2125,6 +2174,9 @@ mod tests {
         let notes = [Filter::new().id(hello.id)];
         assert_eq!(scoped.backlog(club, &notes).await.unwrap().len(), 1);
         assert!(scoped.backlog(home, &notes).await.unwrap().is_empty());
+        // And the table agrees: Home no longer has it, Club still does.
+        assert!(!scoped.has(home, &hello), "no phantom left in Home");
+        assert!(scoped.has(club, &hello));
     }
 
     #[tokio::test]
