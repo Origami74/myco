@@ -54,6 +54,15 @@ const GLOBAL_BURST: f64 = 200.0;
 /// its upgrade is answered.
 const MAX_IN_FLIGHT: usize = 64;
 
+/// Of those, the most one source address may hold: a source trickling slow
+/// bodies can't take every slot.
+const MAX_IN_FLIGHT_PER_SOURCE: usize = 8;
+
+/// How long a request may take to be read and answered. A body trickled in
+/// a byte at a time holds an in-flight slot; this frees it. A WebSocket's
+/// life after its upgrade is not counted.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Per-source token bucket. A source that empties it is told to slow down
 /// (429), not banned: a mesh address costs nothing to replace, so there is
 /// no identity worth banning, and a failed request is not evidence of intent.
@@ -87,6 +96,8 @@ pub(crate) struct Limiter {
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
     global: Mutex<Option<Bucket>>,
     in_flight: Arc<tokio::sync::Semaphore>,
+    /// Requests in flight per source, for [`MAX_IN_FLIGHT_PER_SOURCE`].
+    per_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
 }
 
 impl Default for Limiter {
@@ -95,7 +106,43 @@ impl Default for Limiter {
             buckets: Mutex::default(),
             global: Mutex::default(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
+            per_source: Arc::default(),
         }
+    }
+}
+
+/// One source's in-flight slot, given back when dropped.
+struct SourceSlot {
+    per_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Drop for SourceSlot {
+    fn drop(&mut self) {
+        let mut map = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
+
+impl Limiter {
+    /// A slot for one more request from `ip`, or `None` past
+    /// [`MAX_IN_FLIGHT_PER_SOURCE`].
+    fn source_slot(&self, ip: IpAddr) -> Option<SourceSlot> {
+        let mut map = self.per_source.lock().unwrap();
+        let n = map.entry(ip).or_default();
+        if *n >= MAX_IN_FLIGHT_PER_SOURCE {
+            return None;
+        }
+        *n += 1;
+        Some(SourceSlot {
+            per_source: self.per_source.clone(),
+            ip,
+        })
     }
 }
 
@@ -141,10 +188,16 @@ async fn pace(
     if !limiter.take(from.ip(), Instant::now()) {
         return (StatusCode::TOO_MANY_REQUESTS, "slow down").into_response();
     }
+    let Some(_source) = limiter.source_slot(from.ip()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
+    };
     let Ok(_permit) = limiter.in_flight.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
     };
-    next.run(request).await
+    match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => (StatusCode::REQUEST_TIMEOUT, "too slow").into_response(),
+    }
 }
 
 /// Serve the auth plane on an already-bound listener: a kernel socket, or the
@@ -203,6 +256,21 @@ mod tests {
         assert!(!limiter.take(ip(1), t), "the burst is spent");
         assert!(limiter.take(ip(2), t), "another source has its own bucket");
         assert!(limiter.take(ip(1), t + Duration::from_secs(1)), "refilled");
+    }
+
+    /// One source can hold only so many requests open: slow bodies from
+    /// it can't take every slot. Slots come back when dropped.
+    #[test]
+    fn one_source_holds_only_so_many_requests() {
+        let limiter = Limiter::default();
+        let held: Vec<_> = (0..MAX_IN_FLIGHT_PER_SOURCE)
+            .map(|_| limiter.source_slot(ip(1)).expect("a slot"))
+            .collect();
+        assert!(limiter.source_slot(ip(1)).is_none(), "its share is spent");
+        assert!(limiter.source_slot(ip(2)).is_some(), "others still get in");
+        drop(held);
+        assert!(limiter.source_slot(ip(1)).is_some(), "given back");
+        assert!(!limiter.per_source.lock().unwrap().contains_key(&ip(3)));
     }
 
     #[test]

@@ -633,9 +633,17 @@ impl Links {
         }
     }
 
+    /// Run `f` on the links, then save and tell watchers, but only if it
+    /// changed anything: a refused setup or an unchanged offer costs no
+    /// fsync and wakes no link socket (a stranger can send 50 refused
+    /// setups a second).
     fn change<T>(&self, f: impl FnOnce(&mut Saved) -> T) -> T {
         let mut saved = self.saved.lock().unwrap();
+        let before = saved.clone();
         let out = f(&mut saved);
+        if *saved == before {
+            return out;
+        }
         let persisted = Persisted {
             links: saved
                 .links
@@ -1091,6 +1099,33 @@ mod tests {
                 b"Test Using Larger Than Block-Size Key - Hash Key First"
             )),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    /// A refused setup changes nothing, so it writes nothing and wakes no
+    /// watcher.
+    #[test]
+    fn a_refused_setup_neither_writes_nor_wakes() {
+        let d = dir();
+        let a = Links::open(&d);
+        let url = "http://a.fips:4873/nh";
+        let offer = a.invite(vec![url.into()], vec![], INVITE_TTL_SECS);
+        let file = d.join(FILE);
+        let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let mut watch = a.watch();
+        watch.borrow_and_update();
+        let (mut request, _) =
+            Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
+        request.proof = "00".repeat(32);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(a
+            .accept(&offer.pk, url, &request, &offer_content(), None)
+            .is_err());
+        assert!(!watch.has_changed().unwrap(), "no watcher woken");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            written,
+            "links.json not rewritten"
         );
     }
 

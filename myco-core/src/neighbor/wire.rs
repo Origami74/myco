@@ -45,6 +45,7 @@ pub fn relay_urls(link: &Link) -> Vec<String> {
         .filter(|u| dialable(u))
         .collect();
     urls.sort_by_key(|u| !u.contains(".fips"));
+    urls.truncate(super::service::MAX_LINK_URLS);
     urls
 }
 

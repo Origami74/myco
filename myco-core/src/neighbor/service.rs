@@ -21,8 +21,8 @@
 //! Every refusal says only "refused": a stranger learns nothing about which
 //! check failed.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -635,6 +635,9 @@ pub const PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_secs(3
 pub async fn keep_in_touch(links: Arc<Links>) {
     let mut tick = tokio::time::interval(PRESENCE_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Links whose last check is still going: never a second one beside it,
+    // so a peer whose URLs all hang can't pile checks up.
+    let checking: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     loop {
         tick.tick().await;
         // Only connections that still share something are anyone's business.
@@ -643,24 +646,40 @@ pub async fn keep_in_touch(links: Arc<Links>) {
             .into_iter()
             .filter(|l| !l.neighborhoods.is_empty())
         {
+            if !checking.lock().unwrap().insert(link.id.clone()) {
+                continue;
+            }
             let links = links.clone();
+            let checking = checking.clone();
             tokio::spawn(async move {
-                let Ok(resp) = call(&link, reqwest::Method::GET, "offer", None).await else {
-                    return;
-                };
-                if !resp.status().is_success() {
-                    return;
-                }
-                links.mark_seen(&link.id);
-                if let Ok(bytes) = read_capped(resp, MAX_ANSWER).await {
-                    if let Ok(offer) = serde_json::from_slice::<nostr::Event>(&bytes) {
-                        links.update_offer(&link.id, offer);
+                let id = link.id.clone();
+                let check = async {
+                    let Ok(resp) = call(&link, reqwest::Method::GET, "offer", None).await else {
+                        return;
+                    };
+                    if !resp.status().is_success() {
+                        return;
                     }
-                }
+                    links.mark_seen(&link.id);
+                    if let Ok(bytes) = read_capped(resp, MAX_ANSWER).await {
+                        if let Ok(offer) = serde_json::from_slice::<nostr::Event>(&bytes) {
+                            links.update_offer(&link.id, offer);
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(CALL_TIMEOUT, check).await;
+                checking.lock().unwrap().remove(&id);
             });
         }
     }
 }
+
+/// The most of a peer's link URLs a call tries. An offer is the peer's
+/// to write: a thousand blackholed URLs must not cost a thousand dials.
+pub const MAX_LINK_URLS: usize = 4;
+
+/// How long one call to a peer may take in all, over every URL it tries.
+pub const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// The largest answer read from a peer's link service: an offer or a setup
 /// answer is a few signed events.
@@ -775,6 +794,7 @@ pub async fn call(
         .into_iter()
         .filter(|s| s.kind == "link")
         .map(|s| s.url)
+        .take(MAX_LINK_URLS)
         .collect();
     let body = body.map(|b| serde_json::to_vec(&b)).transpose()?;
     let mut last = anyhow::anyhow!("the peer offers no link URL");
