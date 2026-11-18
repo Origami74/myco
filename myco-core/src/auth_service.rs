@@ -149,24 +149,34 @@ async fn pace(
 
 /// Serve the auth plane on an already-bound listener: a kernel socket, or the
 /// mesh stack's (see [`crate::mesh_net`]).
+///
+/// `source_trusted`: whether a connection's source address on this listener
+/// is the peer's own. On the mesh stack it is: FIPS bound it to the device
+/// key. On a kernel socket beside the mesh stack it is not: a host on the
+/// LAN can claim any `fd…` address there and get the replies over the
+/// default route. Checks that rest on the source (Nearby) refuse those.
 pub async fn serve<L>(
     links: crate::neighbor::service::LinkService,
     listener: L,
+    source_trusted: bool,
 ) -> anyhow::Result<()>
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
     axum::serve(
         axum::serve::ListenerExt::tap_io(listener, |_: &mut L::Io| {}),
-        app(links).into_make_service_with_connect_info::<SocketAddr>(),
+        app(links, source_trusted).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())
 }
 
-fn app(links: crate::neighbor::service::LinkService) -> Router {
-    Router::new()
-        .merge(crate::neighbor::service::routes(links))
+fn app(links: crate::neighbor::service::LinkService, source_trusted: bool) -> Router {
+    let mut router = Router::new().merge(crate::neighbor::service::routes(links));
+    if !source_trusted {
+        router = router.layer(axum::Extension(crate::neighbor::service::SourceUntrusted));
+    }
+    router
         .layer(middleware::from_fn_with_state(
             Arc::new(Limiter::default()),
             pace,

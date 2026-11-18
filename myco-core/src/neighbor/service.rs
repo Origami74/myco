@@ -144,14 +144,22 @@ fn refused() -> Response {
         .into_response()
 }
 
+/// Marks a listener whose connections' source addresses are not vouched for
+/// by FIPS (a kernel socket beside the mesh stack). See
+/// `auth_service::serve`.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceUntrusted;
+
 /// `POST /nh/nearby`: an ephemeral link with a device directly in reach.
 /// The source address is the check, so it is read from the connection
-/// (present when served with connect info, as the auth plane is).
+/// (present when served with connect info, as the auth plane is), and only
+/// where FIPS vouches for it.
 async fn nearby(State(svc): State<LinkService>, request: axum::extract::Request) -> Response {
     let source = request
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip());
+        .map(|c| c.0.ip())
+        .filter(|_| request.extensions().get::<SourceUntrusted>().is_none());
     let auth = request
         .headers()
         .get("authorization")

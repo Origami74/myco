@@ -117,7 +117,11 @@ it does not depend on the FIPS npub.
   changes and every 20 s while it is still heard. A phone never offers its
   own.
 - **Not over the LAN.** mDNS does not carry the secret. A phone reached
-  only over the local network does not link through Nearby.
+  only over the local network does not link through Nearby: it is never
+  dialed, so it never gets proofs it could brute-force offline, and its
+  setups are refused.
+- **Guessing wears a secret out.** After 1024 wrong proofs a secret is
+  replaced, so a guess succeeds with at most 2^-22 chance per secret.
 
 ## Setup: `POST /nh/nearby`
 
@@ -143,9 +147,11 @@ Authorization: Nostr <NIP-98 over this URL, signed by the caller's new link key>
 
 The server refuses (`403 refused`, nothing more) unless:
 
-1. The request's source address maps to a peer directly in reach. On the
-   mesh a source is a FIPS address (`fd…`), derived from the device key, so
-   it names exactly one npub.
+1. The request's source address maps to a peer directly in reach by radio
+   (BLE, Wi-Fi Aware, USB). On the mesh a source is a FIPS address (`fd…`),
+   derived from the device key, so it names exactly one npub. Only
+   connections on the mesh stack count: on a kernel socket beside it, a
+   host on the LAN could claim any `fd…` source.
 2. Nearby is on here.
 3. The NIP-98 header is signed by the `pk` in the body, for this URL.
 4. The offer is valid and signed by that key.

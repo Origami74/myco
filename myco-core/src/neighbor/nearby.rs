@@ -216,6 +216,9 @@ const NEW_WINDOW: Duration = Duration::from_secs(10);
 pub const MAX_EPHEMERAL: usize = 32;
 /// Most nearby setups answered per [`SETUP_WINDOW`].
 pub const MAX_SETUPS: usize = 12;
+/// Wrong proofs one secret takes before it is replaced. A secret has 2^32
+/// values, so a guesser gets at most 2^-22 of a chance on each.
+const MAX_FAILED_PROOFS: u32 = 1024;
 const SETUP_WINDOW: Duration = Duration::from_secs(60);
 
 fn fresh_secret() -> Secret {
@@ -236,6 +239,8 @@ struct Secrets {
     since: Instant,
     /// Replaced ones, newest last: used, timed out, or forgotten.
     spent: std::collections::VecDeque<(Secret, Instant)>,
+    /// Wrong proofs checked against `current`, for [`MAX_FAILED_PROOFS`].
+    failed: u32,
 }
 
 /// One heard secret.
@@ -327,6 +332,7 @@ impl Nearby {
                     current,
                     since: now,
                     spent: Default::default(),
+                    failed: 0,
                 });
                 current
             }
@@ -350,6 +356,7 @@ impl Nearby {
         }
         s.current = fresh_secret();
         s.since = now;
+        s.failed = 0;
         s.current
     }
 
@@ -390,6 +397,12 @@ impl Nearby {
             if s.spent.iter().any(|(old, _)| *p == proof(old, pk)) {
                 return Err(Refusal::Used(i));
             }
+        }
+        // Wrong guesses wear the secret out, so guessing it online is bounded.
+        s.failed = s.failed.saturating_add(proofs.len().max(1) as u32);
+        if s.failed >= MAX_FAILED_PROOFS {
+            tracing::info!("nearby secret refused too often: replaced");
+            Self::replace(s, now);
         }
         Err(Refusal::Refused)
     }
@@ -567,6 +580,11 @@ pub fn answer(
         .nearby
         .who(source.ok_or(Refusal::Refused)?)
         .ok_or(Refusal::Refused)?;
+    // Reached by radio: a phone reached only over the local network never
+    // joins through Nearby, whatever it proves.
+    if peer.reach != Reach::Radio {
+        return Err(refused());
+    }
     let neighbors = svc.neighbors.get().ok_or(Refusal::Refused)?;
     if !neighbors.nearby_on() {
         return Err(refused());
@@ -785,7 +803,11 @@ pub fn plan(own: &str, direct: &[DirectPeer], links: &super::link::Links, now: I
             out.end.push(link.id);
         }
     }
-    for p in direct {
+    // Proofs of what we heard go only to phones reached by radio: one
+    // reached only over the local network would be answered no anyway, and
+    // could take the proofs offline and brute-force the 4-byte secrets of
+    // phones around us.
+    for p in direct.iter().filter(|p| p.reach == Reach::Radio) {
         let linked = links
             .ephemeral_with(&p.npub)
             .is_some_and(|l| !out.end.contains(&l.id));
@@ -1081,6 +1103,60 @@ mod tests {
             npub: npub.into(),
             reach: Reach::Radio,
         }
+    }
+
+    /// A phone reached only over the local network is never sent proofs:
+    /// it could brute-force the secrets of the phones around us offline.
+    #[test]
+    fn a_peer_reached_only_over_the_local_network_is_not_dialed() {
+        let l = links();
+        let lan = DirectPeer {
+            npub: "npub1c".into(),
+            reach: Reach::Local,
+        };
+        let p = plan("npub1a", &[lan, peer("npub1d")], &l, Instant::now());
+        assert_eq!(p.dial, [peer("npub1d")]);
+    }
+
+    /// Nor is one answered, whatever it proves.
+    #[test]
+    fn a_setup_from_a_peer_reached_only_over_the_local_network_is_refused() {
+        struct Lan(String);
+        impl DirectPeers for Lan {
+            fn direct(&self) -> Vec<DirectPeer> {
+                vec![DirectPeer {
+                    npub: self.0.clone(),
+                    reach: Reach::Local,
+                }]
+            }
+        }
+        use nostr::nips::nip19::ToBech32;
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        let mut svc = service();
+        svc.nearby = Arc::new(Nearby::with(Arc::new(Lan(npub.clone()))));
+        let source = IpAddr::V6(fips_address(&npub).unwrap());
+        assert_eq!(
+            answer(&svc, Some(source), None, b"{}", Instant::now()).err(),
+            Some(Refusal::Refused)
+        );
+    }
+
+    /// Wrong guesses wear a secret out: past the budget it is replaced.
+    #[test]
+    fn a_secret_guessed_at_too_often_is_replaced() {
+        let n = Nearby::default();
+        let now = Instant::now();
+        let s = n.secret(now);
+        let eve = "ee".repeat(32);
+        let wrong: Vec<String> = (0..MAX_PROOFS as u32)
+            .map(|i| proof(&i.to_be_bytes(), &eve))
+            .filter(|p| *p != proof(&s, &eve))
+            .collect();
+        let rounds = MAX_FAILED_PROOFS as usize / wrong.len() + 1;
+        for _ in 0..rounds {
+            assert_eq!(n.take(&wrong, &eve, now), Err(Refusal::Refused));
+        }
+        assert_ne!(n.current(), Some(s), "replaced after too many wrong proofs");
     }
 
     #[test]

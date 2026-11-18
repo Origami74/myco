@@ -574,10 +574,17 @@ impl AppRuntime {
             ));
             let port = crate::auth_service::AUTH_PORT;
             let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
+            // With the mesh stack up, only its connections carry a source
+            // address FIPS vouches for; see `auth_service::serve`.
+            let has_stack = listeners
+                .iter()
+                .any(|l| matches!(l, crate::mesh_net::PeerListener::Stack(_)));
             for listener in listeners {
                 let links = link_service.clone();
+                let trusted =
+                    !has_stack || matches!(listener, crate::mesh_net::PeerListener::Stack(_));
                 rt.spawn(async move {
-                    if let Err(e) = crate::auth_service::serve(links, listener).await {
+                    if let Err(e) = crate::auth_service::serve(links, listener, trusted).await {
                         tracing::error!(error = %e, "auth service exited");
                     }
                 });
