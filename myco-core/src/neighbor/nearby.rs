@@ -296,6 +296,9 @@ pub struct Nearby {
     offered: Mutex<BTreeMap<String, BTreeSet<NeighborhoodId>>>,
     /// When recent nearby setups were answered, for [`MAX_SETUPS`].
     setups: Mutex<std::collections::VecDeque<Instant>>,
+    /// A nearby link was set up since nearby was last forgotten: when the
+    /// last one ends, its content goes too.
+    linked: std::sync::atomic::AtomicBool,
 }
 
 impl Nearby {
@@ -625,6 +628,9 @@ pub fn answer(
         .add_ephemeral(&keys, request.offer, carried.clone(), &peer.npub)
         .ok_or(Refusal::Refused)?;
     svc.links.mark_direct(&link.id, peer.reach, now);
+    svc.nearby
+        .linked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     tracing::info!(link = %link.id, n = carried.len(), "nearby link set up");
     Ok(NearbyResponse {
         offer: sign_offer(&keys, &svc.offer(&pk), None),
@@ -759,6 +765,9 @@ async fn dial_once(
         .add_ephemeral(&keys, response.offer, carried, &peer.npub)
         .ok_or_else(|| anyhow::anyhow!("their offer was not valid"))?;
     svc.links.mark_direct(&link.id, peer.reach, Instant::now());
+    svc.nearby
+        .linked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(Attempt::Linked(Box::new(link)))
 }
 
@@ -835,7 +844,11 @@ pub fn end_all(svc: &LinkService) -> Option<Vec<Link>> {
     for link in &all {
         svc.links.end(&link.id);
     }
-    let held = !all.is_empty() || svc.nearby.holds_anything();
+    let linked = svc
+        .nearby
+        .linked
+        .swap(false, std::sync::atomic::Ordering::SeqCst);
+    let held = !all.is_empty() || linked || svc.nearby.holds_anything();
     svc.nearby.offered.lock().unwrap().clear();
     svc.nearby.dialing.lock().unwrap().clear();
     *svc.nearby.heard.lock().unwrap() = Heard::default();
@@ -881,11 +894,16 @@ pub async fn tick(
     // Replaced once it is old, used or not.
     svc.nearby.secret(now);
     let direct = svc.nearby.direct_peers();
-    if direct.is_empty() {
+    // Nobody in radio reach: forget everything at once, by design (no
+    // GRACE). Peers only on the local network don't count; they never link
+    // through Nearby, so they must not keep it alive either.
+    if !direct.iter().any(|p| p.reach == Reach::Radio) {
         // Only once there were links: secrets heard from phones not (yet)
         // reached over fips are kept for when they are, and our own stays
         // as it is, so a lone phone's advert never churns.
-        if !svc.links.ephemeral().is_empty() {
+        if !svc.links.ephemeral().is_empty()
+            || svc.nearby.linked.load(std::sync::atomic::Ordering::SeqCst)
+        {
             // Nobody to tell: they are out of reach.
             end_all(svc);
             forget_content(svc).await;
@@ -1345,6 +1363,26 @@ mod tests {
             tick_alone(&svc).await;
             assert_eq!(svc.nearby.current(), None, "off: nothing to advertise");
         }
+    }
+
+    /// A phone only on the local network is not "in reach" for Nearby: it
+    /// never links through it, so it must not keep nearby from forgetting.
+    #[tokio::test]
+    async fn a_peer_only_on_the_local_network_does_not_keep_nearby_alive() {
+        struct Lan;
+        impl DirectPeers for Lan {
+            fn direct(&self) -> Vec<DirectPeer> {
+                vec![DirectPeer {
+                    npub: "npub1lan".into(),
+                    reach: Reach::Local,
+                }]
+            }
+        }
+        let mut svc = service();
+        svc.nearby = Arc::new(Nearby::with(Arc::new(Lan)));
+        ephemeral(&svc.links, "npub1b");
+        tick_alone(&svc).await;
+        assert!(svc.links.ephemeral().is_empty(), "nearby forgotten");
     }
 
     #[tokio::test]
