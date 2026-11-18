@@ -584,6 +584,7 @@ impl Scoped {
     }
 
     /// Set how much each neighborhood may keep.
+    #[cfg(test)]
     pub fn set_quota(&self, quota: Quota) {
         *self.quota.lock().unwrap() = quota;
     }

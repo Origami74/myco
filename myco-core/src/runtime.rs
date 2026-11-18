@@ -743,9 +743,8 @@ impl AppRuntime {
     /// the Wi-Fi Aware bulk lane's data plane (docs/design/fips/wifi-aware-interop.md).
     /// Deliberately not Android-gated: the identical UDP path is the lane's
     /// dev/test stand-in on a plain LAN.
-    // `aware_slots` sizes the Aware UDP instance pool, which only the Android
-    // node configures; the host build takes the parameter and leaves it.
-    #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
+    /// `aware_slots` sizes the Aware UDP instance pool (see
+    /// [`aware_udp_slots`]).
     fn build_node(data_dir: &str, wifi_aware: bool, aware_slots: u8) -> anyhow::Result<fips::Node> {
         let nsec = identity_store::load_or_generate(Path::new(data_dir))?;
         let mut config = fips::Config::new();
@@ -852,8 +851,7 @@ impl AppRuntime {
                     .into_iter()
                     .collect();
             // As many as the chipset says it can carry — see `aware_udp_slots`.
-            let slots =
-                aware_udp_slots(crate::settings_store::load(Path::new(data_dir)).aware_data_paths);
+            let slots = aware_slots;
             for (slot, instance) in AWARE_UDP_INSTANCES.iter().take(slots as usize).enumerate() {
                 instances.insert(
                     (*instance).to_string(),
@@ -1479,7 +1477,7 @@ impl AppRuntime {
         };
         let mut view = crate::neighbor::view::build(&records, &svc.links, nearby_on);
         if nearby_on {
-            view.nearby.secret = hex::encode(svc.nearby.secret(std::time::Instant::now()));
+            view.nearby.secret = self.nearby_secret();
         }
         let ui = self.link_ui.lock().unwrap();
         view.invite = ui.invite.clone();
@@ -2731,6 +2729,28 @@ impl AppRuntime {
         };
         let pubkey = account.view().pubkey_hex;
         rt.spawn(async move { host.identity_changed(&pubkey).await });
+    }
+
+    /// The nearby secret to advertise over BLE (8 hex chars), or empty while
+    /// Nearby is off. Its own JNI call (`nearbySecret`), so the beacon polling
+    /// it every 2 s doesn't build and parse the whole state.
+    pub fn nearby_secret(&self) -> String {
+        let Some(svc) = &self.link_service else {
+            return String::new();
+        };
+        let on = match &self.neighbors {
+            Some(n) => n.nearby_on(),
+            None => {
+                !crate::neighbor::store::load(&crate::neighbor::store::path(Path::new(
+                    &self.data_dir,
+                )))
+                .nearby_off
+            }
+        };
+        if !on {
+            return String::new();
+        }
+        hex::encode(svc.nearby.secret(std::time::Instant::now()))
     }
 
     /// The logged-in secret as `nsec1…`, for the Account page's reveal —

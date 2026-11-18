@@ -84,6 +84,7 @@ impl LinkService {
     }
 
     /// Start a link carrying `neighborhoods`, for a QR or link.
+    #[cfg(test)]
     pub fn invite(&self, neighborhoods: Vec<Shared>, ttl_secs: u64) -> LinkOffer {
         self.invite_from(neighborhoods, ttl_secs, None)
     }

@@ -733,6 +733,7 @@ impl Links {
 
     /// Start a link: a fresh link key and one-time secret, offered with
     /// `neighborhoods`, reachable at `urls`.
+    #[cfg(test)]
     pub fn invite(
         &self,
         urls: Vec<String>,
