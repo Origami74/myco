@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use super::id::NeighborhoodId;
 use super::link::{
-    check_http_auth, http_auth, Link, LinkOffer, Links, OfferContent, Service, SetupRequest,
+    check_http_auth_by, http_auth, Link, LinkOffer, Links, OfferContent, Service, SetupRequest,
     SetupResponse, Shared,
 };
 
@@ -115,11 +115,12 @@ impl LinkService {
         body: &[u8],
     ) -> Option<Link> {
         let header = headers.get("authorization")?.to_str().ok()?;
-        let signer = self
-            .link_urls(pk)
-            .iter()
-            .find_map(|url| check_http_auth(header, method, &format!("{url}/{rest}"), body))?;
-        let link = self.links.by_peer(&signer).filter(|l| l.own_pk() == pk)?;
+        let signer = self.link_urls(pk).iter().find_map(|url| {
+            check_http_auth_by(header, method, &format!("{url}/{rest}"), body, |signer| {
+                self.links.by_keys(signer, pk).is_some()
+            })
+        })?;
+        let link = self.links.by_keys(&signer, pk)?;
         self.links.mark_seen(&link.id);
         Some(link)
     }

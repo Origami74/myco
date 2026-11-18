@@ -32,8 +32,11 @@ use super::id::{token, NeighborhoodId};
 pub const K_OFFER: u16 = 37_516;
 /// NIP-98's HTTP auth kind.
 pub const K_HTTP_AUTH: u16 = 27_235;
-/// How far a NIP-98 signature's time may be from ours.
-pub const AUTH_WINDOW_SECS: u64 = 60;
+/// How far a NIP-98 signature's time may be from ours. Wider than NIP-98's
+/// usual minute: phones that live offline drift, and a link that fails
+/// every call says nothing about why. Nonces and the replay set keep a
+/// header good once.
+pub const AUTH_WINDOW_SECS: u64 = 300;
 /// How long an invitation's secret lasts by default.
 pub const INVITE_TTL_SECS: u64 = 15 * 60;
 /// The file under the data dir.
@@ -335,16 +338,33 @@ pub fn http_auth(keys: &Keys, method: &str, url: &str, body: &[u8]) -> String {
 /// accepted header is remembered (see [`Replays`]) and refused the second
 /// time.
 pub fn check_http_auth(header: &str, method: &str, url: &str, body: &[u8]) -> Option<String> {
+    check_http_auth_by(header, method, url, body, |_| true)
+}
+
+/// [`check_http_auth`] for a signer `known` accepts. Only a known signer's
+/// header is remembered, so strangers signing with throwaway keys can't
+/// push real headers out of the replay set.
+pub fn check_http_auth_by(
+    header: &str,
+    method: &str,
+    url: &str,
+    body: &[u8],
+    known: impl FnOnce(&str) -> bool,
+) -> Option<String> {
     let event = verify_http_auth(header, method, url, body)?;
+    let signer = event.pubkey.to_hex();
+    if !known(&signer) {
+        return None;
+    }
     replays().first_use(event.id, std::time::Instant::now())?;
-    Some(event.pubkey.to_hex())
+    Some(signer)
 }
 
 /// How long an accepted NIP-98 id is remembered: past the signing window
 /// both ways, after which the timestamp check refuses it anyway.
 const REPLAY_FOR: std::time::Duration = std::time::Duration::from_secs(2 * AUTH_WINDOW_SECS);
 /// The most accepted NIP-98 ids remembered at once; the oldest go first.
-const REPLAY_IDS: usize = 4096;
+const REPLAY_IDS: usize = 16_384;
 
 /// NIP-98 event ids accepted lately: a header is good once.
 #[derive(Default)]
@@ -421,8 +441,8 @@ fn verify_http_auth(header: &str, method: &str, url: &str, body: &[u8]) -> Optio
 
 // --- the store ------------------------------------------------------------------
 
-/// One link, from this side.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One link, from this side. `Debug` leaves the secret key out.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
     /// Local handle.
@@ -460,6 +480,21 @@ pub struct Ephemeral {
     pub device: String,
 }
 
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link")
+            .field("id", &self.id)
+            .field("secret", &"<redacted>")
+            .field("peer", &self.peer)
+            .field("neighborhoods", &self.neighborhoods)
+            .field("name", &self.name)
+            .field("created", &self.created)
+            .field("pending", &self.pending)
+            .field("ephemeral", &self.ephemeral)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Link {
     pub fn keys(&self) -> Keys {
         Keys::parse(&self.secret).expect("stored secret is valid")
@@ -494,8 +529,9 @@ pub fn device_npub(url: &str) -> Option<String> {
     Some(npub.to_string())
 }
 
-/// An invitation not yet used, on the initiator's side.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// An invitation not yet used, on the initiator's side. `Debug` leaves
+/// both secrets out.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Invite {
     secret_key: String,
     s: String,
@@ -504,6 +540,18 @@ struct Invite {
     /// Our name, as the invitation gave it: also signed into our answer.
     #[serde(default)]
     from: Option<String>,
+}
+
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invite")
+            .field("secret_key", &"<redacted>")
+            .field("s", &"<redacted>")
+            .field("n", &self.n)
+            .field("exp", &self.exp)
+            .field("from", &self.from)
+            .finish()
+    }
 }
 
 /// A join in progress, on the joiner's side.
@@ -721,6 +769,18 @@ impl Links {
         self.saved.lock().unwrap().links.clone()
     }
 
+    /// The link whose peer is `peer_pk` and whose own key is `own_pk`: two
+    /// links may share a peer key, never both.
+    pub fn by_keys(&self, peer_pk: &str, own_pk: &str) -> Option<Link> {
+        self.saved
+            .lock()
+            .unwrap()
+            .links
+            .iter()
+            .find(|l| l.peer == peer_pk && l.own_pk() == own_pk)
+            .cloned()
+    }
+
     pub fn by_peer(&self, peer_pk: &str) -> Option<Link> {
         self.saved
             .lock()
@@ -786,6 +846,12 @@ impl Links {
             );
         });
         offer
+    }
+
+    /// Revoke the invitation whose link key is `pk`: it can no longer be
+    /// joined. Returns whether it was there.
+    pub fn revoke(&self, pk: &str) -> bool {
+        self.change(|saved| saved.invites.remove(pk).is_some())
     }
 
     /// The initiator's side of `POST <url>/setup`: check the proof, spend
@@ -1099,6 +1165,56 @@ mod tests {
                 b"Test Using Larger Than Block-Size Key - Hash Key First"
             )),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    /// Only a known signer's header is remembered: a stranger's throwaway
+    /// keys can't fill the replay set.
+    #[test]
+    fn a_stranger_header_is_not_remembered() {
+        let url = "http://b.fips:4873/nh/x/offer";
+        let keys = Keys::generate();
+        let h = http_auth(&keys, "GET", url, b"");
+        assert!(check_http_auth_by(&h, "GET", url, b"", |_| false).is_none());
+        assert!(
+            check_http_auth_by(&h, "GET", url, b"", |_| true).is_some(),
+            "not used up by the refusal"
+        );
+        assert!(
+            check_http_auth_by(&h, "GET", url, b"", |_| true).is_none(),
+            "a replay"
+        );
+    }
+
+    /// Neither a link's key nor an invitation's secrets show in `Debug`.
+    #[test]
+    fn debug_leaves_secrets_out() {
+        let a = Links::open(&dir());
+        a.invite(
+            vec!["http://a.fips:4873/nh".into()],
+            vec![],
+            INVITE_TTL_SECS,
+        );
+        let saved = a.saved.lock().unwrap().clone();
+        let invite = saved.invites.values().next().unwrap();
+        let shown = format!("{saved:?}");
+        assert!(!shown.contains(&invite.secret_key));
+        assert!(!shown.contains(&invite.s));
+    }
+
+    /// A revoked invitation can't be joined.
+    #[test]
+    fn a_revoked_invitation_is_refused() {
+        let a = Links::open(&dir());
+        let url = "http://a.fips:4873/nh";
+        let offer = a.invite(vec![url.into()], vec![], INVITE_TTL_SECS);
+        assert!(a.revoke(&offer.pk));
+        assert!(!a.revoke(&offer.pk), "once");
+        let (request, _) = Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
+        assert_eq!(
+            a.accept(&offer.pk, url, &request, &offer_content(), None)
+                .err(),
+            Some(Refused::UnknownInvite)
         );
     }
 
