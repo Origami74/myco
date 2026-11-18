@@ -131,6 +131,18 @@ pub trait NeighborData: Send + Sync {
         Err(NeighborError::NotFound)
     }
 
+    /// What is held here in the scope `address` names, matching `filters`:
+    /// a one-off read. Unlike [`NeighborData::subscribe`] it opens nothing
+    /// on the peers.
+    async fn held(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        filters: Vec<nostr::Filter>,
+    ) -> Result<Vec<nostr::Event>, NeighborError> {
+        Ok(self.subscribe(napplet, address, filters).await?.backlog)
+    }
+
     /// Keep a blob in the scope `address` names (a neighborhood; a peer
     /// address is refused), and carry it on as that neighborhood's policy
     /// says. `sha256` is already the bytes' hash.

@@ -107,11 +107,13 @@ pub async fn read(
     allowed(session)?;
     let mut out: Vec<Event> = Vec::new();
     for addr in addresses {
-        let feed = ctx
+        // What is held only: a one-off read must not open (and at once
+        // drop) a follow on every peer.
+        let held = ctx
             .neighbor
-            .subscribe(session.identity(), addr, filters.to_vec())
+            .held(session.identity(), addr, filters.to_vec())
             .await?;
-        for event in matching(filters, feed.backlog) {
+        for event in matching(filters, held) {
             if !out.iter().any(|e| e.id == event.id) {
                 out.push(event);
             }

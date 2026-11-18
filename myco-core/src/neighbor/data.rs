@@ -1597,6 +1597,28 @@ impl NeighborData for Neighbors {
         }
     }
 
+    async fn held(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Event>, NeighborError> {
+        let (target, record) = self.target(napplet, address)?;
+        if target.peer.is_some() {
+            return Err(NeighborError::Unsupported);
+        }
+        let keep = unmuted(&record);
+        Ok(self
+            .scoped
+            .backlog(record.id, &filters)
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .map(|(e, _)| e)
+            .filter(|e| keep(e))
+            .collect())
+    }
+
     async fn subscribe(
         &self,
         napplet: &NappletIdentity,
