@@ -128,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later never got it, and one seen through an app store's subscription
   wasn't installed. Each phone now keeps asking the phones it meets for
   updates, and every update that arrives is applied the same way.
+- **An app's new icon shows as soon as "Check for updates" installs it,**
+  not only after Myco is reopened.
 
 ### Deprecated
 

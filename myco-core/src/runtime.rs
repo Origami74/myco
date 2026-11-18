@@ -2278,12 +2278,18 @@ impl AppRuntime {
         // their updates through `napplet-updates` on their own; pinning one
         // found here shares it the same way.
         let offline_only = content.is_offline_only();
+        let statuses = content.clone();
         let napplet_check = async move {
             let host = host?;
             if offline_only {
                 return Some((0, napplets.len()));
             }
             let (updated, checked) = crate::napplet::refresh_all(&host, &napplets).await;
+            // The tiles read the served version's icon hash from the status:
+            // recomputed now, as an update from a neighborhood does.
+            if !updated.is_empty() {
+                statuses.refresh_napplet_status().await;
+            }
             Some((updated.len(), checked))
         };
         rt.spawn(content.check_updates_with(in_flight, napplet_check));
