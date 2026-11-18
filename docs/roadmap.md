@@ -346,7 +346,8 @@ question this closes).
 **Goal.** NAP-NOTIFY for napplets — `notify.show` from a napplet becomes an
 Android notification in Myco's channel, tapping it deep-links back into the
 napplet — with the grant on the review screen and the permissions sheet. The
-Kotlin half exists for file offers (`FileOfferNotifier`); this generalises it.
+Kotlin half that notified of file offers (`FileOfferNotifier`) went with file
+transfer; its channel setup and deep link are in git history to start from.
 A closed napplet cannot notify (no background execution); a doorbell that
 should ring while the app is closed needs a Myco-side subscription, which is a
 later item.
