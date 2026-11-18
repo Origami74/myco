@@ -534,6 +534,10 @@ pub struct Scoped {
     prune_events: Mutex<HashSet<NeighborhoodId>>,
     /// Blobs that left every scope, due to be deleted.
     orphan_blobs: Mutex<Vec<String>>,
+    /// Neighborhoods left: nothing more is kept in them, so a keep that was
+    /// in flight when they were left can't bring their store back. Cleared
+    /// when one is joined again ([`Scoped::rejoin`]).
+    left: Mutex<HashSet<NeighborhoodId>>,
     /// One table write at a time, so an older one never lands last.
     writing: Arc<Mutex<()>>,
     me: Weak<Scoped>,
@@ -577,6 +581,7 @@ impl Scoped {
             scheduled: AtomicBool::new(false),
             prune_events: Mutex::new(HashSet::new()),
             orphan_blobs: Mutex::new(Vec::new()),
+            left: Mutex::new(HashSet::new()),
             writing: Arc::new(Mutex::new(())),
             me: me.clone(),
             live: broadcast::channel(256).0,
@@ -709,6 +714,9 @@ impl Scoped {
         from: Option<&str>,
     ) -> anyhow::Result<Added> {
         let _keeping = self.gate.read().await;
+        if self.left.lock().unwrap().contains(&n) {
+            return Ok(Added::Already);
+        }
         let key = event.id.to_hex();
         let before = self.table.lock().unwrap().get(&key, n);
         if let Some(before) = before {
@@ -779,6 +787,9 @@ impl Scoped {
             anyhow::bail!("larger than a neighborhood keeps");
         }
         let _keeping = self.gate.read().await;
+        if self.left.lock().unwrap().contains(&id) {
+            anyhow::bail!("not in that neighborhood any more");
+        }
         self.blobs.put(bytes).await?;
         let key = format!("blob:{sha256}");
         let orphans = {
@@ -889,30 +900,51 @@ impl Scoped {
     }
 
     /// Take neighborhood `id` out of every scope; what nothing else keeps is
-    /// deleted.
+    /// deleted. Its record stays (Nearby forgetting what it held).
     pub(super) async fn forget(&self, id: NeighborhoodId) {
+        self.purge(id, false).await;
+    }
+
+    /// [`Scoped::forget`] for a neighborhood left: nothing is kept in it
+    /// again until it is joined again.
+    pub(super) async fn leave(&self, id: NeighborhoodId) {
+        self.purge(id, true).await;
+    }
+
+    /// Kept in again: `id` was joined (again).
+    pub(super) fn rejoin(&self, id: NeighborhoodId) {
+        self.left.lock().unwrap().remove(&id);
+    }
+
+    async fn purge(&self, id: NeighborhoodId, leaving: bool) {
+        // All under the write gate: a keep in flight either lands before
+        // and is purged, or after and finds the neighborhood left.
         let orphans = {
-            let mut table = self.table.lock().unwrap();
-            let keys: Vec<String> = table
-                .keys
-                .iter()
-                .filter(|(_, ns)| ns.contains_key(&id))
-                .map(|(k, _)| k.clone())
-                .collect();
-            let orphans = keys
-                .into_iter()
-                .filter(|k| table.remove(k, id))
-                .collect::<Vec<_>>();
-            table.usage.remove(&id);
+            let _all = self.gate.write().await;
+            if leaving {
+                self.left.lock().unwrap().insert(id);
+            }
+            let orphans = {
+                let mut table = self.table.lock().unwrap();
+                let keys: Vec<String> = table
+                    .keys
+                    .iter()
+                    .filter(|(_, ns)| ns.contains_key(&id))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                let orphans = keys
+                    .into_iter()
+                    .filter(|k| table.remove(k, id))
+                    .collect::<Vec<_>>();
+                table.usage.remove(&id);
+                orphans
+            };
+            self.prune_events.lock().unwrap().remove(&id);
+            self.stores.remove(id).await;
             orphans
         };
         self.orphaned(orphans);
         self.changed();
-        {
-            let _all = self.gate.write().await;
-            self.prune_events.lock().unwrap().remove(&id);
-            self.stores.remove(id).await;
-        }
         self.prune_now().await;
     }
 
@@ -1324,7 +1356,9 @@ impl Neighbors {
     ) -> Option<(AbortOnDrop, tokio::sync::mpsc::UnboundedReceiver<Event>)> {
         let links = self.links.clone()?;
         let scoped = self.scoped.clone();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        // Bounded: a peer streaming faster than events are kept waits on its
+        // socket instead of growing memory.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(FOLLOW_QUEUE);
         let (again_tx, again) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let wanted = filters.clone();
         let keep = tokio::spawn(async move {
@@ -1390,6 +1424,9 @@ impl Neighbors {
     }
 }
 
+/// Events a follow holds between the links' sockets and the keeper.
+const FOLLOW_QUEUE: usize = 256;
+
 /// How long a follow that ended `failures` times in a row waits before the
 /// next try: soon at first — a link just set up may not be finished on the
 /// peer's side yet — then longer, up to [`RETRY_FOLLOW`].
@@ -1407,7 +1444,7 @@ async fn follow_link(
     link: super::link::Link,
     n: NeighborhoodId,
     filters: Vec<Filter>,
-    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    tx: tokio::sync::mpsc::Sender<Event>,
     wait: std::time::Duration,
     ended: tokio::sync::mpsc::UnboundedSender<(String, bool)>,
 ) {
@@ -1946,6 +1983,27 @@ mod tests {
         // Its store went with it: keeping again starts from nothing.
         let fresh = n.scoped.stores.store(id).unwrap();
         assert!(fresh.query(&[Filter::new()]).await.unwrap().is_empty());
+    }
+
+    /// A keep in flight when a neighborhood is left can't bring it back.
+    #[tokio::test]
+    async fn nothing_is_kept_in_a_neighborhood_once_left() {
+        let n = open();
+        create(&n, "Club").await;
+        let id = n.records()[0].id;
+        n.scoped.leave(id).await;
+        let late = note("late");
+        n.scoped
+            .add(id, late.clone(), Provenance::pulled(), None)
+            .await
+            .unwrap();
+        assert!(!n.scoped.has(id, &late));
+        n.scoped.rejoin(id);
+        n.scoped
+            .add(id, late.clone(), Provenance::pulled(), None)
+            .await
+            .unwrap();
+        assert!(n.scoped.has(id, &late), "joined again: kept again");
     }
 
     /// The shell's Leave arrives on the JNI thread, outside any runtime:

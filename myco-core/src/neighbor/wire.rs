@@ -250,7 +250,7 @@ pub async fn follow(
     link: &Link,
     n: NeighborhoodId,
     filters: &[Filter],
-    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    tx: tokio::sync::mpsc::Sender<Event>,
     on_open: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let mut last = anyhow::anyhow!("the peer offers no relay");
@@ -291,7 +291,10 @@ pub async fn follow(
                     match v[0].as_str() {
                         Some("EVENT") => {
                             if let Ok(e) = serde_json::from_value::<Event>(v[2].clone()) {
-                                if e.verify().is_ok() && tx.send(e).is_err() {
+                                // Waits when the keeper is behind: a peer
+                                // streaming faster than we store is slowed,
+                                // not buffered without end.
+                                if e.verify().is_ok() && tx.send(e).await.is_err() {
                                     let _ = ws.close(None).await;
                                     return Ok(());
                                 }

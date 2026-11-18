@@ -286,6 +286,7 @@ impl Neighbors {
                     .unwrap_or_else(|| Record::new(id, &name, auto_accept));
             }
             if s.get(id).is_none() {
+                self.scoped.rejoin(id);
                 s.neighborhoods.push(Record::new(id, &name, auto_accept));
             }
             s.get(id).cloned().expect("just ensured")
@@ -354,7 +355,7 @@ impl Neighbors {
             match handle {
                 Some(handle) => {
                     let scoped = self.scoped.clone();
-                    handle.spawn(async move { scoped.forget(id).await });
+                    handle.spawn(async move { scoped.leave(id).await });
                 }
                 None => tracing::warn!("no runtime: a left neighborhood's content stays"),
             }
@@ -555,7 +556,14 @@ impl NeighborHost for Neighbors {
             return Ok(());
         }
         self.change(|s| s.neighborhoods.retain(|r| r.id != record.id));
-        self.forget_content(record.id).await;
+        // Its links stop carrying it, as the shell's Leave does, so open
+        // follows stop pulling it in.
+        if let Some(links) = &self.links {
+            for link in links.carrying(record.id) {
+                links.set_neighborhoods(&link.id, &[], &[record.id]);
+            }
+        }
+        self.scoped.leave(record.id).await;
         Ok(())
     }
 

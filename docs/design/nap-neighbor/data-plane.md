@@ -137,7 +137,10 @@ without transferring anything:
 
 - held on this phone: `yes` with its size (or the error `bytes` would give,
   e.g. raw SVG);
-- `blossom:` with a `neighborhood:` `xs`: asked of that neighborhood as above;
+- `blossom:` with a `neighborhood:` `xs`: asked of that neighborhood as above.
+  Nothing is transferred, so a `yes` can't promise what `bytes` checks on
+  the bytes themselves (the size cap, raw SVG). Without the `neighbor`
+  grant: `no`, with the error `bytes` gives (`not-found`);
 - anything else: `unknown`.
 
 Blobs are not pushed: **Blob push hops** ([policy.md](policy.md)) is stored,

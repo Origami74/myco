@@ -309,6 +309,10 @@ async fn check_one(
     let addresses = neighborhood_hints(url);
     if !addresses.is_empty() {
         let granted = session.is_granted("neighbor");
+        // As `bytes` answers it: without the grant the blob is not found.
+        if !granted {
+            return Err(Failure::new("not-found", "no neighbor grant"));
+        }
         return Ok(
             match crate::nap::neighbor::route::has(
                 ctx,
