@@ -337,7 +337,7 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
 /// `outbox.publish` — sign once, fan out to the user's outbox, the named
 /// inboxes and any validated explicit relays, and say per relay how it went.
 /// An event the napplet was delivered goes out as it is (NAP-LOCAL); the
-/// local lane keeps it either way.
+/// local lane keeps it, unless it was published into a neighborhood address.
 async fn publish(
     ctx: &NapContext,
     session: &crate::session::Session,
@@ -360,7 +360,16 @@ async fn publish(
     // Plans first, template second: a fanout that cannot be satisfied is
     // reported before anything is signed, so a refused publish leaves no
     // event behind.
-    let mut lanes: Vec<RelayLane> = vec![RelayLane::Local];
+    // NAP-NEIGHBOR: traffic to a neighborhood address goes only to its
+    // peers, never to this device's relay as a side effect; there every
+    // napplet's device-wide subscription would see it. What the napplet
+    // asks for besides (`toOutbox`, inboxes, relay URLs) still goes out.
+    let keep_here = addresses.is_empty();
+    let mut lanes: Vec<RelayLane> = if keep_here {
+        vec![RelayLane::Local]
+    } else {
+        Vec::new()
+    };
     if to_outbox {
         let Ok(user) = ctx.signer.public_key().await else {
             return failed(message, "there is no user key on this device yet");
@@ -387,17 +396,35 @@ async fn publish(
         Err(e) => return failed(message, e),
     };
 
-    let (stored, mut relays) = publish_to_quorum(ctx, lanes, &signed, &required).await;
-    if !stored {
+    let (stored, mut relays) = if lanes.is_empty() {
+        (false, serde_json::Map::new())
+    } else {
+        publish_to_quorum(ctx, lanes, &signed, &required).await
+    };
+    if keep_here && !stored {
         return failed(message, "could not store the event");
     }
     // NAP-NEIGHBOR: each address is reported like a relay, under the address
     // the napplet named.
+    let mut refused = None;
+    let mut any_address = false;
     for (addr, r) in crate::nap::neighbor::route::publish(ctx, session, &addresses, &signed).await {
-        if let Err(e) = &r {
-            tracing::info!(error = %e, "neighborhood publish refused");
+        match &r {
+            Ok(_) => any_address = true,
+            Err(e) => {
+                tracing::info!(error = %e, "neighborhood publish refused");
+                refused.get_or_insert_with(|| e.as_str().to_string());
+            }
         }
         relays.insert(addr, serde_json::Value::Bool(r.is_ok()));
+    }
+    // Only addresses, and none took it: nothing holds the event.
+    if !keep_here && !any_address && !relays.values().any(|v| v.as_bool() == Some(true)) {
+        return failed(
+            message,
+            refused.unwrap_or_else(|| "could not store the event".to_string()),
+        )
+        .with_field("relays", serde_json::Value::Object(relays));
     }
 
     let id = signed.id.to_hex();

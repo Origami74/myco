@@ -335,6 +335,25 @@ mod tests {
         assert_eq!(out.last().unwrap()["type"], "relay.eose");
     }
 
+    /// NAP-NEIGHBOR: a post into a neighborhood never lands in this
+    /// device's relay, where any napplet's device-wide subscription reads.
+    #[tokio::test]
+    async fn a_neighborhood_post_stays_out_of_the_device_relay() {
+        let (ctx, _) = ctx();
+        let mut s = session(&["neighbor", "outbox", "relay"]);
+        let r = send(&ctx, &mut s, publish(json!([HOME]))).await;
+        assert_eq!(r[0]["ok"], true, "{}", r[0]);
+        let device = Envelope::new("relay.subscribe")
+            .with_id("d")
+            .with_field("subId", "d1")
+            .with_field("filters", json!([{"kinds": [1]}]));
+        let out = send(&ctx, &mut s, device).await;
+        assert!(
+            out.iter().all(|e| e["type"] != "relay.event"),
+            "leaked into the device relay: {out:?}"
+        );
+    }
+
     #[tokio::test]
     async fn an_address_subscription_sees_nothing_else_on_the_device() {
         let (ctx, _) = ctx();
@@ -365,6 +384,8 @@ mod tests {
         let out = send(&ctx, &mut s, subscribe(HOME)).await;
         assert_eq!(out[0]["reason"], "denied");
         let r = send(&ctx, &mut s, publish(json!([HOME]))).await;
+        assert_eq!(r[0]["ok"], false);
+        assert_eq!(r[0]["error"], "denied");
         assert_eq!(r[0]["relays"][HOME], false);
         assert!(host.published.lock().unwrap().is_empty());
     }
