@@ -385,7 +385,7 @@ fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, ownNpub: Stri
             val chosen = invite.offered.filter { it.id in accept }
             Button(
                 onClick = {
-                    client.dispatch(NativeActions.joinLink(invite.raw, accept.toList(), myName))
+                    client.dispatch(NativeActions.joinLink(invite.joinable, accept.toList(), myName))
                     onDismiss()
                 },
                 enabled = !expired && (invite.offered.isEmpty() || chosen.isNotEmpty()),

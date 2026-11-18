@@ -155,7 +155,17 @@ data class InvitePreview(
     val pk: String = "",
     /** How it reached this phone. */
     val source: Source = Source.Link,
+    /** The base64url payload that was previewed, unpadded. */
+    val payload: String = "",
 ) {
+    /**
+     * What to hand the core on Join: exactly the payload this preview was
+     * read from, never [raw]. A link can carry two `invite=` values; the
+     * core must join the one the user was shown.
+     */
+    val joinable: String
+        get() = PREFIX + payload
+
     /** How an invitation arrived, shown on the join sheet. */
     enum class Source { Link, Qr, Tap }
 
@@ -222,6 +232,7 @@ data class InvitePreview(
                     NeighborhoodsState.Pending(it.optString("id"), it.optString("name"))
                 },
                 source = source,
+                payload = payload.trimEnd('='),
             )
         }.getOrNull()
     }

@@ -44,6 +44,44 @@ class InvitePreviewTest {
         assertEquals(payload, InvitePreview.payload("https://napplet.link/neighborhood/join?invite=old#invite=$payload"))
     }
 
+    /**
+     * Join hands the core the payload that was previewed, not the link: a
+     * link with two `invite=` values must join the one on the sheet.
+     */
+    @Test
+    fun joinCarriesThePreviewedPayload() {
+        val other = b64(json.replace("Ann", "Mallory"))
+        val p = InvitePreview.read("https://napplet.link/neighborhood/join?invite=$other#invite=$payload")!!
+        assertEquals("Ann", p.from)
+        assertEquals("myco://link/$payload", p.joinable)
+        val padded = Base64.getUrlEncoder().encodeToString(json.toByteArray())
+        assertEquals(
+            "myco://link/$payload",
+            InvitePreview.read("https://napplet.link/neighborhood/join#invite=$padded")!!.joinable,
+        )
+    }
+
+    /**
+     * Shared with the core's `link::tests::invite_vectors_match_the_app`:
+     * every spelling here must yield the same payload on both sides. Keep
+     * the two lists in step.
+     */
+    @Test
+    fun sharedVectors() {
+        val first = "%" + "%02X".format(payload[0].code) + payload.drop(1)
+        val vectors = listOf(
+            "https://napplet.link/neighborhood/join?invite=other#invite=$payload",
+            "https://napplet.link/neighborhood/join#invite=$payload",
+            "https://napplet.link/neighborhood/join?invite=$payload",
+            "HTTPS://NAPPLET.LINK/neighborhood/join/?invite=$payload",
+            "https://napplet.link/neighborhood/join#INVITE=$first",
+            "https://napplet.link/neighborhood/join?Invite=$payload",
+            "napplet:neighborhood/join#invite=$payload",
+            "myco://link/$payload",
+        )
+        for (v in vectors) assertEquals(v, payload, InvitePreview.payload(v))
+    }
+
     @Test
     fun nappletScheme() {
         assertEquals(payload, InvitePreview.payload("napplet:neighborhood/join?invite=$payload"))

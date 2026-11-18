@@ -93,9 +93,9 @@ impl LinkOffer {
     /// scheme and host), the older `myco://link/…`, or the bare payload.
     pub fn decode(text: &str) -> Option<Self> {
         let text = text.trim();
-        let payload = invite_payload(text).unwrap_or(text);
+        let payload = invite_payload(text).unwrap_or_else(|| text.to_string());
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload)
+            .decode(payload.trim_end_matches('='))
             .ok()?;
         let offer: Self = serde_json::from_slice(&bytes).ok()?;
         (offer.v == 1).then_some(offer)
@@ -103,28 +103,78 @@ impl LinkOffer {
 }
 
 /// The `invite` value of a `neighborhood/join` napplet link
-/// (`https://napplet.link/…` or `napplet:neighborhood/join…`), in its
-/// fragment (`#invite=`, what is written) or its query (`?invite=`, what
-/// older invitations carry); or the payload of a `myco://link/…`.
-fn invite_payload(text: &str) -> Option<&str> {
+/// (`https://napplet.link/…` or `napplet:neighborhood/join…`), or the payload
+/// of a `myco://link/…`.
+///
+/// Read exactly as the app's join sheet reads it (`InvitePreview.payload`),
+/// so the invitation joined is the one the user was shown: the fragment
+/// (`#invite=`, what is written) wins over the query (`?invite=`, what older
+/// invitations carry); the key matches in any case; a `/` after `join` is
+/// allowed; the value is percent-decoded and trimmed.
+fn invite_payload(text: &str) -> Option<String> {
     if let Some(rest) = text.strip_prefix(INVITE_PREFIX) {
-        return Some(rest);
+        return (!rest.is_empty()).then(|| rest.to_string());
     }
-    let lower = text.to_ascii_lowercase();
     let rest_at = [
         "https://napplet.link/neighborhood/join",
         "napplet:neighborhood/join",
     ]
     .iter()
-    .find(|p| lower.starts_with(*p))
+    .find(|p| {
+        text.get(..p.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(p))
+    })
     .map(|p| p.len())?;
     let rest = &text[rest_at..];
-    if !rest.starts_with(['?', '#']) {
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    if !rest.is_empty() && !rest.starts_with(['?', '#']) {
         return None;
     }
-    rest[1..]
-        .split(['&', '#', '?'])
-        .find_map(|pair| pair.strip_prefix("invite="))
+    let (before, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let query = before.strip_prefix('?').unwrap_or("");
+    invite_param(fragment).or_else(|| invite_param(query))
+}
+
+/// The first `invite=` value in `a=b&c=d` parameters, percent-decoded.
+fn invite_param(params: &str) -> Option<String> {
+    params.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if !key.eq_ignore_ascii_case("invite") {
+            return None;
+        }
+        let value = percent_decode(value)?;
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// `%XX` escapes decoded; `+` is a space, as `URLDecoder` reads it. `None`
+/// for a broken escape or invalid UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = s.get(i + 1..i + 3)?;
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The joiner's `POST <link>/setup` body.
@@ -1043,6 +1093,67 @@ mod tests {
         );
     }
 
+    /// Shared with the app's `InvitePreviewTest.sharedVectors`: every
+    /// spelling must yield the same payload on both sides, so the core joins
+    /// the invitation the join sheet showed. Keep the two lists in step.
+    #[test]
+    fn invite_vectors_match_the_app() {
+        let payload = "eyJ2IjoxfQ";
+        let first = format!("%{:02X}{}", payload.as_bytes()[0], &payload[1..]);
+        for v in [
+            format!("https://napplet.link/neighborhood/join?invite=other#invite={payload}"),
+            format!("https://napplet.link/neighborhood/join#invite={payload}"),
+            format!("https://napplet.link/neighborhood/join?invite={payload}"),
+            format!("HTTPS://NAPPLET.LINK/neighborhood/join/?invite={payload}"),
+            format!("https://napplet.link/neighborhood/join#INVITE={first}"),
+            format!("https://napplet.link/neighborhood/join?Invite={payload}"),
+            format!("napplet:neighborhood/join#invite={payload}"),
+            format!("{INVITE_PREFIX}{payload}"),
+        ] {
+            assert_eq!(invite_payload(&v).as_deref(), Some(payload), "{v}");
+        }
+        for v in [
+            "https://napplet.link/neighborhood/joinx?invite=x".to_string(),
+            "https://example.com/neighborhood/join#invite=x".to_string(),
+            "https://napplet.link/neighborhood/join".to_string(),
+            "https://napplet.link/neighborhood/join#invite=".to_string(),
+            "https://napplet.link/neighborhood/join#invites=x".to_string(),
+            "https://napplet.link/neighborhood/join#invite=%zz".to_string(),
+        ] {
+            assert_eq!(invite_payload(&v), None, "{v}");
+        }
+    }
+
+    /// A link carrying two invitations joins the fragment's, the one the
+    /// join sheet shows; padding is accepted.
+    #[test]
+    fn decode_takes_the_fragment_invitation() {
+        let a = Links::open(&dir());
+        let shown = a.invite(
+            vec!["http://a.fips:4873/nh".into()],
+            vec![],
+            INVITE_TTL_SECS,
+        );
+        let other = a.invite(
+            vec!["http://m.fips:4873/nh".into()],
+            vec![],
+            INVITE_TTL_SECS,
+        );
+        let p = |o: &LinkOffer| o.encode().strip_prefix(INVITE_LINK).unwrap().to_string();
+        let link = format!(
+            "https://napplet.link/neighborhood/join?invite={}#invite={}",
+            p(&other),
+            p(&shown)
+        );
+        assert_eq!(LinkOffer::decode(&link), Some(shown.clone()));
+        let padded =
+            base64::engine::general_purpose::URL_SAFE.encode(serde_json::to_vec(&shown).unwrap());
+        assert_eq!(
+            LinkOffer::decode(&format!("{INVITE_LINK}{padded}")),
+            Some(shown)
+        );
+    }
+
     fn setup() -> (Links, Links, Link, Link) {
         let (a, b) = (Links::open(&dir()), Links::open(&dir()));
         let home = Shared {
@@ -1129,7 +1240,7 @@ mod tests {
 
     #[test]
     fn a_secret_works_once() {
-        let (a, _) = (Links::open(&dir()), ());
+        let a = Links::open(&dir());
         let url = "http://a.fips:4873/nh";
         let offer = a.invite(vec![url.into()], vec![], INVITE_TTL_SECS);
         let (request, _) = Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
