@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from (a link, a QR code or a phone tap) and shows a short code that the
   inviter's sheet shows too. Expired invitations can't be joined. Tapping
   phones works with the Scan sheet open.
+- **An invitation lasts as long as its sheet.** Closing the invite sheet,
+  or changing which neighborhoods it invites to, takes the code back,
+  unless you copied or shared the link: a sent link works until it
+  expires. The code is kept out of screenshots and Recents, and a copied
+  link is hidden from the clipboard preview.
 - **An app can recommend the app it wants to open, and Myco offers to
   install it.** A napplet opening a role (NAP-INTENT) can name an app with
   `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default
@@ -69,7 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   short secret that works once: a phone sets up a nearby link only by
   proving it heard it. Phones racing for the same one retry with the next.
   It is not tied to the phone's mesh key. A phone reached only over the
-  local network does not join through Nearby.
+  local network does not join through Nearby, and is never sent proofs it
+  could crack. A secret guessed at too often is replaced. A phone whose
+  Bluetooth can't fit the secret in its advert still advertises, without
+  Nearby.
 - **Nearby is anonymous.** Phones that meet nearby never see a name, and
   nearby starts over (every nearby link, what it knew and what it held,
   forgotten) as soon as nobody is in reach, when Nearby is turned off, and
@@ -91,7 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The link service is hardened:** peer-supplied URLs are dialled only on
   the mesh or the public internet, request pacing and caps per source and
   overall, bounded relay sockets, signed requests that can't be replayed,
-  and capped answers, names and pending additions.
+  and capped answers, names and pending additions. Requests have 15 s to
+  arrive and be answered, one source holds at most 8 at once, a peer's
+  history request is answered with its newest 1000 posts, and a peer's
+  link is tried at no more than 4 of the addresses it offers. Signed
+  requests allow 5 minutes of clock difference, for phones that live
+  offline.
 - **Myco's relay and Blossom are no longer reachable by other phones.** The
   relay listens on this phone only (`127.0.0.1:4870`) and Blossom on no port
   (`24243` is no longer served). The link service on `:4873` is the only port
