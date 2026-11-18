@@ -76,7 +76,7 @@ transports:
     enabled: true          # so a BLE-only phone can peer it directly
 ```
 
-Start it, peer the phone (pair as usual), and confirm the session is up.
+Start it, let the phone peer with it (BLE or LAN), and confirm the session is up.
 
 ### b. Note the exit's npub
 

@@ -701,7 +701,7 @@ mod tests {
         let fallback = format!("https://x.example/{sha}");
         for kept in [
             format!("https://cdn.example/{sha}.png"),
-            format!("http://npub1abc.fips:24243/{sha}"),
+            format!("http://npub1abc.fips:4873/{sha}"),
             format!("https://cdn.example/{}", sha.to_uppercase()),
         ] {
             assert_eq!(url_of(kept.clone()), kept);

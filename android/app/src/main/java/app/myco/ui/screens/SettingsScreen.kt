@@ -26,8 +26,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.CallMade
-import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DeveloperMode
@@ -180,9 +178,6 @@ fun SettingsScreen(
             developerMode = developerMode,
             onDeveloperModeToggle = onDeveloperModeToggle,
             bleExhausted = bleExhausted,
-            onMeshReachChange = { publish, subscribe ->
-                client.dispatch(NativeActions.setNappletMeshReach(publish, subscribe))
-            },
             client = client,
             onOpenAccount = { page = SettingsPage.Account },
             onOpenIdentity = { page = SettingsPage.Identity },
@@ -235,7 +230,6 @@ private fun RootSettings(
     developerMode: Boolean,
     onDeveloperModeToggle: (Boolean) -> Unit,
     bleExhausted: Boolean,
-    onMeshReachChange: (publishTtl: Int, subscribeTtl: Int) -> Unit,
     client: AppCoreClient,
     onOpenAccount: () -> Unit,
     onOpenIdentity: () -> Unit,
@@ -395,31 +389,6 @@ private fun RootSettings(
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-        GroupLabel("APP REACH")
-        SectionCard {
-            val reach = state.nappletMeshReach
-            HopsRow(
-                icon = Icons.Filled.CallMade,
-                title = "Sending",
-                subtitle = "How far apps may send over the mesh",
-                hops = reach.publishTtl,
-                max = reach.publishMax,
-                onChange = { onMeshReachChange(it, reach.subscribeTtl) },
-                enabled = meshEnabled,
-            )
-            RowDivider()
-            HopsRow(
-                icon = Icons.Filled.CallReceived,
-                title = "Fetching",
-                subtitle = "How far apps may look for what they missed",
-                hops = reach.subscribeTtl,
-                max = reach.subscribeMax,
-                onChange = { onMeshReachChange(reach.publishTtl, it) },
-                enabled = meshEnabled,
-            )
-        }
-
         // A store the user pointed us at that has gone away. Surfaced here as
         // well as inside Storage, because the symptom — apps that will not load
         // — gives no hint that a setting is the cause, and the user has no
@@ -506,7 +475,7 @@ private fun RootSettings(
 }
 
 // ----------------------------------------------------------------------------
-// Identity sub-page — the memorable name shown to peers when pairing.
+// Identity sub-page — the memorable name sent in neighborhood invitations.
 // ----------------------------------------------------------------------------
 
 @Composable
@@ -523,8 +492,8 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
         SectionCard {
             Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Nearby devices see this name when you pair, so they can confirm " +
-                        "they're connecting to the right device.",
+                    "People you invite to a neighborhood see this name, so they can " +
+                        "confirm the invitation is from you.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -539,14 +508,14 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
                 // since there is nothing left to confirm about a name you chose
                 // off a list rather than typed.
                 NameSuggestions(state.ownNpub, name) { picked ->
-                    name = applyDeviceName(context, client, state.ownNpub, picked)
+                    name = applyDeviceName(context, state.ownNpub, picked)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Spacer(Modifier.weight(1f))
                     TextButton(
                         enabled = name.isNotBlank() && name.trim() != saved,
                         onClick = {
-                            applyDeviceName(context, client, state.ownNpub, name.trim())
+                            applyDeviceName(context, state.ownNpub, name.trim())
                             onBack()
                         },
                     ) { Text("Save") }
@@ -728,9 +697,9 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
                 icon = null,
                 title = "Delete all data, including apps",
                 subtitle = if (external) {
-                    "Wipes this device only (keeps identity & Circle)"
+                    "Wipes this device only (keeps identity & neighborhoods)"
                 } else {
-                    "Wipe entirely (keeps identity & Circle)"
+                    "Wipe entirely (keeps identity & neighborhoods)"
                 },
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmAll = true },
@@ -813,10 +782,10 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             body = if (external) {
                 "Removes every downloaded nsite stored on this device, including pinned " +
                     "apps. Anything on your custom relay or Blossom stays where it is — " +
-                    "it isn't ours to delete. Your identity and Circle stay."
+                    "it isn't ours to delete. Your identity and neighborhoods stay."
             } else {
                 "Removes every downloaded nsite, including pinned apps (relay events + blobs). " +
-                    "Your identity and Circle stay."
+                    "Your identity and neighborhoods stay."
             },
             confirmLabel = "Delete all",
             onConfirm = { client.dispatch(NativeActions.wipeStores()); confirmAll = false },
@@ -1359,47 +1328,6 @@ private fun ToggleRow(
             Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         Switch(checked = checked, onCheckedChange = onToggle, enabled = enabled)
-    }
-}
-
-/**
- * A hop-count stepper: `−` / value / `+`, clamped to `0..max`. The value is
- * worded, because "2" says nothing to someone who has never heard of a hop.
- */
-@Composable
-private fun HopsRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    hops: Int,
-    max: Int,
-    onChange: (Int) -> Unit,
-    enabled: Boolean = true,
-) {
-    val contentColor = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
-    val wording = when (hops) {
-        0 -> "This phone only"
-        1 -> "Phones next to you (1 hop)"
-        else -> "$hops hops out"
-    }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        LeadingIcon(icon, tint = contentColor)
-        Spacer(Modifier.size(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = contentColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-            Text(wording, color = contentColor, style = MaterialTheme.typography.bodySmall)
-        }
-        IconButton(onClick = { onChange((hops - 1).coerceAtLeast(0)) }, enabled = enabled && hops > 0) {
-            Icon(Icons.Filled.Remove, contentDescription = "Fewer hops")
-        }
-        Text("$hops", color = contentColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
-        IconButton(onClick = { onChange((hops + 1).coerceAtMost(max)) }, enabled = enabled && hops < max) {
-            Icon(Icons.Filled.Add, contentDescription = "More hops")
-        }
     }
 }
 

@@ -55,8 +55,8 @@ class SoftwareUpdateDeviceTest {
         updates.configureBackground()
         runBlocking { updates.check(offlineOnly = true, force = true) }
         assertEquals(lastAttempt, prefs.getLong("last_attempt", 0))
-        // No core runs in the test process, so mesh-only has no Circle to ask.
-        assertEquals("Start the mesh to ask your Circle for updates", updates.state.value.message)
+        // No core runs in the test process, so mesh-only has no neighbors to ask.
+        assertEquals("Start the mesh to ask your neighbors for updates", updates.state.value.message)
         mainPrefs.edit().putBoolean("offline_only", false).commit()
         updates.configureBackground()
         updates.setAutomatic(false)
@@ -102,7 +102,7 @@ class SoftwareUpdateDeviceTest {
         prefs.edit().putBoolean("offline_only", false).commit()
         assertTrue(softwareUpdatesOfflineOnly(context))
         runBlocking { updates.check(offlineOnly = false, force = true) }
-        assertEquals("Start the mesh to ask your Circle for updates", updates.state.value.message)
+        assertEquals("Start the mesh to ask your neighbors for updates", updates.state.value.message)
         assertEquals(0L, prefs.getLong("last_attempt", 0))
         prefs.edit().putBoolean("offline_only", true).commit()
         mainPrefs.edit().putBoolean("offline_only", false).commit()

@@ -29,8 +29,8 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
-    "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme", "inc",
-    "intent", "upload", "fs", "gamepad",
+    "shell", "identity", "relay", "neighbor", "outbox", "local", "resource", "link", "theme",
+    "inc", "intent", "upload", "fs", "gamepad",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -63,18 +63,20 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// `local` keeps on this device what the napplet was shown (`local.publish`
 /// of a delivered event, `resource.keep`). It signs nothing on its own — a
 /// note-to-self template also needs `relay` — and publishes nowhere; but kept
-/// is not private: the local relay and Blossom are read by paired phones and
-/// the device's own nsites, and with a custom backend they are that server.
+/// is not private: the local relay and Blossom are read by the device's own
+/// nsites and napplets, and with a custom backend they are that server.
 /// Keeps are permanent and unquota'd, which is why it can be switched off.
 ///
-/// `mesh` is a default **for now**, not by design. The upstream napplet
+/// `neighbor` is a default **for now**, not by design. The upstream napplet
 /// tooling (the Vite plugin and `napplet deploy`) keeps only the upstream NAP
 /// domains in a manifest's `requires` and drops Myco-only ones, so no napplet
-/// published with it can *ask* for `mesh` — and a grant that can only come
-/// from `requires` could never be given. It is still shown on the install
-/// sheet, capped by the user's "App reach" setting, and can be switched off
-/// per app. Take it out of the defaults once the tooling keeps extension
-/// domains.
+/// published with it can *ask* for `neighbor` — and a grant that can only
+/// come from `requires` could never be given. It is not small: neighborhoods
+/// are not tied to napplets, so a napplet holding it sees and posts into
+/// every neighborhood on the device, as the user, and can mute an author in
+/// one for every napplet (`docs/design/nap-neighbor/napplet-api.md`,
+/// "Grants"). What it can't do is learn who is in one, or use another
+/// napplet's ids or addresses.
 ///
 /// `inc` and `intent` cost nothing to grant either. `intent` asks the shell to
 /// open another napplet by role, and where it goes is the user's decision: a
@@ -84,17 +86,16 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// hears only what the shell routes to it. Napplets cannot message each other
 /// with it yet (`inc.emit` goes nowhere; see `nap::inc`).
 ///
-/// Taking it out will not take it back. Every napplet opened meanwhile has
-/// `mesh` persisted in its Library `granted` list (widened at open, silently —
-/// a default gets no sheet), and a stored grant is honoured as given. Removing
-/// it from here therefore needs a migration that drops `mesh` from `granted`
-/// where it was never reviewed.
+/// A domain this build no longer implements (NAP-MESH's `mesh`, which
+/// napplets opened before it was removed still have in their stored
+/// `granted` list) is never offered: a session serves only what is in both
+/// [`IMPLEMENTED_DOMAINS`] and the grant.
 pub const DEFAULT_GRANTS: &[&str] = &[
-    "identity", "inc", "intent", "link", "local", "mesh", "relay", "resource", "theme",
+    "identity", "inc", "intent", "link", "local", "neighbor", "relay", "resource", "theme",
 ];
 
-/// The most live subscriptions one session may hold, across `relay`, `mesh`
-/// and `outbox`. See [`Session::subscribe_in`].
+/// The most live subscriptions one session may hold, across `relay` and
+/// `outbox`. See [`Session::subscribe_in`].
 pub const MAX_SUBSCRIPTIONS: usize = 64;
 
 /// The most NAP-UPLOAD results one session remembers for `upload.status`.
@@ -197,6 +198,17 @@ pub const SEEN_PER_SUBSCRIPTION: usize = 4096;
 struct Generation {
     ids: HashSet<[u8; 32]>,
     closed: bool,
+    /// Woken when it ends (see [`SubscriptionHandle::closed`]).
+    waker: Option<std::task::Waker>,
+}
+
+impl Generation {
+    fn end(&mut self) {
+        self.closed = true;
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
 }
 
 type GenerationRef = Arc<Mutex<Generation>>;
@@ -252,7 +264,20 @@ impl SubscriptionHandle {
     /// End this generation: nothing more is delivered for it, by the backlog
     /// or the live path. Its registration is dropped at the next subscribe.
     pub fn close(&self) {
-        self.generation.lock().unwrap().closed = true;
+        self.generation.lock().unwrap().end();
+    }
+
+    /// Resolves once the subscription is over: closed, replaced, or failed.
+    pub fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let generation = self.generation.clone();
+        std::future::poll_fn(move |cx| {
+            let mut generation = generation.lock().unwrap();
+            if generation.closed {
+                return std::task::Poll::Ready(());
+            }
+            generation.waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        })
     }
 
     /// Whether the subscription is over.
@@ -283,7 +308,7 @@ pub struct Session {
     /// has anywhere to be delivered, however well the rest of the system
     /// carries it.
     ///
-    /// Keyed by domain as well as id because `relay` and `mesh` subscriptions
+    /// Keyed by domain as well as id because `relay` and `outbox` subscriptions
     /// are delivered as different message types and gated on different grants,
     /// and a napplet may reuse a `subId` across the two — the spec scopes ids
     /// per domain, not per session.
@@ -634,7 +659,7 @@ impl Session {
         // the old one's backlog task can no longer deliver.
         let fresh: GenerationRef = Arc::default();
         if let Some(old) = self.seen.lock().unwrap().insert(key.clone(), fresh) {
-            old.lock().unwrap().closed = true;
+            old.lock().unwrap().end();
         }
         Arc::make_mut(&mut self.subscriptions).insert(key, filters);
         Ok(())
@@ -656,7 +681,15 @@ impl Session {
             Arc::make_mut(&mut self.sub_work).remove(&key);
         }
         if let Some(old) = self.seen.lock().unwrap().remove(&key) {
-            old.lock().unwrap().closed = true;
+            old.lock().unwrap().end();
+        }
+    }
+
+    /// End every subscription: the window is gone. Live deliveries stop and
+    /// whatever they hold (peers followed for a neighborhood) is let go.
+    pub fn end_subscriptions(&self) {
+        for (_, generation) in self.seen.lock().unwrap().drain() {
+            generation.lock().unwrap().end();
         }
     }
 

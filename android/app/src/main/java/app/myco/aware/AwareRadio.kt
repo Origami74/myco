@@ -512,7 +512,7 @@ class AwareRadio(
      * Re-announce rather than negotiate: `platform_peers` suppresses a re-push
      * by `(npub, address)`, so a changed port is not swallowed, and the core
      * refreshes the peer's path instead of standing up a second one. Costs
-     * nothing when the ports already agree, which is every two-device pairing.
+     * nothing when the ports already agree, which is every two-device link.
      */
     private fun updatePeerPort(remote: AwarePeer) {
         val target = ndpTargets[remote.npub] ?: return // not requested yet; the request will use it

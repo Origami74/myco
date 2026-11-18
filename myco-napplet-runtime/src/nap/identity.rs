@@ -226,13 +226,7 @@ mod tests {
             signer: Arc::new(AbsentSigner),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
-            mesh: Arc::new(crate::testing::MemMesh::new(
-                relay.clone(),
-                crate::seams::MeshLimits {
-                    publish_ttl: 3,
-                    subscribe_ttl: 2,
-                },
-            )),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
@@ -323,13 +317,7 @@ mod tests {
             signer: Arc::new(TestSigner::with_keys(keys)),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
-            mesh: Arc::new(crate::testing::MemMesh::new(
-                relay.clone(),
-                crate::seams::MeshLimits {
-                    publish_ttl: 3,
-                    subscribe_ttl: 2,
-                },
-            )),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
@@ -356,13 +344,7 @@ mod tests {
             signer: Arc::new(TestSigner::with_keys(keys.clone())),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
-            mesh: Arc::new(crate::testing::MemMesh::new(
-                relay.clone(),
-                crate::seams::MeshLimits {
-                    publish_ttl: 3,
-                    subscribe_ttl: 2,
-                },
-            )),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
@@ -426,13 +408,7 @@ mod tests {
             signer: Arc::new(TestSigner::with_keys(keys)),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
-            mesh: Arc::new(crate::testing::MemMesh::new(
-                relay.clone(),
-                crate::seams::MeshLimits {
-                    publish_ttl: 3,
-                    subscribe_ttl: 2,
-                },
-            )),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),

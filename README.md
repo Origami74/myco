@@ -7,22 +7,30 @@
 > keeps opening when the internet is gone.
 
 Someone in the room has an app that helps: a schedule, a checklist, a game, a
-way to ring each other. With Myco they bump phones with you, and the app is on
-your phone too. It opens full-screen like any other app, and it still opens
+way to ring each other. With Myco they invite you into a neighborhood and hand
+the app over, and it is on your phone too. It opens full-screen like any other app, and it still opens
 with no signal. Once you have it, you can hand it on to the next person.
+
+<!-- screenshots of the Neighbors tab: TODO -->
+
+|  |  |
+| :--: | :--: |
+| ![Hand over an app by bumping again](docs/images/zapstore-03-share-app.png)<br>**Hand over an app** | ![People in a park using an app over Bluetooth](docs/images/zapstore-01-mesh.png)<br>**Use it together, offline** |
 
 |  |  |  |
 | :--: | :--: | :--: |
-| ![Bump phones to pair](docs/images/zapstore-02-connect-circle.png)<br>**Bump phones to pair** | ![Hand over an app by bumping again](docs/images/zapstore-03-share-app.png)<br>**Hand over an app** | ![People in a park using an app over Bluetooth](docs/images/zapstore-01-mesh.png)<br>**Use it together, offline** |
-
-|  |  |  |  |  |
-| :--: | :--: | :--: | :--: | :--: |
-| ![Tap to pair over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to pair** | ![Your Circle of paired people](docs/images/02-circle.png)<br>**Your Circle** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
+| ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
 
 ## What you can do with it today
 
-- **Pair** by bumping phones (NFC), tapping someone Myco found nearby over
-  Bluetooth, or scanning a QR code.
+- **Invite people into a neighborhood** ("Household", "Sports club") by
+  showing a QR code, sending a link, or bumping phones (NFC). Both screens
+  show the same short code, so you can check you're joining the right
+  person.
+- **Meet the phones around you.** **Nearby** links phones in Bluetooth
+  reach by themselves, with no invitation and no names. AppStore's
+  **Around you** shows the apps they have. It forgets them once nobody is
+  in reach. Turn it off on its card in **Neighbors**.
 - **Hand over an app.** The other phone pulls it straight from yours.
 - **Open it with no internet**, full-screen, from the Apps grid or a
   home-screen icon.
@@ -39,10 +47,6 @@ All of this is tested with every phone in airplane mode and Bluetooth on
 What Myco does not do yet:
 
 - It is **Android only** (Android 10 or newer, 64-bit ARM phones).
-- **Updates to Myco** come from a download, not from another phone.
-  **Share Myco** hands the app to a phone without it, but a phone with Myco
-  doesn't yet update from a newer one nearby
-  ([roadmap](docs/roadmap.md#n11--share-myco-itself)).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
 - **Mesh over the internet** is opt-in (Settings › Mesh › Internet) and not
@@ -78,18 +82,18 @@ Myco lets them hand it to you in person.**
    *other* apps on your phone reach the mesh too, turn on **Settings › Mesh ›
    Allow other apps to use mesh**. That one does use Android's VPN slot.
 
-   Then check your name — the phone's own name is filled in; edit it right
-   there if you like, and tap **Use this name**. It is what the people you pair
-   with see. The **camera** is asked for only when you scan a code.
+   Myco gives you a generated name, like "teal juno". It is what the people
+   you invite see; change it in **Settings** if you like. It is never
+   broadcast over Bluetooth, and phones that meet nearby never see it. The
+   **camera** is asked for only when you scan a code.
    **Notifications** are optional: turn them on in **Settings › Permissions**.
-3. **Pair**, in the **Circle** tab. Any one of these:
-   - **Bump:** hold your phone back to back with theirs.
-   - **Nearby:** tap them in the list of phones Myco found over Bluetooth,
-     and they accept.
-   - **QR:** they tap **Show my code** and you tap **Scan**.
+3. **Join their neighborhood**, in the **Neighbors** tab. They tap
+   the **invite** button (the person icon); you tap the **scan** button
+   (bottom right) and scan the code on their screen, or hold
+   your phone back to back with theirs, or open the link they sent. Pick
+   which neighborhoods to join.
 4. **Receive the app.** They long-press the app and tap **Share**. You bump
-   phones again, or scan the code on their screen from **Apps › +**. Scanning
-   that code also pairs you, so you can skip step 3.
+   phones again, or scan the code on their screen from the **scan** button on **Apps**.
 5. **Open it.** It lands in your **Apps** grid. Some apps first list what they
    want to use, such as nearby phones or your pictures. You choose.
 
@@ -97,17 +101,23 @@ After that the app is yours. It opens without internet, though what it can
 show offline depends on the app. You can share it with the next person the
 same way.
 
-### What pairing lets the other person do
+### What joining a neighborhood lets the other person do
 
-Pairing works both ways. The person you pair with can:
+A neighborhood works both ways. The people you share one with can:
 
-- get the apps on your phone,
-- read what your apps shared with nearby phones,
-- offer you files.
+- get your apps and their updates, and Myco updates, while the
+  neighborhood's **Share** switches under **Updates** are on (the default),
+- receive what your apps post into that neighborhood, and pass it on.
 
-Nothing else on your phone is open to them, and people you have not paired
-with get nothing. To undo it, tap them in **Circle** and choose **Remove from
-circle**.
+You get theirs the same way, under the **Get** switches.
+
+**Nearby** is a neighborhood too. With it on, phones in reach see which apps
+you have, and get your updates, unless you turn its **Share** switches off.
+
+A neighborhood is not private: people in it can pass posts on, even outside
+it. Nothing else on your phone is open to them, and people you share no
+neighborhood with get nothing. To undo it, **Leave** the neighborhood, or tap
+the person in **Neighbors** and choose **Disconnect**.
 
 ## Organize a group
 
@@ -125,7 +135,7 @@ picks up the latest ticks from the phones near it, even after joining late.
 
 1. Install [Myco](#get-myco) on your own phone.
 2. Add the app. Find it in the preinstalled **AppStore** app. Or, if its
-   maker sent you a link (it starts with `naddr`), go to **Apps › +** and
+   maker sent you a link (it starts with `naddr`), go to the **scan** button on **Apps** and
    paste it. Review what it asks for and tap **Add to my apps**. Every file
    is now on your phone.
 3. Ask people to install Myco before they come. Send them
@@ -134,10 +144,11 @@ picks up the latest ticks from the phones near it, even after joining late.
 **On the day, no internet needed:**
 
 1. Keep Myco open on your screen.
-2. Share the app with the first few people. Open the app's **Share** screen
-   and let them scan the code or bump phones. That pairs you and hands it
-   over in one go.
-3. **Let it spread.** Everyone who has the app can share it the same way. You
+2. Invite the first few people into a neighborhood for the day (**Neighbors ›
+   Invite**), then share the app: open its **Share** screen and let them scan
+   the code or bump phones.
+3. **Let it spread.** Everyone who has the app can invite the next person
+   and share it the same way. You
    don't need to reach every person yourself, and people who arrive late can
    get it from whoever is next to them.
 4. Each person reviews what the app asks for, and opens it.
@@ -146,8 +157,8 @@ picks up the latest ticks from the phones near it, even after joining late.
 
 | Works with no internet | Needs the internet |
 | --- | --- |
-| Pairing, while both phones have Myco open | Installing Myco itself |
-| Handing an app to someone you paired with | Adding an app nobody here has yet |
+| Joining a neighborhood, while both phones have Myco open | Installing Myco itself |
+| Handing an app to someone in your neighborhood | Adding an app nobody here has yet |
 | Opening any app already on your phone | Public Nostr content, like profiles and the AppStore feed |
 | Apps built to talk over nearby phones, while those phones are in reach | Anything an app loads from the web |
 
@@ -174,10 +185,10 @@ run. It asks Myco for what it needs, and gets only what the person grants:
 
 - an identity to sign as,
 - Nostr relays: this phone's own relay, and public ones when online,
-- the mesh: publish to and read from nearby paired phones, up to a hop limit
-  the person sets,
-- pictures and files by content hash, from this phone, a paired phone, or
-  public servers,
+- neighborhoods: publish to and read from the people the user shares a
+  neighborhood with, through NAP-NEIGHBOR
+  ([napplet/naps#146](https://github.com/napplet/naps/pull/146)),
+- pictures and files by content hash, from this phone or public servers,
 - game controllers through `window.napplet.gamepad` or `navigator.getGamepads()`,
   with live input only while the app has focus,
 - other apps, by role: "open this profile" opens the person's profile app,
@@ -187,35 +198,35 @@ run. It asks Myco for what it needs, and gets only what the person grants:
 
 An **nsite** is a static website published on [Nostr](https://nostr.com).
 Myco stores its signed files and shows them, so any nsite works offline once
-it is on the phone. It asks for no permissions and gets no mesh.
+it is on the phone. It asks for no permissions and gets no neighborhoods.
 
 ### Sharing an app is not syncing its data
 
 Myco copies an app's files from phone to phone. It does not make an app
 collaborative on its own. For people to work together offline, a napplet uses
-the **mesh** capability:
+**neighborhoods** (NAP-NEIGHBOR). It gets a `neighborhood://` address and
+hands it to its relay calls:
 
-- **Publish** stores a note on this phone and floods it to paired phones, up
-  to the hop limit.
+- **Publish** stores a note on this phone and sends it along the
+  neighborhood's links, passed on link to link up to the neighborhood's reach.
 - **Subscribe** returns matching notes this phone already holds, then asks
-  phones within the hop limit for theirs. So a phone that joins late catches
-  up from the phones near it.
+  linked phones in the neighborhood for theirs. So a phone that joins late
+  catches up from the people it is linked with.
 - **Ephemeral notes** (with a NIP-40 `expiration`, such as chat) disappear
   once they expire, so catch-up is only possible until then.
 
 A napplet can also **keep** a note or picture it was shown on this phone, and
-**pass on** a note it was shown to nearby phones or public relays again — only
+**pass on** a note it was shown to a neighborhood or public relays again — only
 ever what it was shown, never signed as you.
 
 With your OK on the install sheet, a napplet can also **upload** a file, such
 as a picture to post, to your Blossom servers, signed as you. With no
-internet it can keep the file on your phone instead, where paired phones can
-fetch it. It can also
+internet it can keep the file on your phone instead. It can also
 **open or save a file you pick** in Android's file picker, and only that file.
 
 A napplet can also keep **private data**: Myco encrypts it to your own key
 (NIP-44) before it is stored or sent, so relays and other people see only
-ciphertext. Your apps that can read your events (relays, outbox or mesh) get
+ciphertext. Your apps that can read your events (relays, outbox or neighborhoods) get
 it back in plaintext, whichever app wrote it; the install sheet says so.
 
 ### From a small example to two phones
@@ -223,7 +234,7 @@ it back in plaintext, whichever app wrote it; the install sheet says so.
 1. **Build** a single-file napplet, following
    [napplet.run](https://napplet.run). (Or a static site, for an nsite.)
 2. **Publish** it to Nostr. (An nsite: `nsite-cli upload dist`.)
-3. **Add it** on one phone while online: **Apps › +**, then paste its
+3. **Add it** on one phone while online: the **scan** button on **Apps**, then paste its
    `naddr` (or the nsite's link).
 4. **Hand it over** to a second phone in airplane mode, and open it there.
    Follow [the two-phone runbook](docs/how-to/run-two-device-demo.md).
@@ -236,8 +247,10 @@ Every phone runs its own Nostr relay and Blossom file store, and keeps the
 signed files of every app it holds. That is why a phone that got an app can
 hand it on. Phones connect over a [FIPS](https://github.com/jmcorgan/fips)
 mesh: Bluetooth (L2CAP), Wi-Fi Aware, a USB cable, the local network, or the
-internet when there is one. Links are encrypted. The Circle — the people you paired with —
-decides who may pull from your phone.
+internet when there is one. Mesh links are encrypted. Your relay and file store are never open to other
+phones: apps and updates travel only through your neighborhoods, to the
+people you set up a link with from an invitation, and with Nearby on, to
+phones in Bluetooth reach.
 
 The reusable content layer (relay, Blossom, gateway, sync) is the
 `nsite-deck` crate. `myco-core` wires it to FIPS and the Android app.
@@ -246,9 +259,9 @@ Read on:
 
 - [Concepts & glossary](docs/design/core/concepts.md) — start here
 - [Architecture](docs/design/core/architecture.md)
-- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-MESH](docs/design/napplet/NAP-MESH.md) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md) · [NAP-UPLOAD](docs/design/napplet/NAP-UPLOAD.md) · [NAP-FS](docs/design/napplet/NAP-FS.md)
+- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-NEIGHBOR](https://github.com/napplet/naps/pull/146) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md) · [NAP-UPLOAD](docs/design/napplet/NAP-UPLOAD.md) · [NAP-FS](docs/design/napplet/NAP-FS.md)
 - [The nsite layer](docs/design/nsite/nsite-layer.md) · [Propagation](docs/design/nsite/propagation.md)
-- [Identity & pairing](docs/design/core/identity-pairing.md) · [Security](docs/design/core/security.md)
+- [Neighborhoods](docs/design/nap-neighbor/README.md) · [Identity](docs/design/core/identity.md) · [Security](docs/design/core/security.md)
 - [Build from source](docs/how-to/build.md) · [All docs](docs/README.md) · [Roadmap](docs/roadmap.md)
 
 ---
@@ -258,20 +271,20 @@ Read on:
 - **Download:** the APK from the
   [latest release](https://github.com/Origami74/myco/releases/latest), or
   through [Zapstore](https://zapstore.dev/apps/app.myco).
-- **From a phone nearby:** someone who has Myco taps **Share Myco** on the
-  Apps tab. **Over a hotspot** works with no internet: join their Wi-Fi, open
+- **From a phone nearby:** someone who has Myco taps the **share** button
+  (above the scan button) on the Apps tab. **Over a hotspot** works with no internet: join their Wi-Fi, open
   the page they show you and tap **Download Myco**. **Send the app file**
   sends the APK through Quick Share, Bluetooth or a messenger.
 - **Updates:** Myco checks daily for publisher-signed stable releases, including
   while the UI is closed (turn it off in Settings → Software updates). It asks
-  your Circle and `wss://relay.zapstore.dev`, which sees your IP address and a
-  query for Myco releases; no user identity or private signing key is sent. In
-  mesh-only mode it asks only your Circle. Every phone keeps the newest signed
-  announcement it has seen, so one phone with internet tells the rest.
-- **Updates from your Circle:** every phone also keeps the newest release APK
-  (from its own install, a paired phone, or, on unmetered Wi-Fi, the release
-  download) and hands it to paired phones over the mesh, compressed to about
-  11 MB. When it's on your phone, **Install** updates Myco with no internet:
+  `wss://relay.zapstore.dev`, which sees your IP address and a
+  query for Myco releases; no user identity or private signing key is sent.
+  Release announcements also reach you through your neighborhoods (**Myco
+  updates**), so one phone with internet tells the rest, even in mesh-only
+  mode.
+- **Updates from your neighborhoods:** every phone also keeps the newest
+  release APK (from its own install, a neighborhood, or, on unmetered Wi-Fi,
+  the release download) and shares it into its neighborhoods. When it's on your phone, **Install** updates Myco with no internet:
   Myco checks it is signed by the publisher, and Android asks before
   installing. Otherwise **View update** opens the Zapstore listing.
 - **Installing the APK:** Android asks whether your browser (or file app) may

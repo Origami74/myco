@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1000" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="push" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="live" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+    <marker id="back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker>
+    <style>
+      .title { font-size: 22px; font-weight: 700; fill: #111827; }
+      .h { font-size: 17px; font-weight: 700; fill: #111827; }
+      .small { font-size: 12px; fill: #374151; }
+      .tiny { font-size: 11px; fill: #4b5563; }
+      .node { fill: #ffffff; stroke: #111827; stroke-width: 2; }
+      .nodeOk { fill: #dcfce7; stroke: #16a34a; stroke-width: 2; }
+      .nodeOff { fill: #f3f4f6; stroke: #9ca3af; stroke-width: 2; stroke-dasharray: 4 3; }
+      .lbl { font-size: 16px; font-weight: 700; text-anchor: middle; }
+      .push { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#push); }
+      .live { stroke: #dc2626; stroke-width: 2.5; fill: none; marker-end: url(#live); stroke-dasharray: 7 4; }
+      .back { stroke: #7c3aed; stroke-width: 2; fill: none; marker-end: url(#back); stroke-dasharray: 2 4; }
+      .stop { stroke: #111827; stroke-width: 3; }
+      .panel { fill: #f9fafb; stroke: #d1d5db; }
+      .th { font-weight: 700; font-size: 13px; }
+      .td { font-size: 12.5px; fill: #1f2937; }
+      .ok { fill: #15803d; font-weight: 700; }
+      .part { fill: #b45309; font-weight: 700; }
+    </style>
+  </defs>
+
+  <text x="24" y="38" class="title">Neighborhood policy: what a peer is given</text>
+  <text x="24" y="60" class="small">A, B, C and D are linked in a chain (A–B, B–C, C–D) and all carry neighborhood n. A publishes post P. One rule covers all three ways a peer gets an event.</text>
+
+  <!-- legend -->
+  <g transform="translate(24,78)">
+    <line x1="0" y1="8" x2="38" y2="8" class="push"/><text x="46" y="12" class="small">EVENT push (carries ttl)</text>
+    <line x1="230" y1="8" x2="268" y2="8" class="live"/><text x="276" y="12" class="small">live push on the peer's open REQ</text>
+    <line x1="530" y1="8" x2="568" y2="8" class="back"/><text x="576" y="12" class="small">REQ backlog answer</text>
+    <line x1="760" y1="0" x2="760" y2="16" class="stop"/><text x="770" y="12" class="small">policy stops all three</text>
+  </g>
+
+  <!-- CLOSE panel -->
+  <rect x="16" y="106" width="1168" height="200" rx="10" class="panel"/>
+  <text x="32" y="132" class="h">Close: publish hops 1, pass on off</text>
+
+  <g>
+    <circle cx="140" cy="210" r="34" class="node"/><text x="140" y="216" class="lbl">A</text>
+    <circle cx="420" cy="210" r="34" class="nodeOk"/><text x="420" y="216" class="lbl">B</text>
+    <circle cx="800" cy="210" r="34" class="nodeOff"/><text x="800" y="216" class="lbl">C</text>
+    <circle cx="1040" cy="210" r="34" class="nodeOff"/><text x="1040" y="216" class="lbl">D</text>
+
+    <path d="M176,202 L382,202" class="push"/>
+    <text x="279" y="192" class="tiny" text-anchor="middle">P, ttl = hops − 1 = 0</text>
+
+    <line x1="545" y1="180" x2="545" y2="240" class="stop"/>
+    <text x="560" y="194" class="tiny">P has 0 hops left on B:</text>
+    <text x="560" y="209" class="tiny">not pushed, not sent live</text>
+    <text x="560" y="224" class="tiny">and not in B's backlog for C.</text>
+    <text x="560" y="239" class="tiny">C gets only B's own posts.</text>
+
+    <text x="140" y="270" class="tiny" text-anchor="middle">publishes P</text>
+    <text x="420" y="270" class="tiny" text-anchor="middle">keeps P, shows it</text>
+    <text x="800" y="270" class="tiny" text-anchor="middle">never gets P</text>
+    <text x="1040" y="270" class="tiny" text-anchor="middle">never gets P</text>
+  </g>
+
+  <!-- WIDE panel -->
+  <rect x="16" y="320" width="1168" height="230" rx="10" class="panel"/>
+  <text x="32" y="346" class="h">Wide: publish hops 3, pass on on</text>
+
+  <g>
+    <circle cx="140" cy="430" r="34" class="node"/><text x="140" y="436" class="lbl">A</text>
+    <circle cx="460" cy="430" r="34" class="nodeOk"/><text x="460" y="436" class="lbl">B</text>
+    <circle cx="780" cy="430" r="34" class="nodeOk"/><text x="780" y="436" class="lbl">C</text>
+    <circle cx="1060" cy="430" r="34" class="nodeOk"/><text x="1060" y="436" class="lbl">D</text>
+
+    <path d="M176,422 L422,422" class="push"/>
+    <text x="299" y="412" class="tiny" text-anchor="middle">P, ttl 2</text>
+
+    <path d="M496,412 L742,412" class="push"/>
+    <text x="619" y="398" class="tiny" text-anchor="middle">P, ttl 1 (2 hops left on B)</text>
+    <path d="M496,430 L742,430" class="live"/>
+    <path d="M496,448 L742,448" class="back"/>
+    <text x="619" y="468" class="tiny" text-anchor="middle">same P to C's REQ, live or backlog</text>
+
+    <path d="M816,422 L1022,422" class="push"/>
+    <text x="919" y="412" class="tiny" text-anchor="middle">P, ttl 0 (1 hop left on C)</text>
+    <path d="M816,440 L1022,440" class="live"/>
+    <path d="M816,456 L1022,456" class="back"/>
+
+    <text x="140" y="490" class="tiny" text-anchor="middle">publishes P</text>
+    <text x="460" y="490" class="tiny" text-anchor="middle">keeps P, 2 hops left</text>
+    <text x="780" y="490" class="tiny" text-anchor="middle">keeps P, 1 hop left</text>
+    <text x="1060" y="490" class="tiny" text-anchor="middle">keeps P, 0 left: stops here</text>
+
+    <text x="32" y="520" class="small">Rule: a peer gets an event only if this device published it, or it arrived by push with hops left and pass on is on.</text>
+    <text x="32" y="537" class="small">What a device pulls through its own subscription is kept and shown there with 0 hops left: never passed on.</text>
+  </g>
+
+  <!-- TABLE -->
+  <rect x="16" y="564" width="1168" height="420" rx="10" class="panel"/>
+  <text x="32" y="590" class="h">Every switch</text>
+  <g class="th">
+    <text x="32" y="618">Setting</text>
+    <text x="250" y="618">What it does</text>
+    <text x="900" y="618">Built</text>
+  </g>
+  <line x1="32" y1="626" x2="1168" y2="626" stroke="#d1d5db"/>
+  <g class="td">
+    <text x="32" y="648">Publish hops</text>
+    <text x="250" y="648">a post goes at most N links from its author, by push, live REQ or backlog</text>
+    <text x="900" y="648"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="672">Pass on</text>
+    <text x="250" y="672">off: posts pushed here by others never leave this device</text>
+    <text x="900" y="672"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="696">Backlog hops</text>
+    <text x="250" y="696">0: don't ask peers for history; 1 or more: ask linked peers</text>
+    <text x="900" y="696"><tspan class="part">one hop</tspan> (a peer's REQ is not passed on)</text>
+
+    <text x="32" y="720">Mutes</text>
+    <text x="250" y="720">muted authors hidden here and not passed on</text>
+    <text x="900" y="720"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="744">Share (per extension)</text>
+    <text x="250" y="744">off: that extension's events are not forwarded, live-pushed or served</text>
+    <text x="900" y="744"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="768">Get (per extension)</text>
+    <text x="250" y="768">off: updates that arrive here are not applied</text>
+    <text x="900" y="768"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="792">Offer: relay read</text>
+    <text x="250" y="792">off: a peer's REQ gets CLOSED "restricted: …"</text>
+    <text x="900" y="792"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="816">Offer: relay write</text>
+    <text x="250" y="816">off: a peer's EVENT gets OK false "restricted: …"</text>
+    <text x="900" y="816"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="840">Offer: blob read</text>
+    <text x="250" y="840">off: blob GET and HEAD find nothing</text>
+    <text x="900" y="840"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="864">Blob push hops</text>
+    <text x="250" y="864">an upload pushed N links</text>
+    <text x="900" y="864"><tspan class="part">stored, pushes nothing</tspan></text>
+
+    <text x="32" y="888">Blob scope</text>
+    <text x="250" y="888">a blob fetched through n is readable only through n</text>
+    <text x="900" y="888"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="912">Quota</text>
+    <text x="250" y="912">10 000 events and 256 MiB of blobs per neighborhood; oldest leave first</text>
+    <text x="900" y="912"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="936">Leave</text>
+    <text x="250" y="936">deletes what only that neighborhood held</text>
+    <text x="900" y="936"><tspan class="ok">✓</tspan></text>
+
+    <text x="32" y="960">Peer answers</text>
+    <text x="250" y="960">events a peer returns must match the REQ's filter</text>
+    <text x="900" y="960"><tspan class="ok">✓</tspan></text>
+  </g>
+</svg>

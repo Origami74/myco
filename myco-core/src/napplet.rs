@@ -1045,8 +1045,8 @@ impl NappletHost {
     /// Deliver an accepted event to whichever open napplets subscribed to it.
     ///
     /// Called for every event this device accepts — its own publishes and
-    /// anything a peer sent — so a subscription behaves the same whichever side
-    /// of the mesh an event came from. A napplet that never subscribed, or was
+    /// backlog pulled from relays — so a subscription behaves the same
+    /// whichever way an event came. A napplet that never subscribed, or was
     /// not granted `relay`, matches nothing and costs one filter check.
     pub async fn on_event(&self, event: nostr::Event) {
         // The handles are cloned out and the map's lock released before any
@@ -1116,17 +1116,27 @@ impl NappletHost {
             }
             live.session.clone()
         };
-        {
+        let (napplet, neighbor) = {
             let session = session.lock().await;
             if !session.is_granted("resource") || !session.was_delivered_blob(&key) {
                 return None;
             }
-        }
-        self.ctx
+            (session.identity().clone(), session.is_granted("neighbor"))
+        };
+        if let Some(bytes) = self
+            .ctx
             .blobs
             .get(&sha256_hex.to_ascii_lowercase())
             .await
             .ok()?
+        {
+            return Some(bytes);
+        }
+        // Delivered from a neighborhood, so in none of the device's stores.
+        myco_napplet_runtime::nap::resource::neighborhood_bytes(
+            &self.ctx, &napplet, neighbor, sha256_hex,
+        )
+        .await
     }
 
     /// Wait for frames this window should be sent unprompted, up to `timeout`.
@@ -1189,7 +1199,7 @@ impl NappletHost {
     /// is current, and for a session that is not open.
     ///
     /// A window keeps the version it opened for its whole life (design doc
-    /// §7.2); an update check or a Circle push moves the pin under it. The
+    /// §7.2); an update check or a neighbor's shared update moves the pin under it. The
     /// Activity asks this when the window comes back to the foreground, to
     /// offer a restart onto the new version. The served version is the pinned
     /// one, and a pin moves only once its bytes are here — so a restart this
@@ -1224,7 +1234,17 @@ impl NappletHost {
 
     /// Drop a window's session. Every later frame for it is ignored.
     pub fn close(&self, session_id: &str) {
-        self.sessions.lock().unwrap().remove(session_id);
+        let gone = self.sessions.lock().unwrap().remove(session_id);
+        if let Some(gone) = gone {
+            // Its live subscriptions end with it.
+            let session = gone.session.clone();
+            let ended = session.try_lock().map(|s| s.end_subscriptions()).is_ok();
+            if !ended {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async move { session.lock().await.end_subscriptions() });
+                }
+            }
+        }
         self.drop_intents_of(session_id);
     }
 
@@ -1235,9 +1255,10 @@ impl NappletHost {
 
     /// Fetch a napplet from somewhere else, verify it, and store it locally.
     ///
-    /// This is D9's acquisition path: online once when added by `naddr`, local
-    /// and mesh-replicable from then on. `source` is whatever can reach it — a
-    /// public-relay source or a mesh peer's — and it is **not trusted**: every
+    /// This is D9's acquisition path: from the neighborhoods or online once
+    /// when added by `naddr`, local from then on. `source` is whatever can
+    /// reach it — the neighborhoods or a public-relay source — and it is
+    /// **not trusted**: every
     /// byte it returns is hashed and the signature and aggregate checked before
     /// any of it is kept.
     pub async fn ingest(
@@ -1401,7 +1422,7 @@ impl NappletHost {
     /// Fetch whatever `source` has for `addr` and, if it is a newer version
     /// than the one served, bring it in — bytes first, so the served version
     /// moves only when the new one can open. Returns the manifest now served
-    /// when it moved, so the caller can pass it on to the Circle.
+    /// when it moved, so the caller can share it into the neighborhoods.
     ///
     /// The update path for napplets: the same [`NappletHost::ingest`] the first
     /// fetch used, gated on version. A source with nothing newer, or nothing at
@@ -1426,8 +1447,8 @@ impl NappletHost {
         if !newer {
             return Ok(None);
         }
-        // The source is untrusted and its answer is about to be passed on to
-        // the Circle: it must be this napplet, not whatever was asked for.
+        // The source is untrusted and its answer is about to be shared into
+        // the neighborhoods: it must be this napplet, not whatever was asked for.
         anyhow::ensure!(
             offered.pubkey == addr.author
                 && offered.kind.as_u16() == addr.kind()
@@ -1443,13 +1464,12 @@ impl NappletHost {
 }
 
 /// Refresh every installed napplet from the public relays, in parallel.
-/// Returns the manifests that moved — for the update-check toast, and for the
-/// caller to pass on to the Circle as it does an nsite update — and how many
-/// were checked.
+/// Returns the manifests that moved — for the update-check toast; pinning
+/// them shares them into the neighborhoods — and how many were checked.
 ///
 /// Public relays only — the hints, the author's NIP-65 relays and the
-/// defaults: a napplet's author publishes there, and the holder who shared
-/// it is not recorded. Offline-only skips the lot — `checked`
+/// defaults: a napplet's author publishes there; neighbors share updates
+/// themselves (`napplet-updates`). Offline-only skips the lot — `checked`
 /// still counts them, so the toast says they were not updated rather than
 /// that there were none.
 pub async fn refresh_all(host: &NappletHost, addrs: &[NappletAddr]) -> (Vec<nostr::Event>, usize) {
@@ -1497,7 +1517,7 @@ struct SourceBlobs<'a> {
     /// round trip to bytes it holds. A local copy is used only when it
     /// hashes to the name asked for: a damaged one (disk corruption, a torn
     /// write) falls through to `source`, so Download again, updates and
-    /// Circle pushes can repair it instead of meeting the same bad bytes.
+    /// neighbors' shared updates can repair it instead of meeting the same bad bytes.
     /// `resolve` re-hashes whatever comes back as well.
     local: &'a dyn BlobStore,
     source: &'a dyn PeerSource,
@@ -1544,16 +1564,13 @@ pub fn frames_as_json(frames: &[ToShell]) -> Vec<String> {
 }
 
 /// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
-/// for — the Circle's Blossom stores over the mesh and, when the internet is
-/// allowed, the servers the URL named, the author's servers (kind 10063, from
-/// what this device holds) and the public defaults, in that order.
+/// for — when the internet is allowed, the servers the URL named, the
+/// author's servers (kind 10063, from what this device holds) and the public
+/// defaults, in that order. Other phones are not asked: a napplet reaches a
+/// neighborhood's blobs through its `neighborhood://` address.
 ///
 /// Only ever reached on a local miss; the handler asks the store first and
-/// keeps whatever this returns. Mesh and internet are asked **at once** and
-/// the first to bring the bytes wins: a feed of pictures must not wait out a
-/// mesh timeout per picture before the internet is tried. A picture one
-/// phone in the room fetched is still one the others get over the mesh — it
-/// is simply no longer made to wait for it.
+/// keeps whatever this returns.
 ///
 /// A blob nobody had is remembered as missing for [`MISS_REMEMBERED`], so a
 /// feed scrolling past a dead link does not ask the whole world again on
@@ -1574,8 +1591,6 @@ pub struct BlossomFetcher {
     misses: Mutex<HashMap<String, std::time::Instant>>,
 }
 
-/// How long one mesh peer gets.
-const MESH_BLOB_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the internet servers get, all together.
 /// Long enough for a resource at the cap (64 MiB) on a slow mobile link; a
 /// dead or silent server is cut off far sooner by the connect timeout and
@@ -1633,35 +1648,6 @@ impl BlossomFetcher {
             }
         }
         misses.insert(sha256_hex.to_string(), std::time::Instant::now());
-    }
-
-    /// Every reachable Circle member at once; the first to bring it wins. A
-    /// peer that does not hold it answers quickly with nothing, and a peer
-    /// that is gone hits the bound.
-    async fn ask_mesh(&self, sha256_hex: &str, max_bytes: usize) -> Option<Vec<u8>> {
-        use futures_util::StreamExt as _;
-        let pool = self.content.peer_relays();
-        let mut asks: futures_util::stream::FuturesUnordered<_> = self
-            .content
-            .reachable_npubs()
-            .into_iter()
-            .filter_map(|npub| crate::ip_source::mesh_source_for(pool.clone(), &npub).ok())
-            .map(|source| source.with_max_blob_bytes(max_bytes))
-            .map(|source| async move {
-                match tokio::time::timeout(MESH_BLOB_TIMEOUT, source.fetch_blob(sha256_hex, &[]))
-                    .await
-                {
-                    Ok(Ok(Some(bytes))) => Some(bytes),
-                    _ => None,
-                }
-            })
-            .collect();
-        while let Some(found) = asks.next().await {
-            if found.is_some() {
-                return found;
-            }
-        }
-        None
     }
 
     /// The authors a fetch's `as=` named, as keys — at most
@@ -1797,191 +1783,17 @@ impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
         if self.recently_missed(sha256_hex) {
             return Ok(None);
         }
-        let mesh = self.ask_mesh(sha256_hex, max_bytes);
-        let internet = self.ask_internet(sha256_hex, max_bytes, hints);
-        tokio::pin!(mesh, internet);
-        let (mut mesh_done, mut internet_done) = (false, false);
-        let mut internet_said = None;
-        while !(mesh_done && internet_done) {
-            tokio::select! {
-                found = &mut mesh, if !mesh_done => {
-                    mesh_done = true;
-                    if found.is_some() {
-                        return Ok(found);
-                    }
-                }
-                answer = &mut internet, if !internet_done => {
-                    internet_done = true;
-                    if let Some(Ok(Some(bytes))) = answer {
-                        return Ok(Some(bytes));
-                    }
-                    internet_said = answer;
-                }
-            }
-        }
-        match internet_said {
+        match self.ask_internet(sha256_hex, max_bytes, hints).await {
+            Some(Ok(Some(bytes))) => Ok(Some(bytes)),
             // Only a miss the internet confirmed is remembered: with it
-            // down, the mesh alone saying no says little, and a peer may
-            // join in a minute.
+            // down, nothing was asked.
             Some(Ok(None)) => {
                 self.remember_miss(sha256_hex);
                 Ok(None)
             }
             Some(Err(e)) => Err(e),
-            _ => Ok(None),
+            None => Ok(None),
         }
-    }
-}
-
-/// NAP-MESH's seam over the device's mesh: hop-limited publish through the
-/// [`RelayHub`](crate::mesh_relay::RelayHub), backlog pull through the Circle
-/// relay pool, and the user's caps from settings.
-///
-/// The caps are read per call from a lock the settings action writes, so a
-/// user lowering "how far apps reach" is obeyed by the very next publish —
-/// there is no per-napplet copy to go stale.
-pub struct NappletMeshSink {
-    hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
-    content: Arc<crate::content::Content>,
-    limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
-    node_live: Arc<std::sync::atomic::AtomicBool>,
-    /// `mesh.blobs`, with its memory of what each peer holds — shared by
-    /// every napplet window, as the peers are.
-    blobs: crate::mesh_blobs::MeshBlobs,
-}
-
-impl NappletMeshSink {
-    pub fn new(
-        hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
-        content: Arc<crate::content::Content>,
-        limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
-        node_live: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
-        let blobs = crate::mesh_blobs::MeshBlobs::new(Arc::new(crate::mesh_blobs::HttpProbe::new(
-            content.clone(),
-        )));
-        Self {
-            hub,
-            content,
-            limits,
-            node_live,
-            blobs,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
-    async fn limits(&self) -> myco_napplet_runtime::MeshLimits {
-        *self.limits.read().unwrap()
-    }
-
-    async fn reach(&self) -> anyhow::Result<myco_napplet_runtime::MeshReach> {
-        Ok(myco_napplet_runtime::MeshReach {
-            online: self.node_live.load(std::sync::atomic::Ordering::Relaxed),
-            peers: self.content.reachable_npubs().len(),
-        })
-    }
-
-    async fn publish(&self, event: nostr::Event, ttl: u8) -> anyhow::Result<()> {
-        // Clamped again here, whatever the caller did: the seam is the last
-        // place a budget passes before it reaches the mesh, and the cap is the
-        // user's promise, not the runtime crate's.
-        let ttl = ttl.min(self.limits.read().unwrap().publish_ttl);
-        let hub = self.hub.lock().unwrap().clone();
-        match hub {
-            Some(hub) => {
-                hub.accept_local_with_ttl(event, Some(ttl)).await?;
-                Ok(())
-            }
-            // No hub is the host-build and pre-start case; the event is
-            // stored and goes no further, which is what `ttl` 0 means anyway.
-            None => self.content.relay().publish(event).await,
-        }
-    }
-
-    /// Kept and flooded again even when already seen — the hub's seen-set
-    /// would otherwise stop a rebroadcast at this phone. Peers' own seen-sets
-    /// still end the flood.
-    async fn rebroadcast(&self, event: nostr::Event, ttl: u8) -> anyhow::Result<()> {
-        // Only what the push plane floods at all: not manifests (their own
-        // interest-aware path) and not gift wraps (addressed to one phone).
-        let kind = event.kind.as_u16();
-        if !crate::gossip::is_gossip_eligible(kind) || kind == 1059 {
-            anyhow::bail!("kind {kind} is not passed on over the mesh");
-        }
-        let ttl = ttl.min(self.limits.read().unwrap().publish_ttl);
-        let hub = self.hub.lock().unwrap().clone();
-        match hub {
-            Some(hub) => hub.rebroadcast_local(event, ttl).await,
-            None => self.content.relay().publish(event).await,
-        }
-    }
-
-    async fn pull(
-        &self,
-        filters: Vec<serde_json::Value>,
-        ttl: u8,
-    ) -> anyhow::Result<myco_napplet_runtime::PulledEvents> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let rx: myco_napplet_runtime::PulledEvents =
-            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            }));
-        let ttl = ttl.min(self.limits.read().unwrap().subscribe_ttl);
-        if ttl == 0 {
-            return Ok(rx);
-        }
-        let hub = self.hub.lock().unwrap().clone();
-        let Some(hub) = hub else {
-            // Nothing to pull through: the stream ends with nothing in it.
-            return Ok(rx);
-        };
-        let content = self.content.clone();
-        // Spawned: a peer two hops out answers in seconds, and the napplet's
-        // next call must not queue behind it. What arrives is accepted into
-        // the hub, which wakes every other subscriber on this device with what
-        // is new, and handed back on `tx` to the subscription that asked,
-        // repeats included: the hub's live stream drops a repeat, and an event
-        // seen once and since evicted would otherwise reach nobody.
-        tokio::spawn(async move {
-            // `ttl` counts rings of peers beyond this device, as a publish's
-            // budget does. The envelope carries the budget the *receiver* may
-            // spend, so the first ring is asked with one less: 1 asks direct
-            // peers and stops, 2 lets them ask theirs.
-            let meta = crate::mesh_wire::MeshMeta::pull(
-                ttl - 1,
-                crate::mesh_wire::new_query_id(),
-                crate::content::PULL_BUDGET_MS,
-            );
-            // Each event is accepted as a peer sends it, so the napplet sees
-            // the nearest peer's answer without waiting for the farthest.
-            let mut events = content.pull_from_peers_stream(filters, meta, None);
-            let mut fresh = 0usize;
-            while let Some(event) = events.recv().await {
-                match hub.accept_pulled(event.clone()).await {
-                    Ok(true) => fresh += 1,
-                    Ok(false) => {}
-                    Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
-                }
-                // The subscription may be gone; the pull still fills the cache.
-                let _ = tx.send(event);
-            }
-            tracing::debug!(ttl, fresh, "napplet mesh pull finished");
-        });
-        Ok(rx)
-    }
-
-    /// Over the mesh only, `HEAD` only; see [`crate::mesh_blobs`]. With the
-    /// node down there is nobody to ask, and the answer says so (`peers` 0).
-    async fn blob_holders(&self, hashes: &[String]) -> Option<myco_napplet_runtime::BlobReach> {
-        if !self.node_live.load(std::sync::atomic::Ordering::Relaxed) {
-            return Some(myco_napplet_runtime::BlobReach {
-                peers: 0,
-                holders: hashes.iter().map(|h| (h.clone(), 0)).collect(),
-            });
-        }
-        Some(self.blobs.ask(hashes).await)
     }
 }
 
@@ -2133,11 +1945,6 @@ pub struct NappletReview {
     pub manifest: Option<nostr::Event>,
     /// Set when the fetch failed; the screen shows this instead of asking.
     pub error: String,
-    /// The peer who shared it, when it arrived by a tap or a scan — kept so a
-    /// retry tries their phone first again, exactly as the first attempt did.
-    /// Without it a retry in a room with no internet would search blind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub holder: Option<String>,
 }
 
 /// Where a napplet under review stands against this phone, once its
@@ -2406,7 +2213,7 @@ mod tests {
         assert!(!effective_grants(&[]).contains(&"upload".to_string()));
         assert!(effective_grants(&["upload".into()]).contains(&"upload".to_string()));
 
-        let requires: Vec<String> = vec!["mesh".into(), "outbox".into(), "upload".into()];
+        let requires: Vec<String> = vec!["neighbor".into(), "outbox".into(), "upload".into()];
         let installed_before = crate::content::NappletGrants {
             granted: effective_grants(&[]),
             denied: Vec::new(),
@@ -2428,6 +2235,20 @@ mod tests {
             ..installed_before
         };
         assert!(unreviewed_domains(&denied, &requires).is_empty());
+    }
+
+    /// NAP-MESH is gone: a manifest that still declares `mesh` is not granted
+    /// it and is not asked about it — an unknown domain, like any other.
+    #[test]
+    fn a_declared_mesh_is_neither_granted_nor_reviewed() {
+        let requires: Vec<String> = vec!["mesh".into(), "relay".into()];
+        assert!(!effective_grants(&requires).contains(&"mesh".to_string()));
+        let grants = crate::content::NappletGrants {
+            granted: vec!["mesh".into()],
+            denied: Vec::new(),
+            reviewed: Vec::new(),
+        };
+        assert!(!unreviewed_domains(&grants, &requires).contains(&"mesh".to_string()));
     }
 
     /// A [`PeerSource`] over in-memory stores — "somewhere else", with no
@@ -2491,7 +2312,7 @@ mod tests {
     }
 
     /// A context over in-memory seams for `relay` and `blobs`, with nothing
-    /// behind the mesh, the outbox or the fetcher.
+    /// behind the outbox or the fetcher.
     pub(super) fn test_ctx(relay: Arc<dyn RelayBackend>, blobs: Arc<dyn BlobStore>) -> NapContext {
         NapContext {
             signer: Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
@@ -2499,7 +2320,7 @@ mod tests {
             sink: Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                 MemRelay::new(),
             ))),
-            mesh: test_mesh(),
+            neighbor: std::sync::Arc::new(myco_napplet_runtime::NoNeighborhoods),
             outbox: test_outbox(),
             lanes: test_outbox(),
             blobs: blobs.clone(),
@@ -2518,17 +2339,6 @@ mod tests {
         Arc::new(myco_napplet_runtime::testing::OutboxFixture::new(Arc::new(
             MemRelay::new(),
         )))
-    }
-
-    /// A mesh with nothing behind it, for tests that are not about the mesh.
-    pub(super) fn test_mesh() -> Arc<myco_napplet_runtime::testing::MemMesh> {
-        Arc::new(myco_napplet_runtime::testing::MemMesh::new(
-            Arc::new(MemRelay::new()),
-            myco_napplet_runtime::MeshLimits {
-                publish_ttl: 3,
-                subscribe_ttl: 2,
-            },
-        ))
     }
 
     async fn host_with_fixture() -> (NappletHost, NappletAddr) {
@@ -2991,7 +2801,6 @@ mod tests {
             already_installed: false,
             manifest: None,
             error: String::new(),
-            holder: None,
             intent_token: String::new(),
         });
         let out = host
@@ -3029,7 +2838,6 @@ mod tests {
             already_installed: false,
             manifest: None,
             error: String::new(),
-            holder: None,
             intent_token: String::new(),
         })));
         let (host, session) = linked_host(&["link"], slot.clone()).await;
@@ -3108,7 +2916,6 @@ mod tests {
             already_installed: false,
             manifest: None,
             error: String::new(),
-            holder: None,
             intent_token: String::new(),
         }
     }
@@ -3485,12 +3292,12 @@ mod tests {
         );
     }
 
-    /// `mesh` became a default after napplets were already installed. One the
-    /// user never decided on picks it up at its next open, silently — there
-    /// is no sheet for a default. One where the user switched `mesh` off keeps
-    /// it off: a default does not overrule a decision.
+    /// `neighbor` became a default after napplets were already installed. One
+    /// the user never decided on picks it up at its next open, silently —
+    /// there is no sheet for a default. One where the user switched `neighbor`
+    /// off keeps it off: a default does not overrule a decision.
     #[tokio::test]
-    async fn a_new_mesh_default_does_not_overrule_a_switched_off_mesh() {
+    async fn a_new_default_does_not_overrule_a_switched_off_domain() {
         let (host, addr) = host_with_fixture().await; // declares shell, relay
 
         let never_decided = crate::content::NappletGrants {
@@ -3499,18 +3306,18 @@ mod tests {
             reviewed: vec!["shell".into(), "relay".into()],
         };
         let opened = host.open_with(&addr, Some(never_decided)).await.unwrap();
-        assert!(opened.granted().contains(&"mesh".to_string()));
+        assert!(opened.granted().contains(&"neighbor".to_string()));
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
 
         let switched_off = crate::content::NappletGrants {
             granted: vec!["shell".into(), "relay".into()],
-            denied: vec!["mesh".into()],
+            denied: vec!["neighbor".into()],
             reviewed: vec!["shell".into(), "relay".into()],
         };
         let opened = host.open_with(&addr, Some(switched_off)).await.unwrap();
         assert!(
-            !opened.granted().contains(&"mesh".to_string()),
-            "the new default overruled a mesh the user switched off"
+            !opened.granted().contains(&"neighbor".to_string()),
+            "the new default overruled a domain the user switched off"
         );
         assert!(opened.granted().contains(&"relay".to_string()));
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
@@ -3681,7 +3488,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A phone for the Circle-update tests: a real content layer (so pins,
+    /// A phone for the update tests: a real content layer (so pins,
     /// the Library and the relay's slot rules are the device's) and a host
     /// serving through its pins. The data dir goes when the phone does.
     struct Phone {
@@ -3855,10 +3662,10 @@ mod tests {
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "v1", &["theme"]);
         let v2 = version(&keys, 2_000, "v2", &["outbox", "theme"]);
-        seed(&phone, &v1, &["mesh", "outbox", "theme"]).await;
+        seed(&phone, &v1, &["neighbor", "outbox", "theme"]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
         assert!(opened.granted().contains(&"outbox".to_string()));
@@ -3874,7 +3681,7 @@ mod tests {
         let v1 = version(&keys, 1_000, "v1", &["outbox", "theme"]);
         seed(&phone, &v1, &[]).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v1), table).await;
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
         assert!(opened.granted().contains(&"outbox".to_string()));
@@ -3888,10 +3695,10 @@ mod tests {
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "v1", &[]);
         let v2 = version(&keys, 2_000, "v2", &["outbox"]);
-        seed(&phone, &v1, &["mesh"]).await;
+        seed(&phone, &v1, &["neighbor"]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         assert!(!opened.granted().contains(&"outbox".to_string()));
@@ -3910,7 +3717,7 @@ mod tests {
         seed(&phone, &v1, &[]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&vetted.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&vetted.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         assert!(!opened.granted().contains(&"outbox".to_string()));
@@ -4065,7 +3872,7 @@ mod tests {
         install(&phone, &v1, &["theme"]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
     }
@@ -4077,7 +3884,7 @@ mod tests {
         let phone = phone("preinstalled-denied");
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "v1", &["outbox", "theme"]);
-        seed(&phone, &v1, &["mesh", "outbox", "theme"]).await;
+        seed(&phone, &v1, &["neighbor", "outbox", "theme"]).await;
         let npub = keys.public_key().to_bech32().unwrap();
         let mut grants = phone
             .content
@@ -4088,115 +3895,59 @@ mod tests {
             .content
             .set_napplet_grants(&npub, Some("fixture"), grants);
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v1), table).await;
         assert!(!opened.granted().contains(&"outbox".to_string()));
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
     }
 
-    /// A push from a mesh peer with `ttl` hops left.
-    fn mesh(ttl: u8) -> crate::mesh_relay::Inbound {
-        crate::mesh_relay::Inbound {
-            origin: crate::mesh_relay::Origin::Mesh,
-            event_ttl: Some(ttl),
-            sender: None,
-        }
-    }
-
-    /// Push `napplet`'s manifest at `phone` as the relay hub does: stored
-    /// first, then handed to the policy. Returns the outcome and every
-    /// forward made, each with the version pinned at the moment it went out.
+    /// Hand `napplet`'s manifest to `phone` as a neighbor's
+    /// `napplet-updates` does: stored first, then handed to the policy.
     async fn push(
         phone: &Phone,
         napplet: &myco_napplet_runtime::testing::TestNapplet,
-        inbound: crate::mesh_relay::Inbound,
         sources: &[Arc<dyn PeerSource>],
-    ) -> (
-        crate::content::NappletPush,
-        Vec<(u8, Option<nostr::EventId>)>,
-    ) {
+    ) -> crate::content::NappletPush {
         let event = napplet.manifest.clone();
         phone.content.relay().publish(event.clone()).await.unwrap();
-        let forwarded = Mutex::new(Vec::new());
-        let content = phone.content.clone();
-        let outcome = phone
-            .content
-            .handle_napplet_manifest(event, &inbound, sources, |m, ttl| {
-                let pinned = content
-                    .pinned_manifest(m.kind.as_u16(), &m.pubkey, Some("fixture"))
-                    .map(|e| e.id);
-                forwarded.lock().unwrap().push((ttl, pinned));
-            })
-            .await;
-        (outcome, forwarded.into_inner().unwrap())
+        phone.content.handle_napplet_manifest(event, sources).await
     }
 
-    /// An installed napplet that hears of a newer version from a Circle peer
-    /// fetches its bytes, verifies and pins them, and only then passes the
-    /// manifest on — so the next phone can fetch the bytes from this one.
-    /// The next launch opens the new version.
+    /// An installed napplet that hears of a newer version from a neighbor
+    /// fetches its bytes, verifies and pins them. The next launch opens the
+    /// new version.
     #[tokio::test]
-    async fn an_installed_napplet_downloads_a_pushed_update_before_passing_it_on() {
+    async fn an_installed_napplet_downloads_a_shared_update() {
         let phone = phone("update");
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "Version one", &["relay"]);
         let v2 = version(&keys, 2_000, "Version two", &["relay"]);
         install(&phone, &v1, &["relay"]).await;
 
-        let (outcome, forwarded) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        let outcome = push(&phone, &v2, &[holder_of(&v2).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Updated);
-        assert_eq!(
-            forwarded,
-            vec![(1, Some(v2.manifest.id))],
-            "passed on before the new version was here, or with the wrong budget"
-        );
         assert!(phone.content.blobs().has(&v2.blobs[0].0).await);
         let opened = phone.host.open(&addr_of(&v2), None).await.unwrap();
         assert_eq!(opened.title.as_deref(), Some("Version two"));
     }
 
-    /// A phone that does not have the napplet is a pure relay for it, as for
-    /// an nsite it does not run: the manifest goes on at once and nothing is
-    /// downloaded. With no hops left it goes nowhere.
+    /// A phone that does not have the napplet fetches nothing for it, as
+    /// for an nsite it does not run.
     #[tokio::test]
-    async fn a_napplet_not_installed_here_is_passed_on_and_not_fetched() {
+    async fn a_napplet_not_installed_here_is_not_fetched() {
         let phone = phone("relay");
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "Version one", &["relay"]);
 
-        let (outcome, forwarded) = push(&phone, &v1, mesh(2), &[holder_of(&v1).await]).await;
-        assert_eq!(outcome, crate::content::NappletPush::Relayed);
-        assert_eq!(forwarded, vec![(1, None)]);
+        let outcome = push(&phone, &v1, &[holder_of(&v1).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::NotInstalled);
         assert!(!phone.content.blobs().has(&v1.blobs[0].0).await);
-
-        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
-        let (outcome, forwarded) = push(&phone, &v2, mesh(0), &[holder_of(&v2).await]).await;
-        assert_eq!(outcome, crate::content::NappletPush::Relayed);
-        assert!(forwarded.is_empty(), "a spent budget was forwarded");
-
-        // Published here: the default budget, or the one a napplet chose
-        // through NAP-MESH — where 0 means this phone only.
-        let local = |ttl| crate::mesh_relay::Inbound {
-            origin: crate::mesh_relay::Origin::Local,
-            event_ttl: ttl,
-            sender: None,
-        };
-        let v3 = version(&keys, 3_000, "Version three", &["relay"]);
-        let (_, forwarded) = push(&phone, &v3, local(None), &[]).await;
-        assert_eq!(
-            forwarded,
-            vec![(crate::mesh_wire::EVENT_TTL - 1, None)],
-            "a local publish did not originate at the default"
-        );
-        let v4 = version(&keys, 4_000, "Version four", &["relay"]);
-        let (_, forwarded) = push(&phone, &v4, local(Some(0)), &[]).await;
-        assert!(forwarded.is_empty(), "a NAP-MESH ttl of 0 left the phone");
     }
 
     /// An older version is a downgrade or a replay: it is not fetched, not
     /// pinned, and goes no further. A newer napplet by another author under
-    /// the same `d` tag is a different napplet — relayed like any other this
-    /// phone lacks, and never a way to replace the installed one.
+    /// the same `d` tag is a different napplet — not installed here, and never
+    /// a way to replace the installed one.
     #[tokio::test]
     async fn an_older_version_or_another_authors_napplet_leaves_the_installed_one_alone() {
         let phone = phone("stale");
@@ -4205,20 +3956,18 @@ mod tests {
         let v2 = version(&keys, 2_000, "Version two", &["relay"]);
         install(&phone, &v2, &["relay"]).await;
 
-        let (outcome, forwarded) = push(&phone, &v1, mesh(2), &[holder_of(&v1).await]).await;
+        let outcome = push(&phone, &v1, &[holder_of(&v1).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Dropped);
-        assert!(forwarded.is_empty(), "a downgrade was passed on");
         assert!(!phone.content.blobs().has(&v1.blobs[0].0).await);
 
         // The installed version itself, pushed again: nothing new to fetch
         // and nothing to spread.
-        let (outcome, forwarded) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        let outcome = push(&phone, &v2, &[holder_of(&v2).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Dropped);
-        assert!(forwarded.is_empty(), "a replay was passed on");
 
         let impostor = version(&nostr::Keys::generate(), 3_000, "Impostor", &["relay"]);
-        let (outcome, _) = push(&phone, &impostor, mesh(2), &[holder_of(&impostor).await]).await;
-        assert_eq!(outcome, crate::content::NappletPush::Relayed);
+        let outcome = push(&phone, &impostor, &[holder_of(&impostor).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::NotInstalled);
         assert!(!phone.content.blobs().has(&impostor.blobs[0].0).await);
 
         let opened = phone.host.open(&addr_of(&v2), None).await.unwrap();
@@ -4253,9 +4002,8 @@ mod tests {
             .break_signature()
             .build();
         for bad in [&no_artifact, &corrupt, &forged] {
-            let (outcome, forwarded) = push(&phone, bad, mesh(2), &[holder_of(bad).await]).await;
+            let outcome = push(&phone, bad, &[holder_of(bad).await]).await;
             assert_eq!(outcome, crate::content::NappletPush::Dropped);
-            assert!(forwarded.is_empty(), "an invalid manifest was passed on");
         }
         assert_eq!(
             phone
@@ -4266,10 +4014,9 @@ mod tests {
         );
     }
 
-    /// No source with the bytes: the installed version keeps serving, and the
-    /// manifest still goes on so the wave does not stall on this phone.
+    /// No source with the bytes: the installed version keeps serving.
     #[tokio::test]
-    async fn a_failed_download_keeps_the_served_version_and_still_passes_it_on() {
+    async fn a_failed_download_keeps_the_served_version() {
         let phone = phone("nobytes");
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "Version one", &["relay"]);
@@ -4277,9 +4024,8 @@ mod tests {
         install(&phone, &v1, &["relay"]).await;
 
         // The only source has v1's bytes, not v2's.
-        let (outcome, forwarded) = push(&phone, &v2, mesh(2), &[holder_of(&v1).await]).await;
+        let outcome = push(&phone, &v2, &[holder_of(&v1).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::NotDownloaded);
-        assert_eq!(forwarded, vec![(1, Some(v1.manifest.id))]);
         let opened = phone.host.open(&addr_of(&v1), None).await.unwrap();
         assert_eq!(opened.title.as_deref(), Some("Version one"));
     }
@@ -4328,7 +4074,7 @@ mod tests {
         let window = phone.host.open(&addr_of(&v1), None).await.unwrap();
         assert_eq!(window.title.as_deref(), Some("Version one"));
 
-        let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        let outcome = push(&phone, &v2, &[holder_of(&v2).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Updated);
 
         // v1's bytes arriving now — a slow install, a refresh that started
@@ -4352,7 +4098,7 @@ mod tests {
     }
 
     /// A window open on v1 is told once the served version has moved to v2 —
-    /// by a Circle push here, the update check the same way — and a window
+    /// by a neighbor's shared update here, the update check the same way — and a window
     /// opened after that is current. A session that is gone has nothing to say.
     #[tokio::test]
     async fn an_open_window_learns_the_served_version_moved_on() {
@@ -4368,7 +4114,7 @@ mod tests {
             "a window on the served version is current"
         );
 
-        let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        let outcome = push(&phone, &v2, &[holder_of(&v2).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Updated);
         let v2_identity =
             myco_napplet_runtime::manifest::NappletManifest::from_event(v2.manifest.clone())
@@ -4434,7 +4180,7 @@ mod tests {
         }
     }
 
-    /// The update check passes what it brings in on to the Circle, so it
+    /// The update check shares what it brings in with the neighborhoods, so it
     /// must be the napplet asked for: a newer manifest for another author or
     /// another `d` tag is refused, and the served version stays.
     #[tokio::test]
@@ -4470,7 +4216,7 @@ mod tests {
         }
     }
 
-    /// An update from the Circle never widens what the napplet may do. The new
+    /// An update from a neighbor never widens what the napplet may do. The new
     /// version declaring a domain the user never reviewed opens without it,
     /// and hands it back as unreviewed for the review sheet.
     #[tokio::test]
@@ -4481,7 +4227,7 @@ mod tests {
         let v2 = version(&keys, 2_000, "Version two", &["relay", "outbox"]);
         install(&phone, &v1, &["relay"]).await;
 
-        let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        let outcome = push(&phone, &v2, &[holder_of(&v2).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Updated);
 
         let npub = keys.public_key().to_bech32().unwrap();
@@ -4490,7 +4236,7 @@ mod tests {
         assert_eq!(opened.title.as_deref(), Some("Version two"));
         assert!(
             !opened.granted().contains(&"outbox".to_string()),
-            "an update from the Circle granted itself a domain nobody reviewed"
+            "an update from a neighbor granted itself a domain nobody reviewed"
         );
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
     }
@@ -4553,13 +4299,13 @@ mod tests {
             r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
         )
         .await;
-        let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
+        let ask = r#"{"channel":"napplet","message":{"type":"theme.get","id":"m1"}}"#;
 
-        // `mesh` is a default grant (for now), so switch it off here first.
+        // `theme` is a default grant, so switch it off here first.
         host.apply_grants(&addr.author, Some("fixture"), vec![])
             .await;
         let other_author = nostr::Keys::generate().public_key();
-        host.apply_grants(&other_author, Some("fixture"), vec!["mesh".into()])
+        host.apply_grants(&other_author, Some("fixture"), vec!["theme".into()])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
@@ -4582,10 +4328,10 @@ mod tests {
             r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
         )
         .await;
-        let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
+        let ask = r#"{"channel":"napplet","message":{"type":"theme.get","id":"m1"}}"#;
 
-        // `mesh` is a default grant (for now): switched off on the sheet, it
-        // is refused at once.
+        // `theme` is a default grant: switched off on the sheet, it is
+        // refused at once.
         host.apply_grants(&addr.author, Some("fixture"), vec![])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
@@ -4594,10 +4340,10 @@ mod tests {
         };
         assert!(
             message.field("error").is_some(),
-            "mesh was served after being switched off"
+            "theme was served after being switched off"
         );
 
-        host.apply_grants(&addr.author, Some("fixture"), vec!["mesh".into()])
+        host.apply_grants(&addr.author, Some("fixture"), vec!["theme".into()])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
@@ -4607,7 +4353,7 @@ mod tests {
             message.field("error").is_none(),
             "the switch did not reach the window"
         );
-        assert!(message.field("limits").is_some());
+        assert!(message.field("theme").is_some());
 
         host.apply_grants(&addr.author, Some("fixture"), vec![])
             .await;
@@ -5314,315 +5060,6 @@ mod tests {
         let naddr = coordinate.to_bech32().unwrap();
         let err = NappletAddr::parse(&naddr).unwrap_err();
         assert!(err.to_string().contains("35128"), "unexpected error: {err}");
-    }
-
-    /// A Circle member in reach: holding `napplet`, or nothing at all.
-    async fn nearby_peer(
-        napplet: Option<&myco_napplet_runtime::testing::TestNapplet>,
-    ) -> Box<dyn PeerSource> {
-        let source = FakeSource {
-            relay: MemRelay::new(),
-            blobs: MemBlobs::new(),
-            kind: KIND_NAMED,
-        };
-        if let Some(napplet) = napplet {
-            for (_, bytes) in &napplet.blobs {
-                source.blobs.put(bytes).await.unwrap();
-            }
-            source
-                .relay
-                .publish(napplet.manifest.clone())
-                .await
-                .unwrap();
-        }
-        Box::new(source)
-    }
-
-    /// A peer that is in the Circle list but never answers — out of range
-    /// since the list was read, or a link that stalls.
-    struct Silent;
-
-    #[async_trait::async_trait]
-    impl PeerSource for Silent {
-        async fn fetch_manifest(
-            &self,
-            _author: &PublicKey,
-            _d_tag: Option<&str>,
-        ) -> anyhow::Result<Option<nostr::Event>> {
-            std::future::pending().await
-        }
-
-        async fn fetch_blob(
-            &self,
-            _sha256_hex: &str,
-            _servers: &[String],
-        ) -> anyhow::Result<Option<Vec<u8>>> {
-            std::future::pending().await
-        }
-    }
-
-    /// The phones in reach as one source for `addr`, as `napplet_sources`
-    /// builds it.
-    fn mesh_of(peers: Vec<Box<dyn PeerSource>>, addr: &NappletAddr) -> crate::ip_source::FirstOf {
-        crate::ip_source::FirstOf::new(peers, addr.author, addr.d_tag.clone(), addr.kind())
-    }
-
-    /// A peer that counts the blobs it is asked for and answers manifests
-    /// after `delay` — a slower link than the others.
-    struct Counted {
-        peer: Box<dyn PeerSource>,
-        blobs_asked: Arc<std::sync::atomic::AtomicUsize>,
-        delay: std::time::Duration,
-    }
-
-    impl Counted {
-        fn new(
-            peer: Box<dyn PeerSource>,
-            delay_ms: u64,
-        ) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
-            let blobs_asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let counted = Self {
-                peer,
-                blobs_asked: blobs_asked.clone(),
-                delay: std::time::Duration::from_millis(delay_ms),
-            };
-            (counted, blobs_asked)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl PeerSource for Counted {
-        async fn fetch_manifest(
-            &self,
-            author: &PublicKey,
-            d_tag: Option<&str>,
-        ) -> anyhow::Result<Option<nostr::Event>> {
-            tokio::time::sleep(self.delay).await;
-            self.peer.fetch_manifest(author, d_tag).await
-        }
-
-        async fn fetch_blob(
-            &self,
-            sha256_hex: &str,
-            servers: &[String],
-        ) -> anyhow::Result<Option<Vec<u8>>> {
-            self.blobs_asked
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.peer.fetch_blob(sha256_hex, servers).await
-        }
-    }
-
-    fn fixture_addr(napplet: &myco_napplet_runtime::testing::TestNapplet) -> NappletAddr {
-        NappletAddr {
-            author: napplet.author,
-            d_tag: Some("fixture".to_string()),
-            relays: Vec::new(),
-        }
-    }
-
-    /// Long enough for in-memory sources, far short of a mesh timeout: a
-    /// test that needs a silent peer's answer fails instead of hanging.
-    const NO_WAITING: std::time::Duration = std::time::Duration::from_secs(2);
-
-    /// A bare `naddr` names no sharer; a Circle member in reach that holds
-    /// the napplet is found, reviewed and installed from.
-    #[tokio::test]
-    async fn a_napplet_is_found_on_a_nearby_peer() {
-        let napplet = NappletBuilder::new().build();
-        let addr = fixture_addr(&napplet);
-        let nearby = mesh_of(vec![nearby_peer(Some(&napplet)).await], &addr);
-
-        let (event, _) = fetch_manifest(&addr, &nearby).await.unwrap();
-        assert_eq!(event.id, napplet.manifest.id);
-        let host = NappletHost::new(test_ctx(
-            Arc::new(MemRelay::new()),
-            Arc::new(MemBlobs::new()),
-        ));
-        host.ingest_event(event, &nearby).await.unwrap();
-        assert!(host.open(&addr, None).await.is_ok());
-    }
-
-    /// A peer that has nothing does not end the search: the next one is
-    /// still heard.
-    #[tokio::test]
-    async fn a_peer_with_nothing_does_not_stop_the_search() {
-        let napplet = NappletBuilder::new().build();
-        let addr = fixture_addr(&napplet);
-        let nearby = mesh_of(
-            vec![nearby_peer(None).await, nearby_peer(Some(&napplet)).await],
-            &addr,
-        );
-
-        let (event, _) = fetch_manifest(&addr, &nearby).await.unwrap();
-        assert_eq!(event.id, napplet.manifest.id);
-    }
-
-    /// Peers are asked at once: one that never answers does not hold up one
-    /// that does — neither for the manifest nor, at install, for the bytes.
-    #[tokio::test]
-    async fn a_silent_peer_does_not_hold_up_one_that_answers() {
-        let napplet = NappletBuilder::new().build();
-        let addr = fixture_addr(&napplet);
-        let nearby = || async {
-            mesh_of(
-                vec![Box::new(Silent), nearby_peer(Some(&napplet)).await],
-                &addr,
-            )
-        };
-
-        let (event, _) = tokio::time::timeout(NO_WAITING, async {
-            fetch_manifest(&addr, &nearby().await).await
-        })
-        .await
-        .expect("a silent peer held up the review")
-        .unwrap();
-        // Install asks afresh, as `InstallNapplet` does: no peer has
-        // answered this source yet.
-        let host = NappletHost::new(test_ctx(
-            Arc::new(MemRelay::new()),
-            Arc::new(MemBlobs::new()),
-        ));
-        tokio::time::timeout(NO_WAITING, async {
-            host.ingest_event(event, &nearby().await).await
-        })
-        .await
-        .expect("a silent peer held up the install")
-        .unwrap();
-        assert!(host.open(&addr, None).await.is_ok());
-    }
-
-    /// Peers stay untrusted: a forged manifest from one is passed over, not
-    /// handed on to fail the whole search while another holds the real one.
-    #[tokio::test]
-    async fn a_forged_answer_does_not_shadow_a_real_one() {
-        let keys = nostr::Keys::generate();
-        let napplet = NappletBuilder::new().keys(keys.clone()).build();
-        let forged = NappletBuilder::new().keys(keys).break_signature().build();
-        let addr = fixture_addr(&napplet);
-        let nearby = mesh_of(
-            vec![
-                nearby_peer(Some(&forged)).await,
-                nearby_peer(Some(&napplet)).await,
-            ],
-            &addr,
-        );
-
-        let (event, _) = fetch_manifest(&addr, &nearby).await.unwrap();
-        assert_eq!(event.id, napplet.manifest.id);
-    }
-
-    /// Install starts from a fresh source, with no peer heard from yet. The
-    /// bytes still come from one phone — the quickest to answer for the
-    /// manifest — not from every phone in the room at once.
-    #[tokio::test]
-    async fn the_bytes_come_from_one_peer_not_all_of_them() {
-        let napplet = NappletBuilder::new().build();
-        let addr = fixture_addr(&napplet);
-        let (quick, quick_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 0);
-        let (slow, slow_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 100);
-        let nearby = mesh_of(vec![Box::new(slow), Box::new(quick)], &addr);
-
-        let host = NappletHost::new(test_ctx(
-            Arc::new(MemRelay::new()),
-            Arc::new(MemBlobs::new()),
-        ));
-        host.ingest_event(napplet.manifest.clone(), &nearby)
-            .await
-            .unwrap();
-        let asked =
-            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(
-            asked(&slow_asked),
-            0,
-            "the slower phone was asked for bytes too"
-        );
-        assert_eq!(asked(&quick_asked), napplet.blobs.len());
-    }
-
-    /// The quickest phone may hold the manifest and not the bytes — it
-    /// reviewed the napplet and never installed it. The others are asked
-    /// then, and the install still lands.
-    #[tokio::test]
-    async fn a_quick_peer_without_the_bytes_hands_over_to_one_with_them() {
-        let napplet = NappletBuilder::new().build();
-        let addr = fixture_addr(&napplet);
-        let manifest_only = FakeSource {
-            relay: MemRelay::new(),
-            blobs: MemBlobs::new(),
-            kind: KIND_NAMED,
-        };
-        manifest_only
-            .relay
-            .publish(napplet.manifest.clone())
-            .await
-            .unwrap();
-        let (quick, quick_asked) = Counted::new(Box::new(manifest_only), 0);
-        let (slow, slow_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 100);
-        let nearby = mesh_of(vec![Box::new(slow), Box::new(quick)], &addr);
-
-        let host = NappletHost::new(test_ctx(
-            Arc::new(MemRelay::new()),
-            Arc::new(MemBlobs::new()),
-        ));
-        tokio::time::timeout(
-            NO_WAITING,
-            host.ingest_event(napplet.manifest.clone(), &nearby),
-        )
-        .await
-        .expect("the install waited on a phone without the bytes")
-        .unwrap();
-        assert!(host.open(&addr, None).await.is_ok());
-        let asked =
-            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(asked(&quick_asked), 1, "asked once, then passed over");
-        assert_eq!(asked(&slow_asked), napplet.blobs.len());
-    }
-
-    /// A phone that answers the manifest and then fails the download — it
-    /// stalled, or walked off — is dropped for the next one. One phone at a
-    /// time, never two at once, and the failed one is not asked again.
-    #[tokio::test]
-    async fn a_peer_that_fails_the_download_is_dropped_for_the_next() {
-        struct Failing(Box<dyn PeerSource>);
-
-        #[async_trait::async_trait]
-        impl PeerSource for Failing {
-            async fn fetch_manifest(
-                &self,
-                author: &PublicKey,
-                d_tag: Option<&str>,
-            ) -> anyhow::Result<Option<nostr::Event>> {
-                self.0.fetch_manifest(author, d_tag).await
-            }
-
-            async fn fetch_blob(
-                &self,
-                _sha256_hex: &str,
-                _servers: &[String],
-            ) -> anyhow::Result<Option<Vec<u8>>> {
-                anyhow::bail!("stalled")
-            }
-        }
-
-        let napplet = NappletBuilder::new().build();
-        let addr = fixture_addr(&napplet);
-        let (quick, quick_asked) =
-            Counted::new(Box::new(Failing(nearby_peer(Some(&napplet)).await)), 0);
-        let (slow, slow_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 100);
-        let nearby = mesh_of(vec![Box::new(slow), Box::new(quick)], &addr);
-
-        let host = NappletHost::new(test_ctx(
-            Arc::new(MemRelay::new()),
-            Arc::new(MemBlobs::new()),
-        ));
-        host.ingest_event(napplet.manifest.clone(), &nearby)
-            .await
-            .unwrap();
-        assert!(host.open(&addr, None).await.is_ok());
-        let asked =
-            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(asked(&quick_asked), 1, "the failed phone was asked again");
-        assert_eq!(asked(&slow_asked), napplet.blobs.len());
     }
 }
 

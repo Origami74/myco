@@ -104,7 +104,7 @@ just identity                                 # prints this host's device identi
 
 Host `cargo test` runs every crate against in-memory seams. It never sees
 `jni_abi.rs` or the radio bridges — those compile only for Android, so they are
-verified by the cross-compile below. Pairing, BLE, NFC and mesh behaviour
+verified by the cross-compile below. Neighborhood links, BLE, NFC and mesh behaviour
 regress only on phones.
 
 ### Android — the APK
@@ -242,7 +242,7 @@ adb -s <serial> shell am force-stop app.myco
 ```
 
 The value is a `tracing` `EnvFilter` directive, so it can target one crate or
-module, e.g. `info,fips=debug,myco_core::peer_relay=debug` (92 bytes max).
+module, e.g. `info,fips=debug,myco_core::neighbor=debug` (92 bytes max).
 Clear it with `setprop debug.myco.log ""`. The property does not survive a
 reboot.
 

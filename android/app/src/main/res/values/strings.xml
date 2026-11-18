@@ -2,5 +2,16 @@
 <resources>
     <string name="app_name">Myco</string>
     <string name="nfc_pair_service">Myco tap-to-pair</string>
-    <string name="nfc_pair_aid_group">Myco device pairing</string>
+    <string name="nfc_pair_aid_group">Myco tap to connect</string>
+
+    <!-- Neighborhood invitations: the join sheet. -->
+    <string name="invite_from_link">From a link</string>
+    <string name="invite_from_qr">From a QR code</string>
+    <string name="invite_from_tap">From a phone tap</string>
+    <string name="invite_title_named">“%1$s” invites you</string>
+    <string name="invite_title">You\'re invited</string>
+    <string name="invite_names_note">Names are what the inviter calls them. Check the code with them.</string>
+    <string name="invite_code">Code %1$s</string>
+    <string name="invite_expired">This invitation has expired. Ask for a new one.</string>
+    <string name="invite_check_code">They\'ll see code %1$s</string>
 </resources>

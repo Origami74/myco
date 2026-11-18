@@ -20,15 +20,15 @@ start".
 | `user-signer.json` | a signer-app login (NIP-55): the user's pubkey and the signer's package — no secret | `user_key.rs` |
 | `settings.json` | the persisted settings below | `settings_store.rs` |
 | `library.json` | the Apps grid: every installed nsite and napplet, with `kind`, `pinned`, a napplet's `granted` capabilities and the `pointer` it was added by | `content.rs` (`LibraryItem`) |
-| `circle.json` | the Circle: paired peers (`npub`, `name`, `addedAt`, per-peer `perms`) | `content.rs` (`CircleContact`) |
-| `outbound_pairs.json` | invites sent and not yet accepted | `content.rs` |
+| `neighborhoods.json` | the neighborhoods this device carries: id, local name, policy (publish / backlog hops, pass on, blob push hops, extensions not got / not shared), offer, muted authors, napplet grants, and each napplet's address tokens | `neighbor/store.rs` |
+| `links.json` | links: this side's link key, the peer's link key, the neighborhoods carried, the peer's last offer and name, pending additions; plus open invitations | `neighbor/link.rs` |
+| `neighborhood-relay/<id>/`, `neighborhood-blobs/`, `neighborhood-scopes.json` | neighborhood events (one store per neighborhood) and blobs, kept apart from the user's own relay, and which neighborhoods each belongs to | `neighbor/data.rs` |
 | `active.json` | which version of each nsite is active (staged updates) | `content.rs`, [nsite-updates.md](../design/nsite/nsite-updates.md) |
 | `relay/lmdb/` | the embedded relay's events — what this phone keeps (manifests, relay lists, profiles, its own notes, private messages) — an LMDB database. Expiring events (chat) are stored too and swept once expired. A pre-LMDB `relay/events.json` is migrated in on first open and left as `events.json.migrated` | `myco-relay` |
 | `relay/expiring.log` | the ids and expiries of stored expiring events, one `"<expiry> <hex id>"` per line, for the sweep | `myco-relay` |
 | `cache/events/` | the shell event cache: an LMDB database (`lmdb/`), its index snapshot (`index.bin`), and a `compact-on-open` marker after "Clear cache" | `myco-cache` |
 | `cache/blobs/` | the shell blob cache: content-addressed blobs (`blobs/`) and its index snapshot (`index.bin`) | `myco-cache` |
 | `blossom/` | content-addressed blobs, named by sha256 | `myco-blossom` |
-| `file_transfers.json`, `file-outbox/`, `received/` | native file sharing between Circle members | `file_transfer.rs` |
 | `ble-attempts.jsonl` | the BLE connect-attempt log the Dev tab shows | `attempt_store.rs` |
 | `fips-control.sock` | the node's control socket (runtime, not state) | `control_client.rs` |
 | `seeded-defaults`, `profileInstalled` | one-shot markers | `runtime.rs`, `user_key.rs` |
@@ -45,17 +45,30 @@ thing is built.
 | `customRelayUrl` | string? | built-in | a NIP-01 relay to use as the event store instead of the embedded one. Applied at the next launch. | `SetCustomRelay` (Settings › Storage) |
 | `customBlossomUrl` | string? | built-in | a Blossom server to use as the blob store instead of the embedded one. Applied at the next launch. | `SetCustomBlossom` |
 | `awareDataPaths` | u8? | unknown | how many concurrent Wi-Fi Aware data paths the chipset reports; sizes the Aware UDP socket pool at node start | Kotlin, whenever it can read it |
-| `nappletMeshPublishTtl` | u8? | 3 | the most hops a napplet's `mesh.publish` may ask for; never above `EVENT_TTL` | `SetNappletMeshReach` (Settings › App reach) |
-| `nappletMeshSubscribeTtl` | u8? | 2 | the most hops a napplet's `mesh.subscribe` backlog pull may ask for; never above `MAX_REQ_TTL` | `SetNappletMeshReach` |
 | `eventCacheBytes` | u64? | 500 MiB | the shell event cache budget (estimated database size); 16 MiB..=64 GiB | `SetCacheLimits` (Settings › Storage › Cache size) |
 | `blobCacheBytes` | u64? | 1.5 GiB | the shell blob cache budget; 16 MiB..=64 GiB | `SetCacheLimits` |
+
+### Per neighborhood
+
+Kept in `neighborhoods.json`, edited on each Neighborhood page. Defaults:
+
+| Setting | Default | Set by |
+| --- | --- | --- |
+| Publish hops / backlog hops / pass on | 3 / 2 / on (**Wide**) | `SetNeighborhoodPolicy` (Posts reach) |
+| Blob push hops | 0 | `SetNeighborhoodBlobHops` (Files) |
+| Extensions: Get / Share | all on | `SetNeighborhoodExtension` |
+
+The old global **App reach** setting (`nappletMeshPublishTtl`,
+`nappletMeshSubscribeTtl`) is gone with NAP-MESH. See
+[nap-neighbor/](../design/nap-neighbor/README.md).
 
 ### Held in memory only
 
 - **Offline only** (`SetOfflineOnly`): never use the internet fallback. Kotlin
   persists the switch and re-sends it on launch.
-- **Device name** (`SetDeviceName`): stamped on pairing events. Kotlin owns and
-  persists it.
+- **Device name**: Kotlin owns and persists it, and passes it as the name in
+  invitations and joins (`create_link_invite`, `join_link`). It is never
+  advertised over Bluetooth.
 - **Internet breaker**: after a round in which every public relay failed,
   napplet internet lanes are skipped for 30 s. Not persisted.
 
@@ -82,8 +95,11 @@ on every launch.
 | `developer_mode` | debug builds | the Dev tab |
 | `exit_proxy` | — | the experimental exit-node proxy (Dev) |
 
-Issued pairing secrets (`PairSecrets.kt`) and pending deep links
-(`PendingDeepLinks.kt`) also live here, keyed per secret / per link.
+Pending deep links (`PendingDeepLinks.kt`) also live here, keyed per link.
+
+A second file, `neighbors`, holds the Neighbors tab's own bits: the last
+neighborhoods picked for an invitation (`last_invite`) and whether the "The
+Circle is gone" notice was dismissed (`circle_removed_seen`).
 
 ---
 
@@ -92,7 +108,6 @@ Issued pairing secrets (`PairSecrets.kt`) and pending deep links
 - **Grants are never widened by anything but the user.** Install review and the
   Manage permissions sheet are the only writers of `granted`; an open window
   learns of a change by relaunching.
-- **Peer permissions** (`circle.json` → `perms`) have no UI yet; every peer gets
-  the defaults. See [nsite-permissions.md](../design/nsite/nsite-permissions.md).
-- **Ports** are fixed: relay `4870`, Blossom `24243`, auth `4873`. See
+- **Ports** are fixed: relay `4870` (loopback only), link service `4873` (the
+  only port open to other phones); Blossom is not served on a port. See
   [ports.md](./ports.md).

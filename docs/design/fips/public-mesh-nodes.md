@@ -6,9 +6,9 @@
 > different networks — see [Testing](#testing).
 
 When a phone is online it can also peer with public FIPS nodes over the
-internet. Circle members who are not in the same room then reach each other
-through the mesh — gossip, pulls, file sharing, app updates — as if they
-were nearby.
+internet. Linked phones that are not in the same room then reach each other
+through the mesh — neighborhood traffic, app fetches, file sharing, app
+updates — as if they were nearby.
 
 ## The trade-off
 
@@ -16,9 +16,9 @@ Off by default. The Settings page says, next to the switch:
 
 - A public node sees this phone's **IP address** and which **mesh
   addresses** it talks to.
-- It does not see **contents**. Every Circle session is end-to-end Noise
-  above it, and a public node is not a Circle member: the Circle gate on
-  the relay, Blossom and pairing services is unchanged.
+- It does not see **contents**. Every session is end-to-end Noise above
+  it, and a public node holds no link: the relay and Blossom admit only app
+  peers, and the link service needs a link key, as before.
 
 It also reaches **past this phone**. fips is one mesh: once this phone links
 to a public node, the phones it is linked to over BLE, Aware or the LAN join
@@ -26,8 +26,8 @@ the same global network through it, whether or not they switched this on.
 
 - They become **routable from the internet** via this phone, and their mesh
   addresses spread in the global bloom filters. Anyone who knows one of their
-  npubs can tell it is reachable. The Circle gate still keeps their relay,
-  Blossom and pairing closed.
+  npubs can tell it is reachable. Their relay and Blossom are not on the
+  mesh at all, and their link service refuses anyone without a link.
 - The local spanning tree **joins the global one**. Its root becomes the
   global smallest `node_addr`, and every time this phone's uplink drops or
   returns, the local segment re-converges.
@@ -172,9 +172,8 @@ dial younger than 30 s counts toward the two links.
 
 ### When it stops
 
-- **Switch off, or mesh-only on**: every public node Myco dialled that is
-  not a Circle member is disconnected (`disconnect` over the control socket).
-  A Circle member who happens to run a public node keeps their link.
+- **Switch off, or mesh-only on**: every public node Myco dialled is
+  disconnected (`disconnect` over the control socket).
 - **Only Myco's own dials** are ever dropped. A peer that also advertises
   publicly but reached the phone another way (a LAN daemon, a radio) is left
   alone, on or off.
@@ -190,7 +189,7 @@ dial younger than 30 s counts toward the two links.
   dropping them would cost a handshake each to come back, and staying
   reachable in a pocket is the point.
 - A public node never replaces a radio path. It is a different peer from any
-  Circle member, so a member reachable over BLE, Aware or the LAN keeps that
+  phone nearby, so a peer reachable over BLE, Aware or the LAN keeps that
   direct link.
 
 ## Diagnostics
@@ -209,24 +208,24 @@ in the peer list like any other direct peer.
 - **NAT-only nodes** (`udp:nat`) need fips's Nostr rendezvous, which Myco
   does not run.
 - **Tor**, the private alternative the roadmap mentions, is not wired.
-- **A route view per Circle member** ("reached via test-de01") is not shown.
+- **A route view per linked peer** ("reached via test-de01") is not shown.
   fips's `show_peers` lists only direct peers.
 
 ## Testing
 
 Host: `cargo test -p myco-core public_node` covers parsing and validation,
 selection deltas, the dial plan (target,
-backoff, background, mesh-only, breaker, switch-off, deselection, Circle
-exemption) and persistence.
+backoff, background, mesh-only, breaker, switch-off, deselection) and
+persistence.
 
-On device (the N10 exit criterion), with two paired phones on different
+On device (the N10 exit criterion), with two phones that share a neighborhood, on different
 networks and no radio path between them (one on Wi-Fi, one on cellular,
 Bluetooth off on both):
 
 1. On both: Settings › Mesh › Internet → on. Within a minute the Dev tab's
    card shows two connected nodes.
-2. The Circle shows the other phone as reachable.
-3. Send a message from a napplet that uses `mesh.publish`; it arrives.
+2. The Neighbors tab shows the other phone under **Here now**.
+3. Post into the shared neighborhood from a napplet; it arrives.
 4. Switch the option off on one phone. Its public links drop from the Dev
    tab, and the other phone goes unreachable.
 5. Turn on mesh-only with the option on: links drop and are not redialled.

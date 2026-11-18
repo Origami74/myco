@@ -14,9 +14,8 @@ packets into TCP connections.
 That used to be the kernel. A `VpnService` took the packets, the kernel's TCP
 terminated them, and ordinary sockets did the rest:
 
-- the relay on `[::]:4870`
-- Blossom on `[::]:24243`
-- pairing on `[::]:4873`
+- the link service on `[::]:4873` (once beside a mesh relay and Blossom,
+  which are no longer served to other phones)
 - dials to `[fd00::peer]:…`
 
 Android has **one** VPN slot. Myco took it for traffic that never leaves the
@@ -48,7 +47,7 @@ and a phone on the old VPN path talk to each other as before.
 Inbound packets from the node pass through `tun_bridge`:
 
 1. **The stack** takes TCP to its own address on a port it claims. That is a
-   port it listens on (`4870`, `4873`, `24243`), or one in its ephemeral range
+   port it listens on (`4873`), or one in its ephemeral range
    (`61001–65535`, used for its own dials). It also takes an ICMPv6
    "destination unreachable" about one of its own dials, which ends that dial
    at once.
@@ -61,22 +60,22 @@ connections, made by other apps through the VPN, never land in it.
 
 ## Servers
 
-Each mesh server listens on the stack, where peers reach it. The stack claims
+The mesh server — the link service, the only one — listens on the stack,
+where peers reach it. The stack claims
 those ports whether the VPN runs or not, so peer traffic never reaches the
 kernel.
 
-Each also keeps its old kernel socket on `[::]`. Peers don't use it; it only
+It also keeps its old kernel socket on `[::]`. Peers don't use it; it only
 serves this phone's other apps dialing its own address. Losing it to another
 app is logged, not shown: peers are unaffected. A port peers can't reach — the
 stack's listener failed, or, with no stack, the kernel socket — is shown as a
-warning. `mesh_net::peer_listeners` binds every server's ports the same way.
+warning. `mesh_net::peer_listeners` binds the ports.
 
-The stack hands axum the peer's `fd00::` address, so the Circle gate reads it
-as before.
+The stack hands axum the peer's `fd00::` address.
 
 ## Clients
 
-- **Peer relay WebSockets** dial the stack directly (`mesh_net::connect_ws`).
+- **Link relay WebSockets** dial the stack directly (`mesh_net::connect_ws`).
 - **Mesh HTTP** (reqwest) can't be given a socket of ours. Mesh clients go
   through a SOCKS5 bridge on `127.0.0.1` that dials the stack. The bridge:
   - needs a per-process secret, compared in constant time, so no other app can

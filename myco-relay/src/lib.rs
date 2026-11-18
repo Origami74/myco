@@ -1,8 +1,8 @@
 //! `myco-relay` — a generic embedded **Nostr relay**: a NIP-01 event store
 //! implementing `nsite-deck`'s [`RelayBackend`] seam. See
-//! `docs/design/nsite/nsite-layer.md` §2.1 and `docs/design/core/event-gossip.md`.
+//! `docs/design/nsite/nsite-layer.md` §2.1.
 //!
-//! This crate holds no Myco concepts — no mesh, no ttl, no circles. The
+//! This crate holds no Myco concepts — no mesh, no ttl, no neighborhoods. The
 //! WebSocket front door that applies those is `myco-core::mesh_relay`, which
 //! keeps this store swappable for any other NIP-01 relay
 //! (`reference/thinning-custom-relay.md`).
@@ -18,8 +18,7 @@
 //!   page-cache hit and an idle store costs nothing. Every write is one small
 //!   ACID transaction — never a rewrite of the whole set, which is what the
 //!   JSON file this replaced did on every event.
-//! - **Expiring** events (a NIP-40 `expiration` tag — chat, pair traffic;
-//!   `docs/design/core/event-gossip.md` §5) are stored like any other and
+//! - **Expiring** events (a NIP-40 `expiration` tag — chat) are stored like any other and
 //!   deleted by [`RelayStore::sweep_expired`] once their time is up; they are
 //!   never served past it. Their ids and expiries are tracked in a small
 //!   append-only log beside the database (`expiring.log`), because LMDB does
@@ -115,7 +114,7 @@ impl RelayStore {
 
     /// [`RelayStore::open`] with an explicit LMDB map size — the production
     /// path with `MAP_SIZE`; tests shrink it to make a save fail.
-    fn open_with_map_size(dir: impl AsRef<Path>, map_size: usize) -> anyhow::Result<Self> {
+    pub fn open_with_map_size(dir: impl AsRef<Path>, map_size: usize) -> anyhow::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         let lmdb_dir = dir.join("lmdb");
         std::fs::create_dir_all(&lmdb_dir)?;
@@ -330,7 +329,7 @@ impl RelayStore {
     ///
     /// This answer describes *this store*, and nothing else should be built on
     /// it. In particular it is not a mesh loop-guard: an id GC'd at NIP-40 expiry
-    /// looks new again on a later pull, so gossip novelty is the proxy's own
+    /// looks new again on a later pull, so mesh novelty is the proxy's own
     /// seen-set instead (`reference/thinning-custom-relay.md`, D2). The
     /// [`RelayBackend`] seam therefore does not expose it — an arbitrary NIP-01
     /// relay could not answer it anyway.

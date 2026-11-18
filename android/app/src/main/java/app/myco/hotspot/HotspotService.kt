@@ -39,13 +39,13 @@ import kotlinx.coroutines.launch
  * WPA2 passphrase) plus the [FileShareServer] a joined guest browses to.
  *
  * A local-only hotspot dies with its reservation, so the reservation must live
- * somewhere that survives the Circle sheet being dismissed and the app being
+ * somewhere that survives the hotspot sheet being dismissed and the app being
  * backgrounded — that is this service. `connectedDevice` is the right FGS type:
  * the whole point is a live link to a nearby device, and the app holds
  * CHANGE_WIFI_STATE, which qualifies it for that type.
  *
  * State is published like the radios do it ([app.myco.ap.ApRadio]): a
- * process-wide [StateFlow] the Circle sheet collects.
+ * process-wide [StateFlow] the hotspot sheet collects.
  */
 class HotspotService : Service() {
 
@@ -80,7 +80,7 @@ class HotspotService : Service() {
         startForegroundCompat()
         starting = true
         publish(HotspotView(phase = HotspotPhase.STARTING))
-        // From this moment NFC belongs to the hotspot: pairing-by-bump is off,
+        // From this moment NFC belongs to the hotspot: presenting invites by bump is off,
         // and once the page address is known a bump serves that instead.
         PairPresent.beginHotspot()
         // A fresh session offers nothing from previous ones: only files the
@@ -379,7 +379,8 @@ class HotspotService : Service() {
         const val ACTION_STOP = "app.myco.hotspot.STOP"
 
         /** First port tried for the file page — high, memorable, and clear of
-         *  the embedded relay (4870), Blossom (24243), and the UDP lane (4871). */
+         *  the loopback relay (4870), the UDP lane (4871) and the link service
+         *  (4873), the one port Myco serves to other phones. */
         private const val BASE_PORT = 8080
         private const val PORT_TRIES = 4
 
@@ -400,7 +401,7 @@ class HotspotService : Service() {
 
         private val _view = MutableStateFlow(HotspotView())
 
-        /** Hotspot + file-page state, for the Circle sheet. */
+        /** Hotspot + file-page state, for the hotspot sheet. */
         val view: StateFlow<HotspotView> = _view.asStateFlow()
 
         private fun publish(v: HotspotView) {
@@ -423,7 +424,7 @@ class HotspotService : Service() {
 
 enum class HotspotPhase { OFF, STARTING, ON, ERROR }
 
-/** What the Circle sheet renders. `url` arrives a beat after `ON` (the softap
+/** What the hotspot sheet renders. `url` arrives a beat after `ON` (the softap
  *  interface has to surface its address first). */
 data class HotspotView(
     val phase: HotspotPhase = HotspotPhase.OFF,

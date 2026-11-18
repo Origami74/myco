@@ -52,39 +52,40 @@ dispatch(actionJson) → stateJson
 | `stop_node` | — | Stop the embedded FIPS node. |
 | `set_ble_enabled` | `enabled`: bool | Master switch for the BLE L2CAP transport. |
 | `set_wifi_aware_enabled` | `enabled`: bool | Master switch for the Wi-Fi Aware bulk lane. |
-| `open_nsite` | `link`: String, `holder`: Option<String> | Resolve a pasted nsite link / `<host>` and drive its sync to readiness (author-signed manifest + its blobs). |
+| `open_nsite` | `link`: String | Resolve a pasted nsite link / `<host>` and drive its sync to readiness (author-signed manifest + its blobs): local store, then neighborhoods getting `nsite-updates`, then the public internet. |
 | `import_nsite` | `dir`: String | DEV-ONLY side-load: import an already-signed manifest + blobs from a bundle directory (`<dir>/manifest.json` + `<dir>/blobs/<sha256>`). |
 | `add_to_library` | `link`: String | Pin a site to the Library (exempt from eviction; eviction itself is P5). |
 | `remove_from_library` | `link`: String | Unpin a site from the Library. |
 | `forget_nsite` | `link`: String | Forget a single nsite: remove it from the Library and the Apps grid. |
-| `fetch_napplet` | `pointer`: String, `holder`: Option<String> | Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it locally — D9's acquisition path, online once and mesh-replicable after. |
+| `fetch_napplet` | `pointer`: String | Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it locally: local store, then neighborhoods getting `napplet-updates`, then the public internet. |
 | `install_napplet` | `pointer`: String, `granted`: Vec<String> | Record what install review granted, and pin the napplet to the Library. The review stays up with `installing` while the bytes download, then turns `added` (or shows `error`); ignored once `added`. |
 | `forget_napplet` | `pointer`: String | Unpin a napplet and drop its grants. |
 | `set_napplet_grant` | `pointer`: String, `domain`: String, `allowed`: bool | Allow or withdraw one capability for an installed napplet, from its sheet. |
-| `set_napplet_mesh_reach` | `publishTtl`: u8, `subscribeTtl`: u8 | Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for. |
 | `dismiss_napplet_review` | — | Close the install-review screen — unanswered, or after an install (`added`). |
 | `check_nsite_updates` | `auto`: bool (default `false`) | Check relays for newer versions of installed nsites and napplets and stage/apply them (`docs/design/nsite/nsite-updates.md` §3.1). `auto: true` is an automatic trigger: skipped if a check started in the last 30 min or is running, and reports no result. Absent or `false` is the user's button: always runs (joins a running check) and bumps `updateCheck.generation`. |
 | `wipe_stores` | — | Clear the local relay + Blossom + Library + site status (dev/test reset). |
 | `wipe_cache` | — | Clear the local relay + Blossom **except** what backs pinned nsites, and empty the shell cache (Settings → Storage → "Clear local database"). |
 | `clear_cache` | — | Empty the shell cache (events and blobs that only passed through). Nothing kept is touched (Settings → Storage → "Clear cache"). |
 | `set_cache_limits` | `eventBytes`: u64, `blobBytes`: u64 | Set the shell cache budgets, clamped to 16 MiB..=64 GiB. Applied at once and persisted. |
-| `add_to_circle` | `npub`: String, `name`: String | Add a paired peer to the **Circle**: the contact list of devices we pull nsites from over the mesh. |
-| `remove_from_circle` | `npub`: String | Forget a peer (remove from the Circle). |
-| `send_pair_request` | `npub`: String, `name`: String, `secret`: String | Scanned a peer's pairing QR: send them a signed pair request over the mesh (to their relay). |
-| `accept_pair_request` | `npub`: String, `name`: String | Accept an incoming pair request: add the requester to the Circle and signal them (a pair-accept) so they add us back. |
-| `decline_pair_request` | `npub`: String | Dismiss an incoming pair request without pairing. |
-| `cancel_pair_invite` | `npub`: String | Withdraw an invite we sent that is still waiting, so it can be sent again. |
-| `set_offline_only` | `enabled`: bool | Toggle "mesh-only": when enabled, never use the public IP relay/Blossom fallback — pull only over the mesh. |
+| `set_offline_only` | `enabled`: bool | Toggle "mesh-only": when enabled, never use the public relays or Blossom servers — fetch only from neighborhoods. |
 | `set_custom_relay` | `url`: String | Point the event store at a **custom relay**, or back at the built-in one with an empty `url`. |
 | `set_custom_blossom` | `url`: String | Point the blob store at a **custom Blossom server**, or back at the built-in one with an empty `url`. |
 | `set_aware_data_paths` | `count`: u8 | Report how many concurrent Wi-Fi Aware data paths this chipset supports (`Characteristics.getNumberOfSupportedDataPaths()`), which is what the Aware UDP socket pool is sized to. |
-| `set_device_name` | `name`: String | Set this device's human label (memorable name). |
-| `speedtest_peer` | `npub`: String | Dev-menu speedtest against a mesh peer: PUT a fresh payload to the peer's Blossom and GET it back, timing each leg. |
-| `share_file` | `path`: String, `name`: String, `mime`: String, `peerNpub`: String | Encrypt a local file and send a private offer to a Circle peer. |
-| `accept_file_transfer` | `transferId`: String | Accept an incoming encrypted file offer. |
-| `decline_file_transfer` | `transferId`: String | Decline an incoming encrypted file offer. |
-| `cancel_file_transfer` | `transferId`: String | Cancel a transfer that is still in flight and tell the other phone, so neither side is left waiting on a message that is no longer coming. |
-| `forget_file_transfer` | `transferId`: String | Forget a finished transfer after the Android side has safely published the received file (or after a terminal sender-side outcome). |
+| `create_neighborhood` | `name`: String, `autoAccept`: bool | Start a neighborhood (random id), or with `autoAccept` join the one derived from that name. |
+| `create_link_invite` | `neighborhoods`: Vec<String>, `from`: Option<String> | Make a one-time link invitation carrying these neighborhood ids (hex); it appears as `neighborhoods.invite`, a `https://napplet.link/neighborhood/join#invite=…` for a QR code, share link or NFC tag. `from` is the inviter's name, shown on the other phone. |
+| `clear_link_invite` | — | Drop the shown invitation (it still expires on its own). |
+| `join_link` | `invite`: String, `accept`: Vec<String>, `name`: Option<String> | Join a link from a scanned invitation, accepting `accept` of its neighborhoods. `name` goes to the inviter only. Spawn-not-block; the outcome lands in `neighborhoods.status`. |
+| `answer_link_neighborhood` | `linkId`: String, `neighborhood`: String, `accept`: bool | Answer a neighborhood a peer asked to add to a link. |
+| `share_on_link` | `linkId`: String, `neighborhood`: String | Offer one of our neighborhoods on an existing link (the peer is asked). |
+| `end_link` | `linkId`: String | End a link, telling the peer when they can be reached. |
+| `drop_from_link` | `linkId`: String, `neighborhood`: String | Stop carrying one neighborhood on one link, telling the peer. |
+| `set_neighborhood_policy` | `neighborhood`: String, `publishHops`: u8, `backlogHops`: u8, `passOn`: bool | A neighborhood's reach (the Posts reach presets). |
+| `set_neighborhood_blob_hops` | `neighborhood`: String, `hops`: u8 | How far a neighborhood pushes uploaded blobs (0: not at all). |
+| `set_neighborhood_extension` | `neighborhood`: String, `extension`: String, `share`: bool, `enabled`: bool | Turn sharing (`share: true`) or getting (`share: false`) an extension's updates (`napplet-updates`, `nsite-updates`, `myco-release`) on or off in a neighborhood. |
+| `rename_neighborhood` | `neighborhood`: String, `name`: String | The user's local name for a neighborhood. |
+| `leave_neighborhood` | `neighborhood`: String | Stop carrying a neighborhood on every link, and forget it. |
+| `set_nearby` | `enabled`: bool | Turn Nearby on or off: the `nearby` neighborhood and the ephemeral links to devices in reach. Off ends those links. Kept in `neighborhoods.json`; shown as `neighborhoods.nearby`. |
+| `nearby_heard` | `secret`: String (8 hex) | A nearby secret heard in another phone's BLE advert; offered as a proof when setting up nearby links. The secret to advertise is `neighborhoods.nearby.secret`. |
 
 `Option<String>` fields are omitted when absent. `link` for an nsite is a
 pasted link or a bare `<host>` label; `pointer` for a napplet is an `naddr…` or
@@ -99,12 +100,11 @@ big fields, by layer:
 | --- | --- | --- |
 | `rev`, `error`, `appVersion`, `multipathCore` | — | bookkeeping; `error` is empty when healthy |
 | `identity` | 4 | `ownNpub`, `ownPubkeyHex`, `nodeAddrHex`, `fipsAddr`, the mesh ULA |
-| `node`, `ble`, `bleAdverts`, `blePeers`, `wifiAware`, `peers` | 4 | node status; per-lane radio status; the merged per-peer diagnostics rows (state, transport, every multi-path link, RTT, attempts) |
-| `circle`, `reachableNpubs`, `pendingPairRequests`, `outboundPairs` | 2 | the Circle; members with a live relay connection right now; incoming requests awaiting an answer; invites waiting |
+| `node`, `ble`, `bleAdverts`, `blePeers`, `wifiAware`, `peers` | 4 | node status; per-lane radio status; the merged per-peer diagnostics rows (state, transport, every multi-path link, RTT, attempts, and `linkName`: the name the peer gave in its neighborhood invitation, when linked). A row's `state` is `connected`, `seen-unidentified` or `unreachable` |
+| `neighborhoods` | 2 | `list` (each neighborhood: id, name, `autoAccept`, how many links carry it, its policy, and the extensions it gets (`get`) and shares (`share`)), `links` (each link: peer name, neighborhoods carried, pending additions), `peers` (linked people with `reachable` and their neighborhoods), the open `invite`, and the last link action's `status` |
 | `sites`, `library`, `updateCheck` | 1 | per-nsite sync state (`syncing` / `ready` / `unreachable` / `incomplete`, files pulled/total, staged update); every installed app with `kind`, `granted`, `pointer` |
-| `nappletReview`, `nappletDomains`, `nappletMeshReach` | 1 | a fetched napplet awaiting install review (loading / installing / added / requires / grants / error / holder; `added` once the download landed — the sheet stays up offering Open until dismissed; `installed` when it is already in the Library, `ready` when its files are on this phone too, and `unreviewed` — what an installed copy's update would add that was never reviewed; Add is offered when not installed or `unreviewed` is non-empty, "Download again" when installed but not `ready`, and neither otherwise); every grantable NAP; the user's mesh caps |
+| `nappletReview`, `nappletDomains` | 1 | a fetched napplet awaiting install review (loading / installing / added / requires / grants / error; `added` once the download landed — the sheet stays up offering Open until dismissed; `installed` when it is already in the Library, `ready` when its files are on this phone too, and `unreviewed` — what an installed copy's update would add that was never reviewed; Add is offered when not installed or `unreviewed` is non-empty, "Download again" when installed but not `ready`, and neither otherwise); every grantable NAP |
 | `cache`, `relayBackend`, `blobBackend`, `pendingRelayUrl`, `pendingBlossomUrl`, `offlineOnly` | 3 | store counts; custom backends and their health |
-| `fileTransfers`, `speedtest` | 2 / dev | native file sharing; the Dev speedtest |
 
 ---
 
@@ -128,6 +128,15 @@ worker thread, never the UI thread.
 external fun accountRevealNsec(handle): String   // "" while logged out
 external fun accountAvatar(handle): ByteArray    // empty while there is none
 ```
+
+### Nearby
+
+```kotlin
+external fun nearbySecret(handle): String        // 8 hex; "" while Nearby is off
+```
+
+Polled by `NearbyBeacon` every 2 s (10 s in the background) for the BLE
+advert, so it builds no state snapshot.
 
 The account's view (`account` in the state: status, npub, name, picture,
 `avatarRev`, …) rides the reducer; these two do not. The secret stays out of

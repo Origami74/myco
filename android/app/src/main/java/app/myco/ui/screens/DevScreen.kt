@@ -17,7 +17,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -38,11 +37,9 @@ import app.myco.ap.ApRadio
 import app.myco.ap.LanFipsNode
 import app.myco.aware.AwareLink
 import app.myco.aware.AwareRadio
-import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
-import app.myco.core.NativeActions
 import app.myco.core.PeerAttempt
 import app.myco.core.PeerDiagnostic
 import app.myco.core.PeerPath
@@ -52,7 +49,6 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
-import app.myco.ui.peerLabel
 import app.myco.ui.PathIcons
 import app.myco.ui.TransportIcon
 import app.myco.ui.peerLanes
@@ -61,8 +57,6 @@ import app.myco.ui.LocalLiveState
 import app.myco.ui.shellPollMs
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
-import app.myco.ui.theme.StatusReachable
-import app.myco.ui.theme.StatusThin
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +69,7 @@ import kotlin.math.pow
  * the BLE radio, connected peers, scan adverts, and cache counts. Read-only.
  */
 @Composable
-fun DevScreen(client: AppCoreClient) {
+fun DevScreen() {
     val context = LocalContext.current
     val awareSupported = AwareRadio.isSupported(context)
     val awareAvailable = AwareRadio.isAvailable(context)
@@ -137,8 +131,6 @@ fun DevScreen(client: AppCoreClient) {
         PeersOverviewCard(devState, firstReadLanded)
 
         RadioSelfCheckCard(devState, awareSupported, awareAvailable, locationOn)
-
-        PendingPairingsCard(devState, firstReadLanded)
 
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -230,10 +222,6 @@ fun DevScreen(client: AppCoreClient) {
             }
         }
 
-        // D-04: the speedtest is content-layer, not peering — it sits below
-        // every peering card rather than second from the top.
-        SpeedtestCard(devState, client)
-
         Spacer(Modifier.height(8.dp))
     }
 }
@@ -290,57 +278,17 @@ private fun RadioSelfCheckCard(
 }
 
 /**
- * Incoming pair requests and outbound invites, so a pairing that is waiting is
- * visible rather than inferred from its absence elsewhere (DIAG-06).
- *
- * Requester names arrive from an untrusted mesh peer, so they go through the
- * same shortening helper as every other peer-supplied string; the npub is the
- * row's identity and the name is decoration beside it, never in its place.
- */
-@Composable
-private fun PendingPairingsCard(state: AppState, firstReadLanded: Boolean) {
-    val incoming = state.pendingPairRequests
-    val outbound = state.outboundPairs
-    DevCard("PENDING PAIRINGS (${incoming.size + outbound.size})") {
-        if (incoming.isEmpty() && outbound.isEmpty()) {
-            // Same rule as the peer list: do not claim there are no pending
-            // requests until this screen has actually read once.
-            EmptyLine(if (firstReadLanded) "none" else "reading…")
-        } else {
-            incoming.forEach { PairingRow("incoming", it.npub, it.name) }
-            outbound.forEach { PairingRow("outbound", it.npub, it.name) }
-        }
-    }
-}
-
-/** One pending-pairing row: direction, then the shortened npub with any name. */
-@Composable
-private fun PairingRow(direction: String, npub: String, name: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-    ) {
-        Text(direction, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-        Text(
-            if (name.isEmpty()) short(npub) else "${short(name)}  ${short(npub)}",
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        )
-    }
-}
-
-/**
- * This device's own identity: the npub peers address it by, and the Circle name
- * they see it as (DIAG-07). Either value being empty renders an em-dash — never
+ * This device's own identity: the npub peers address it by, and the name
+ * neighborhood invitations carry (DIAG-07). Either value being empty renders an em-dash — never
  * a blank card, never a placeholder sentinel.
  */
 @Composable
 private fun IdentityCard(state: AppState) {
     val context = LocalContext.current
-    val circleName = if (state.ownNpub.isEmpty()) "" else DeviceName.current(context, state.ownNpub)
+    val deviceName = if (state.ownNpub.isEmpty()) "" else DeviceName.current(context, state.ownNpub)
     DevCard("IDENTITY") {
         KeyVal("own npub", state.ownNpub.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
-        KeyVal("circle name", circleName.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
+        KeyVal("device name", deviceName.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
     }
 }
 
@@ -382,74 +330,9 @@ private fun KeyValTri(label: String, state: Boolean?, yes: String, no: String) {
 }
 
 /**
- * A peer throughput test: pick a connected, handshaken peer and round-trip a
- * ~1 MiB payload through its mesh Blossom (PUT then GET), showing up/down
- * throughput (kbps under 1 Mbps, Mbps above).
- * Only works against a paired peer (their Blossom gates non-loopback by Circle).
- */
-@Composable
-private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
-    val peers = state.blePeers.filter { it.connected && it.npub.isNotEmpty() }
-    val st = state.speedtest
-    DevCard("SPEEDTEST") {
-        if (peers.isEmpty()) {
-            EmptyLine("no connected peer to test")
-        } else {
-            peers.forEach { peer ->
-                val name = peerLabel(state, peer.npub)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                ) {
-                    Text(name, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.bodyMedium)
-                    // "Retry" once a finished run for this peer failed; "Run" otherwise.
-                    val lastForPeer = st.peerNpub == peer.npub && st.generation > 0L
-                    val label = when {
-                        st.running && st.peerNpub == peer.npub -> "running…"
-                        lastForPeer && st.error.isNotEmpty() -> "Retry"
-                        else -> "Run"
-                    }
-                    TextButton(
-                        enabled = !st.running,
-                        onClick = { client.dispatch(NativeActions.speedtestPeer(peer.npub)) },
-                    ) { Text(label) }
-                }
-            }
-        }
-
-        val resultLine = when {
-            st.running -> "Testing ${peerLabel(state, st.peerNpub)}…"
-            st.generation == 0L -> null
-            st.error.isNotEmpty() -> "✗ ${st.error}"
-            else -> "↑ %s   ↓ %s   (%s, %s)".format(
-                rate(st.upMbps), rate(st.downMbps), peerLabel(state, st.peerNpub), size(st.bytes),
-            )
-        }
-        if (resultLine != null) {
-            Text(
-                resultLine,
-                color = if (st.error.isNotEmpty() && !st.running) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            )
-        }
-    }
-}
-
-/** Format a throughput in Mbps, dropping to kbps under 1 Mbps where most BLE
- *  runs land (0.5 Mbps reads as "500 kbps", not "0.5 Mbps"). */
-private fun rate(mbps: Double): String =
-    if (mbps < 1.0) "%.0f kbps".format(mbps * 1000) else "%.1f Mbps".format(mbps)
-
-/** Payload size as KB or MB (the adaptive speedtest climbs from 256 KB to 16 MB). */
-private fun size(bytes: Long): String =
-    if (bytes >= 1024 * 1024) "%.0f MB".format(bytes / (1024.0 * 1024.0)) else "%d KB".format(bytes / 1024)
-
-/**
  * Every peer the node knows, in one place: state, last-heard and carrying
  * transport — the merged `state.peers` row Rust already built (D-19), never
- * re-joined here against `blePeers` / the radio lists. The full five-state
+ * re-joined here against `blePeers` / the radio lists. The full three-state
  * grouping and expand-in-place detail (D-05/D-11) land in plan 01-04; this is
  * the tracer slice that proves the row end-to-end for a connected peer.
  */
@@ -525,8 +408,6 @@ private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
 private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle: () -> Unit) {
     val dotColor = when (peer.state) {
         "connected" -> StatusConnected
-        "reachable-via-relay" -> StatusReachable
-        "paired-offline" -> StatusThin
         "unreachable" -> StatusAlone
         // "seen-unidentified" and any unrecognized state: neutral, matching
         // the pre-existing "○ seen" convention.

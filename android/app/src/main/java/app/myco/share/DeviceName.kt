@@ -6,25 +6,19 @@ import android.provider.Settings
 import java.security.MessageDigest
 
 /**
- * This device's **memorable name** — what nearby devices see when you pair.
+ * This device's **memorable name** — what a person you invite sees.
  *
- * Three sources, in falling order of "would a person recognise this":
+ * The user's own override if they set one in Settings, otherwise a
+ * colour+name pair derived from the device npub, deterministic so the same
+ * npub always reads the same on every screen that shows it. Nobody is asked
+ * for a name: the generated one gives nothing away.
  *
- *  1. the user's own override, if they typed one;
- *  2. the phone's own name (Settings ▸ About phone ▸ Device name) — the name
- *     they already gave this handset, and the one it announces over Bluetooth
- *     and Cast, so it is the name they expect to see;
- *  3. a colour+name pair derived from the device npub, deterministic so the
- *     same npub always reads the same on every screen that shows it.
+ * The name only rides inside invitations (as `from`), which the receiver sees
+ * before joining. Nearby links never carry a name. The core doesn't store our
+ * own name.
  *
- * The name only ever rides inside `myco://pair` payloads and outgoing pair
- * requests (the receiver shows it before accepting), so a client-side override
- * is the whole story; the core doesn't store our own name.
- *
- * The phone name defaulting ahead of the generated one is a deliberate trade:
- * it is far more recognisable across a table, but it often carries a real name
- * ("Arjen's S21"), so [suggestions] always offers the pseudonymous generated
- * name as a one-tap alternative rather than burying it behind typing.
+ * The phone's own name is offered in Settings as a one-tap alternative
+ * ([suggestions]), never used by default: it often carries a real name.
  */
 object DeviceName {
     private const val PREFS = "myco_prefs"
@@ -37,7 +31,7 @@ object DeviceName {
     //
     // 32 × 64 = 2048 combinations. The old 12 × 12 = 144 was the whole reason
     // duplicates turned up: by the birthday bound a room of 14 devices was
-    // already even money for a collision, and a Circle of 20 was near-certain.
+    // already even money for a collision, and a neighborhood of 20 was near-certain.
     // At 2048 the same bet needs ~53 devices.
     private val COLORS = listOf(
         "green", "blue", "amber", "violet", "teal", "coral",
@@ -104,10 +98,10 @@ object DeviceName {
         return candidates.firstNotNullOfOrNull { it?.trim()?.take(MAX_LENGTH)?.ifBlank { null } }
     }
 
-    /** The user's override if set, otherwise the phone's own name, otherwise generated. */
+    /** The user's override if set, otherwise the generated name. */
     fun current(context: Context, ownNpub: String): String {
         val override = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "") ?: ""
-        return override.ifBlank { phoneName(context) ?: generated(ownNpub) }
+        return override.ifBlank { generated(ownNpub) }
     }
 
     /**

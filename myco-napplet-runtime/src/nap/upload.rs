@@ -14,14 +14,14 @@
 //!
 //! - **`blossom`** (the default): the user's servers. `complete` only when one
 //!   confirmed the file, with an `https` URL anyone can open. The file is also
-//!   kept in this device's own Blossom store, which nothing evicts and Circle
+//!   kept in this device's own Blossom store, which nothing evicts and app
 //!   peers read over the mesh — after a failure too, when no server could take
 //!   it, so a retry or a peer still finds it. The napplet is not told: it can't
 //!   share that copy publicly.
 //! - **`blossom-local`**: this device's store only, asked for on purpose. No
 //!   signature, no internet, works with offline-only on; `complete` with a
-//!   `blossom:sha256:<hex>` URL, which NAP-RESOURCE resolves here and from
-//!   Circle peers. A rail of the shell's own, as the spec allows.
+//!   `blossom:sha256:<hex>` URL, which NAP-RESOURCE resolves here. A rail of
+//!   the shell's own, as the spec allows.
 //!
 //! Keeping without a signature is free for the napplet, so each may keep only
 //! [`LOCAL_BUDGET_BYTES`] that way a day ([`LocalUploads`]). An upload the user
@@ -71,6 +71,12 @@ pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const RAIL_BLOSSOM: &str = "blossom";
 /// This device's own Blossom store, for a file meant to stay on the mesh.
 pub const RAIL_BLOSSOM_LOCAL: &str = "blossom-local";
+
+/// A neighborhood: `request.destination` names a `neighborhood:` address
+/// (NAP-NEIGHBOR), and the file is kept in that neighborhood's scope. A rail
+/// of the shell's own, as the spec allows; the destination field is what
+/// napplet/naps#33 is asked to add.
+pub const RAIL_BLOSSOM_NEIGHBORHOOD: &str = "blossom-neighborhood";
 
 /// How many bytes one napplet may keep on this device, per
 /// [`LOCAL_WINDOW`], without a server having taken them: `blossom-local`
@@ -144,24 +150,21 @@ pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> 
 /// there, with `blossom:` ones. Every type is accepted, so no `mimeTypes`.
 async fn info(ctx: &NapContext, message: &Envelope) -> Envelope {
     let enabled = ctx.uploads.available().await;
-    message.to_result().with_field(
-        "info",
-        json!({
-            "rails": [
-                {
-                    "rail": RAIL_BLOSSOM,
-                    "enabled": enabled,
-                    "returns": ["https"],
-                },
-                {
-                    "rail": RAIL_BLOSSOM_LOCAL,
-                    "enabled": true,
-                    "returns": ["blossom"],
-                },
-            ],
-            "maxBytes": MAX_BYTES,
-        }),
-    )
+    let mut rails = vec![
+        json!({ "rail": RAIL_BLOSSOM, "enabled": enabled, "returns": ["https"] }),
+        json!({ "rail": RAIL_BLOSSOM_LOCAL, "enabled": true, "returns": ["blossom"] }),
+    ];
+    // Listed only where there are neighborhoods to keep a file in.
+    if !ctx.neighbor.info().await.features.is_empty() {
+        rails.push(json!({
+            "rail": RAIL_BLOSSOM_NEIGHBORHOOD,
+            "enabled": true,
+            "returns": ["blossom"],
+        }));
+    }
+    message
+        .to_result()
+        .with_field("info", json!({ "rails": rails, "maxBytes": MAX_BYTES }))
 }
 
 /// A request read off the wire, before anything leaves the device.
@@ -171,6 +174,8 @@ struct Parsed {
     caption: Option<String>,
     /// `blossom-local`: this device's store, not the servers.
     local: bool,
+    /// `blossom-neighborhood`: the `neighborhood:` address to keep it in.
+    destination: Option<String>,
 }
 
 /// Read and check an `upload.upload` request. `Err` is the spec's error
@@ -179,11 +184,25 @@ fn parse(message: &Envelope) -> Result<Parsed, &'static str> {
     let Some(request) = message.field("request").and_then(Value::as_object) else {
         return Err(INVALID_REQUEST);
     };
+    let destination = match request.get("destination") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(d)) if crate::nap::neighbor::address::is_address(d) => Some(d.clone()),
+        // A server is the shell's to pick; only a neighborhood may be named.
+        Some(_) => return Err(INVALID_REQUEST),
+    };
     let local = match request.get("rail") {
-        // Omitted: the shell picks, and that is the user's servers.
+        // Omitted: the shell picks — the destination's rail when one is
+        // named, otherwise the user's servers.
         None | Some(Value::Null) => false,
-        Some(Value::String(rail)) if rail == RAIL_BLOSSOM => false,
-        Some(Value::String(rail)) if rail == RAIL_BLOSSOM_LOCAL => true,
+        Some(Value::String(rail)) if rail == RAIL_BLOSSOM && destination.is_none() => false,
+        Some(Value::String(rail)) if rail == RAIL_BLOSSOM_LOCAL && destination.is_none() => true,
+        Some(Value::String(rail)) if rail == RAIL_BLOSSOM_NEIGHBORHOOD && destination.is_some() => {
+            false
+        }
+        Some(Value::String(rail)) if rail == RAIL_BLOSSOM_NEIGHBORHOOD => {
+            return Err(INVALID_REQUEST)
+        }
+        Some(Value::String(_)) if destination.is_some() => return Err(INVALID_REQUEST),
         Some(_) => return Err(UNSUPPORTED_RAIL),
     };
     let bytes = match request.get("dataBase64") {
@@ -213,6 +232,7 @@ fn parse(message: &Envelope) -> Result<Parsed, &'static str> {
         },
         caption: short_text(request.get("caption"), 1000),
         local,
+        destination,
     })
 }
 
@@ -266,6 +286,7 @@ async fn upload(ctx: &NapContext, session: &Session, message: &Envelope) -> Enve
         blob,
         caption,
         local,
+        destination,
     } = match parse(message) {
         Ok(parsed) => parsed,
         Err(e) => return message.to_error(e),
@@ -280,7 +301,22 @@ async fn upload(ctx: &NapContext, session: &Session, message: &Envelope) -> Enve
         "napplet upload"
     );
     let dimensions = dimensions(&blob.bytes);
-    let result = if local {
+    let result = if let Some(addr) = destination {
+        match keep_in_neighborhood(ctx, session, &addr, &blob).await {
+            Ok(()) => {
+                let mut r = kept_result(&upload_id, &blob, dimensions, caption.as_deref());
+                r["rail"] = json!(RAIL_BLOSSOM_NEIGHBORHOOD);
+                r
+            }
+            Err(code) => {
+                tracing::info!(
+                    error = code.as_str(),
+                    "napplet upload not kept in the neighborhood"
+                );
+                failed(&upload_id, RAIL_BLOSSOM_NEIGHBORHOOD, "failed", code)
+            }
+        }
+    } else if local {
         match keep_local(ctx, session.identity(), &blob).await {
             Ok(()) => kept_result(&upload_id, &blob, dimensions, caption.as_deref()),
             Err(code) => {
@@ -414,6 +450,39 @@ async fn keep_local(
         return Err(UploadErrorCode::UploadFailed);
     }
     Ok(())
+}
+
+/// Keep a file in a neighborhood: the `neighbor` grant, the same daily
+/// budget as keeping it here, then the host. The host decides how far it
+/// travels (none by default: blobs are heavy).
+async fn keep_in_neighborhood(
+    ctx: &NapContext,
+    session: &Session,
+    addr: &str,
+    blob: &UploadBlob,
+) -> Result<(), UploadErrorCode> {
+    if !session.is_granted("neighbor") {
+        return Err(UploadErrorCode::PolicyDenied);
+    }
+    let napplet = session.identity();
+    let size = blob.bytes.len() as u64;
+    if !ctx.local_uploads.charge(napplet, size) {
+        return Err(UploadErrorCode::QuotaExceeded);
+    }
+    match ctx
+        .neighbor
+        .upload(napplet, addr, blob.bytes.clone(), &blob.sha256)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            ctx.local_uploads.refund(napplet, size);
+            Err(match e {
+                crate::nap::neighbor::NeighborError::Denied => UploadErrorCode::PolicyDenied,
+                _ => UploadErrorCode::UploadFailed,
+            })
+        }
+    }
 }
 
 /// `upload.status` — the last result for one of this session's uploads.
@@ -620,7 +689,7 @@ mod tests {
     /// No server took it — offline-only, no internet, no server, every one
     /// refusing: `failed` with the spec's error string and no URL, since the
     /// napplet can't share a copy here publicly. That copy is kept anyway,
-    /// for a retry or a Circle peer.
+    /// for a retry.
     #[tokio::test]
     async fn an_upload_no_server_took_fails_but_is_kept_here() {
         let mut s = session(&["upload"]);

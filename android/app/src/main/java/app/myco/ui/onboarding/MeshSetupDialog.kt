@@ -20,34 +20,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.GppMaybe
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
 import app.myco.ui.theme.TvAutoFocus
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -55,13 +42,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -73,7 +55,6 @@ import app.myco.onboarding.MeshSetup
 import app.myco.onboarding.Segment
 import app.myco.onboarding.SegmentState
 import app.myco.onboarding.SetupPlan
-import app.myco.share.DeviceName
 import app.myco.onboarding.SetupStep
 import app.myco.onboarding.SystemAsk
 
@@ -93,7 +74,7 @@ enum class SetupAction {
 
 /**
  * The setup popup: a card over the dimmed app with a segmented progress bar
- * (Install Myco · Nearby devices · Connection · Name, as [plan] has them).
+ * (Install Myco · Nearby devices · Connection, as [plan] has them).
  *
  * Stateless — the Activity owns [step], because Android's permission and VPN
  * results land there, and it has to survive the Activity being recreated
@@ -103,10 +84,8 @@ enum class SetupAction {
  * @param outcome how the mesh steps behind the current one went.
  * @param nearbyBlocked Android refused the nearby permissions without asking,
  *   so "Try again" becomes "Open app settings".
- * @param name what the Name step's field starts with.
  * @param onAsk a tap that asks Android: an explain card's button ("Allow nearby
  *   devices", "Allow VPN"), or "Try again".
- * @param onSaveName the field's trimmed content, on "Use this name".
  */
 @Composable
 fun MeshSetupDialog(
@@ -114,10 +93,8 @@ fun MeshSetupDialog(
     plan: SetupPlan,
     outcome: MeshOutcome,
     nearbyBlocked: Boolean,
-    name: String,
     onAction: (SetupAction) -> Unit,
     onAsk: (Confirmed) -> Unit,
-    onSaveName: (String) -> Unit,
 ) {
     Dialog(
         onDismissRequest = {},
@@ -129,8 +106,7 @@ fun MeshSetupDialog(
     ) {
         // The platform's dialog dim is lighter than the design's; the card
         // should read as the only thing on screen.
-        // Resize, not pan, for the keyboard: the Name step's field and its
-        // button stay on screen, the card scrolling if it has to.
+        // Resize, not pan, for the keyboard: the card scrolls if it has to.
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
         SideEffect {
             window?.setDimAmount(0.72f)
@@ -147,7 +123,7 @@ fun MeshSetupDialog(
                 .fillMaxWidth(),
         ) {
             SetupCard(step, plan, MeshSetup.segments(step, plan, outcome)) {
-                StepContent(step, plan, nearbyBlocked, name, onAction, onAsk, onSaveName)
+                StepContent(step, plan, nearbyBlocked, onAction, onAsk)
             }
             TvAutoFocus(step)
             footnote(step, nearbyBlocked)?.let {
@@ -176,10 +152,8 @@ private fun StepContent(
     step: SetupStep,
     plan: SetupPlan,
     nearbyBlocked: Boolean,
-    name: String,
     onAction: (SetupAction) -> Unit,
     onAsk: (Confirmed) -> Unit,
-    onSaveName: (String) -> Unit,
 ) {
     when (step) {
         // Said before Android asks, so its nearby prompt never comes
@@ -271,77 +245,7 @@ private fun StepContent(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             )
         }
-        SetupStep.Name -> {
-            IconBadge(warn = false) {
-                Icon(
-                    Icons.Outlined.Badge,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(34.dp),
-                )
-            }
-            Title("What should people call you?")
-            Body("Phones you pair with see this name.")
-            Spacer(Modifier.height(16.dp))
-            NameField(name, onSaveName)
-        }
     }
-}
-
-/**
- * The name, editable right on the card: a tap puts the cursor in it with the
- * keyboard up. Starts with [initial] (the phone's own name, or the one set
- * before), cursor at the end. "Use this name" — or the keyboard's Done —
- * saves the trimmed text; both do nothing while it is empty. The clear (X)
- * button empties it and keeps the cursor and keyboard there, ready to type.
- */
-@Composable
-private fun NameField(initial: String, onSave: (String) -> Unit) {
-    var field by rememberSaveable(initial, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
-    }
-    val trimmed = field.text.trim()
-    val focus = remember { FocusRequester() }
-    val keyboard = LocalSoftwareKeyboardController.current
-    OutlinedTextField(
-        value = field,
-        onValueChange = { v ->
-            field = if (v.text.length > DeviceName.MAX_LENGTH) {
-                val text = v.text.take(DeviceName.MAX_LENGTH)
-                v.copy(text = text, selection = TextRange(minOf(v.selection.end, text.length)))
-            } else {
-                v
-            }
-        },
-        singleLine = true,
-        trailingIcon = if (field.text.isNotEmpty()) {
-            {
-                IconButton(onClick = {
-                    field = TextFieldValue("")
-                    focus.requestFocus()
-                    keyboard?.show()
-                }) {
-                    Icon(Icons.Filled.Clear, contentDescription = "Clear name")
-                }
-            }
-        } else {
-            null
-        },
-        shape = RoundedCornerShape(12.dp),
-        textStyle = MaterialTheme.typography.bodyLarge.copy(
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 17.sp,
-            textAlign = TextAlign.Center,
-        ),
-        keyboardOptions = KeyboardOptions(
-            capitalization = KeyboardCapitalization.Words,
-            imeAction = ImeAction.Done,
-        ),
-        keyboardActions = KeyboardActions(onDone = { if (trimmed.isNotEmpty()) onSave(trimmed) }),
-        modifier = Modifier.fillMaxWidth().focusRequester(focus),
-    )
-    Spacer(Modifier.height(24.dp))
-    PrimaryButton("Use this name", enabled = trimmed.isNotEmpty()) { onSave(trimmed) }
 }
 
 // ----------------------------------------------------------------------------
@@ -352,7 +256,6 @@ private fun label(segment: Segment): String = when (segment) {
     Segment.Install -> "Install Myco"
     Segment.Nearby -> "Nearby devices"
     Segment.Connection -> "Connection"
-    Segment.Name -> "Name"
 }
 
 @Composable

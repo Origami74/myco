@@ -46,39 +46,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The Apps tab's Share Myco bubble: a labelled pill rather than a bare icon,
- * so "you can give this app to someone" reads without a tap.
- */
-@Composable
-fun ShareMycoBubble(onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.primary,
-        shadowElevation = 6.dp,
-        modifier = modifier.clickable(onClick = onClick),
-    ) {
-        Row(
-            modifier = Modifier.padding(start = 16.dp, end = 20.dp, top = 14.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                Icons.Filled.Share,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(22.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                "Share Myco",
-                color = MaterialTheme.colorScheme.onPrimary,
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.labelLarge,
-            )
-        }
-    }
-}
-
-/**
  * Give Myco itself to a phone that doesn't have it: over this phone's
  * hotspot (no internet; the guest downloads it from the hotspot page), or as
  * a file through the system share menu.

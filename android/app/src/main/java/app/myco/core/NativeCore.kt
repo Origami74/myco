@@ -15,7 +15,7 @@ internal object NativeCore {
     external fun initializeAndroidContext(context: Context)
     external fun fetchSoftwareRelease(handle: Long, online: Boolean): String
 
-    /** Hold the newest signed release APK for the Circle; JSON of the release,
+    /** Hold the newest signed release APK to share through neighborhoods; JSON of the release,
      *  or throws [java.io.IOException] with why it isn't held. Blocking. */
     @Throws(java.io.IOException::class)
     external fun prepareSoftwareRelease(handle: Long, internet: Boolean, installedApk: String, abi: String): String
@@ -46,6 +46,9 @@ internal object NativeCore {
 
     /** The logged-in `nsec1…`; empty while logged out. Show only after the warning. */
     external fun accountRevealNsec(handle: Long): String
+
+    /** The nearby secret to advertise (8 hex); empty while Nearby is off. */
+    external fun nearbySecret(handle: Long): String
 
     /** The account's avatar bytes; empty while there is none. */
     external fun accountAvatar(handle: Long): ByteArray

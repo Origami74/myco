@@ -1,7 +1,11 @@
 package app.myco.ui.screens
 
 import android.graphics.Bitmap
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
 import android.content.Intent
+import android.os.PersistableBundle
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -42,7 +46,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,7 +55,7 @@ import androidx.compose.ui.unit.dp
 
 /**
  * Shared building blocks for the modal bottom-sheet menus (app long-press,
- * circle-person long-press) and the QR surfaces (pair / share).
+ * neighbor long-press) and the QR surfaces (invite / share).
  */
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -168,9 +171,15 @@ internal fun SheetAction(
  * around it.
  */
 @Composable
-internal fun ShareLinkRow(uri: String, title: String) {
+internal fun ShareLinkRow(
+    uri: String,
+    title: String,
+    /** Hide the copy from the clipboard preview (API 33+): it carries a secret. */
+    sensitive: Boolean = false,
+    /** Called when the link is copied or handed to the share sheet. */
+    onShared: () -> Unit = {},
+) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -190,7 +199,14 @@ internal fun ShareLinkRow(uri: String, title: String) {
                 modifier = Modifier.weight(1f),
             )
             IconButton(onClick = {
-                clipboard.setText(AnnotatedString(uri))
+                val clip = ClipData.newPlainText(title, uri)
+                if (sensitive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    clip.description.extras = PersistableBundle().apply {
+                        putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                    }
+                }
+                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
+                onShared()
                 // Android 13+ confirms a copy itself; a toast on top doubles it.
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                     Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
@@ -204,6 +220,7 @@ internal fun ShareLinkRow(uri: String, title: String) {
                     .putExtra(Intent.EXTRA_TEXT, uri)
                     .putExtra(Intent.EXTRA_SUBJECT, title)
                 context.startActivity(Intent.createChooser(send, "Share $title"))
+                onShared()
             }) {
                 Icon(Icons.Filled.Share, contentDescription = "Share link", tint = MaterialTheme.colorScheme.primary)
             }

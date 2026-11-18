@@ -37,20 +37,16 @@ import androidx.compose.ui.unit.dp
 import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.core.AppState
-import app.myco.core.CircleContact
 import app.myco.core.PeerDiagnostic
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
-import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
 import kotlinx.coroutines.delay
 
 /**
  * The panel behind the peers pill: what the mesh is actually doing, right now.
  *
- * Two questions, in the order they get asked. **Circle** answers "can I reach
- * my people" — the reason the mesh exists. **Mesh** answers "why not" — one
- * block per radio lane, each saying whether that lane is looking for anyone and
+ * One block per radio lane, each saying whether that lane is looking for anyone and
  * which peers it is currently carrying.
  *
  * Every number here is observed, never inferred: a lane whose scan state the
@@ -99,100 +95,11 @@ fun MeshStatusSheet(meshEnabled: Boolean, onDismiss: () -> Unit) {
                 )
             }
 
-            CircleSection(state, nowMs)
-            Spacer(Modifier.height(10.dp))
             MeshSection(state, meshEnabled, awareSupported, apWifi.browsing, apWifi.connected, nowMs)
         }
     }
 }
 
-// ----- Circle -----
-
-/**
- * Who you're paired with, online first.
- *
- * Ordering is reachable-then-name, never last-heard: a Circle of five phones in
- * one room re-ranks on every poll if the order carries any live measurement,
- * and a list that reshuffles under your thumb is unreadable. Two buckets and an
- * alphabetical sort inside each is stable for as long as reachability is.
- *
- * Nothing spells out "reachable" or "offline" — the dot's colour is the whole
- * status, and repeating it in words on every row was noise. Offline members
- * collapse behind one line, because the answer they give ("still paired, not
- * here") is the same for all of them and does not need five rows.
- */
-@Composable
-private fun CircleSection(state: AppState, nowMs: Long) {
-    val (online, offline) = state.circle
-        .sortedBy { it.name.ifEmpty { it.npub }.lowercase() }
-        .partition { it.npub in state.reachableNpubs }
-    GroupLabel("CIRCLE — ${online.size}/${state.circle.size} REACHABLE")
-    if (state.circle.isEmpty()) {
-        Hint("Nobody paired yet. Pair a device from the Circle tab.")
-        return
-    }
-    // Survives the 1Hz tick — this is a list you open and then read.
-    var showOffline by rememberSaveable { mutableStateOf(false) }
-    SectionCard {
-        online.forEachIndexed { i, member ->
-            if (i > 0) Divider()
-            CircleLine(state, member, StatusReachable, nowMs)
-        }
-        if (offline.isEmpty()) {
-            if (online.isEmpty()) EmptyRow("nobody reachable right now")
-            return@SectionCard
-        }
-        if (online.isNotEmpty()) Divider()
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { showOffline = !showOffline }
-                .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                StatusDot(StatusAlone, size = 8)
-                Text(
-                    "${offline.size} offline",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                if (showOffline) "\u2303" else "\u2304",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-        if (showOffline) {
-            offline.forEach { member ->
-                Divider()
-                CircleLine(state, member, StatusAlone, nowMs)
-            }
-        }
-    }
-}
-
-/**
- * One Circle member. Reachability is the Circle's own fact (a live mesh relay
- * at any hop count); the peer row, when there is one, supplies the link
- * numbers. A member reachable over several hops has no direct peer row at all,
- * and that is not a fault — the row simply carries no numbers.
- */
-@Composable
-private fun CircleLine(state: AppState, member: CircleContact, dot: Color, nowMs: Long) {
-    val peer = state.peers.firstOrNull { it.npub == member.npub && it.npub.isNotEmpty() }
-    PeerLine(
-        name = sheetLabel(state, member.npub),
-        dot = dot,
-        peer = peer,
-        nowMs = nowMs,
-    )
-}
 
 @Composable
 private fun EmptyRow(text: String) {
@@ -373,7 +280,7 @@ private fun LaneBlock(
 /**
  * A peer as this panel states it: who, then the three link numbers. With
  * `showPaths`, every lane fips holds a path on sits between them, the active
- * one lit and standbys faded — for the Circle list, where a peer has one row.
+ * one lit and standbys faded — for a list where a peer has one row.
  *
  * The dot is the status — there is no status word. Green/teal/red across a
  * short list reads faster than the same three labels repeated down it.
@@ -381,7 +288,7 @@ private fun LaneBlock(
  * `standby` fades the whole row: inside a lane block it means "this lane has
  * a path to the peer but is not the one carrying it right now".
  *
- * `peer` being null (a Circle member reachable over relay with no direct row)
+ * `peer` being null (a peer reachable over relay with no direct row)
  * collapses to the identity line alone — the numbers are link facts and there
  * is no link to state them about.
  */
@@ -471,7 +378,7 @@ private fun shortLabel(s: String): String =
  * The name a peer told us, else its npub — which [shortLabel] trims to
  * `npub1abcde…wxyz`. This panel is about links, and a link to a device that
  * never told us its name is better stated by its key than by the two-word
- * placeholder [peerLabel] uses on the Circle tab: the placeholder looks like
+ * placeholder [peerLabel] uses elsewhere: the placeholder looks like
  * something the owner chose, and here that reads as a claim.
  */
 private fun sheetLabel(state: AppState, npub: String): String =

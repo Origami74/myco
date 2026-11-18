@@ -12,15 +12,14 @@
 //!
 //! Every `blossom:` ask goes to this device's Blossom store before anywhere
 //! else. A miss goes through the [`BlobFetcher`](crate::seams::BlobFetcher) —
-//! the Circle's stores over the mesh, the public servers when reachable — and
-//! what comes back is **stored** before it is handed over. The second ask,
-//! from this or any napplet, is local; and a picture one phone fetched is a
-//! picture the whole room can now get over the mesh.
-//!
-//! That last sentence is also a privacy question, and an open one: the ask
-//! tells every Circle member what you are looking at, and the keep makes you
-//! a host of it. See `docs/design/napplet/napplet-runtime.md` §7.11 before
-//! changing the fetch order or the keep rule.
+//! the public servers when reachable — and what comes back is **stored**
+//! before it is handed over. The second ask, from this or any napplet, is
+//! local. Other phones are not asked: a neighborhood's blobs are reached
+//! through its `neighborhood://` address, and stay in that neighborhood —
+//! never put in this store, where a plain `blossom:` ask from any napplet
+//! would find them. See
+//! `docs/design/napplet/napplet-runtime.md` §7.11 before changing the fetch
+//! order or the keep rule.
 //!
 //! ## `https:` — the internet, under policy
 //!
@@ -108,6 +107,7 @@ pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> 
         "bytes" => vec![bytes(ctx, session, message).await],
         "bytesMany" => vec![bytes_many(ctx, session, message).await],
         "keep" => vec![keep(ctx, session, message).await],
+        "check" => vec![check(ctx, session, message).await],
         // A fetch here is bounded and has no partial state to abandon; the
         // shim drops a late result for a cancelled id on its own.
         "cancel" => Vec::new(),
@@ -132,6 +132,7 @@ fn info(message: &Envelope) -> Envelope {
             ],
             "maxBytes": MAX_BYTES,
             "maxUrls": MAX_URLS,
+            "check": true,
             "maxTotalBytes": MAX_TOTAL_BYTES,
         }),
     )
@@ -142,7 +143,7 @@ async fn bytes(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
     let Some(url) = message.field("url").and_then(|v| v.as_str()) else {
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
-    match fetch(ctx, session.identity(), url).await {
+    match fetch(ctx, session, url).await {
         Ok(Fetched { mime, sha, .. }) => {
             record(session, &sha);
             message
@@ -196,7 +197,7 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
             }));
             continue;
         }
-        let item = match fetch(ctx, session.identity(), &url).await {
+        let item = match fetch(ctx, session, &url).await {
             Ok(Fetched { mime, len, sha }) => {
                 record(session, &sha);
                 total += len;
@@ -216,6 +217,123 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
     message.to_result().with_field("items", items)
 }
 
+/// `resource.check` — whether each URL's bytes could be delivered now,
+/// without delivering them (local extension; not in NAP-RESOURCE yet).
+///
+/// Same scheme dispatch and policy as `bytes`, so it never reveals what
+/// `bytes` would refuse. Nothing is transferred, stored, or marked kept.
+/// `available` is `"yes"`, `"no"` or `"unknown"`, a report at this moment.
+async fn check(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
+    let urls: Vec<String> = match message.field("urls").and_then(|v| v.as_array()) {
+        Some(items) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(url) => out.push(url.to_string()),
+                    None => {
+                        return error_for(message, "invalid-request", Some("urls must be strings"))
+                    }
+                }
+            }
+            out
+        }
+        _ => return error_for(message, "invalid-request", Some("check needs urls")),
+    };
+    if urls.len() > MAX_URLS {
+        return error_for(
+            message,
+            "too-large",
+            Some(&format!("at most {MAX_URLS} urls per request")),
+        );
+    }
+    let mut items = Vec::with_capacity(urls.len());
+    for url in urls {
+        let item = match check_one(ctx, session, &url).await {
+            Ok((available, size)) => {
+                let mut item = serde_json::json!({ "url": url, "available": available });
+                if let Some(size) = size {
+                    item["size"] = serde_json::json!(size);
+                }
+                item
+            }
+            Err(e) => {
+                let mut item =
+                    serde_json::json!({ "url": url, "available": "no", "error": e.code });
+                if let Some(m) = e.message {
+                    item["message"] = serde_json::Value::String(m);
+                }
+                item
+            }
+        };
+        items.push(item);
+    }
+    message.to_result().with_field("items", items)
+}
+
+/// One URL for [`check`]: availability and, when known, size.
+async fn check_one(
+    ctx: &NapContext,
+    session: &Session,
+    url: &str,
+) -> Result<(&'static str, Option<u64>), Failure> {
+    let scheme = scheme_of(url);
+    if scheme.eq_ignore_ascii_case("https") {
+        // Judged as `bytes` would; whether the server has it is not asked.
+        validate_https_url(url).map_err(|r| Failure::new(r.code(), r.reason()))?;
+        return Ok(("unknown", None));
+    }
+    let (sha, _hints) = parse_blossom_url(url)?;
+    if let Some(size) = ctx
+        .blobs
+        .size(&sha)
+        .await
+        .map_err(|e| Failure::new("network-error", format!("local store: {e}")))?
+    {
+        if size > MAX_BYTES as u64 {
+            return Err(Failure::new(
+                "too-large",
+                format!("{size} bytes, cap is {MAX_BYTES}"),
+            ));
+        }
+        // Held here: what `bytes` would sniff and refuse, refused here too.
+        if let Ok(Some(raw)) = ctx.blobs.get(&sha).await {
+            if sniff_mime(&raw) == "image/svg+xml" {
+                return Err(Failure::new(
+                    "blocked-by-policy",
+                    "SVG is not delivered raw by this runtime",
+                ));
+            }
+        }
+        return Ok(("yes", Some(size)));
+    }
+    let addresses = neighborhood_hints(url);
+    if !addresses.is_empty() {
+        let granted = session.is_granted("neighbor");
+        // As `bytes` answers it: without the grant the blob is not found.
+        if !granted {
+            return Err(Failure::new("not-found", "no neighbor grant"));
+        }
+        return Ok(
+            match crate::nap::neighbor::route::has(
+                ctx,
+                session.identity(),
+                granted,
+                &addresses,
+                &sha,
+            )
+            .await
+            {
+                Some(true) => ("yes", None),
+                Some(false) => ("no", None),
+                None => ("unknown", None),
+            },
+        );
+    }
+    // Servers named by hints could be asked with a Blossom HEAD; this
+    // runtime does not yet, and says so.
+    Ok(("unknown", None))
+}
+
 /// One delivered resource, now in the store: the sniffed type, the size, and
 /// the hash it was verified against — which is how the shell fetches it.
 struct Fetched {
@@ -232,8 +350,7 @@ fn record(session: &Session, sha: &str) {
 }
 
 /// `resource.keep` — keep a blob this napplet was delivered in this device's
-/// own Blossom, where nothing evicts it and Circle peers can fetch it
-/// (NAP-LOCAL). Nothing is sent anywhere. Takes `url` (`blossom:sha256:…`) or
+/// own Blossom, where nothing evicts it (NAP-LOCAL). Nothing is sent anywhere. Takes `url` (`blossom:sha256:…`) or
 /// a bare `sha256`.
 async fn keep(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let sha = match (
@@ -311,18 +428,20 @@ impl Failure {
 }
 
 /// Resolve one URL, by its scheme.
-async fn fetch(ctx: &NapContext, napplet: &NappletIdentity, url: &str) -> Result<Fetched, Failure> {
+async fn fetch(ctx: &NapContext, session: &Session, url: &str) -> Result<Fetched, Failure> {
     if scheme_of(url).eq_ignore_ascii_case("https") {
-        fetch_https(ctx, napplet, url).await
+        fetch_https(ctx, session.identity(), url).await
     } else {
-        fetch_blossom(ctx, url).await
+        fetch_blossom(ctx, session, url).await
     }
 }
 
 /// Resolve one `blossom:` URL: parse, local store, fetcher, verify, store,
 /// classify.
-async fn fetch_blossom(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
+async fn fetch_blossom(ctx: &NapContext, session: &Session, url: &str) -> Result<Fetched, Failure> {
     let (sha, hints) = parse_blossom_url(url)?;
+    // `xs` naming a `neighborhood:` address: the host's, never a server.
+    let addresses = neighborhood_hints(url);
 
     // Size before read: the local store may hold an nsite asset far over the
     // cap (Blossom accepts uploads to 64 MiB), and a `bytesMany` naming it a
@@ -348,6 +467,36 @@ async fn fetch_blossom(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> 
         .map_err(|e| Failure::new("network-error", format!("local store: {e}")))?;
     let raw = match stored {
         Some(raw) => raw,
+        // An address hint is authoritative: the napplet asked for the blob
+        // from that neighborhood, so its hash is not shown to anyone else.
+        None if !addresses.is_empty() => {
+            let granted = session.is_granted("neighbor");
+            let fetched = crate::nap::neighbor::route::blob(
+                ctx,
+                session.identity(),
+                granted,
+                &addresses,
+                &sha,
+            )
+            .await
+            .ok_or(Failure {
+                code: "not-found",
+                message: None,
+            })?;
+            if fetched.len() > MAX_BYTES {
+                return Err(Failure::new(
+                    "too-large",
+                    format!("{} bytes, cap is {MAX_BYTES}", fetched.len()),
+                ));
+            }
+            // Not put in the device's store: there any napplet could read it
+            // by hash alone. The host keeps it in the neighborhood's scope;
+            // the window host reads it back through the address
+            // ([`neighborhood_bytes`]).
+            ctx.https_memory
+                .remember_neighborhood(session.identity(), &sha, &addresses);
+            fetched
+        }
         None => {
             let fetched = ctx
                 .fetcher
@@ -525,8 +674,8 @@ impl std::fmt::Display for HttpsUrlRefusal {
 ///   `169.254.169.254` metadata address), unique-local, CGNAT;
 /// - a name for this device or the LAN: `localhost`, `.local`, a dotless
 ///   name a LAN's DNS answers, `.internal`, `.lan`, `.home.arpa`;
-/// - a `.fips` mesh name, which reaches a peer by its key and is NAP-MESH's
-///   and `blossom:`'s, not the open web's;
+/// - a `.fips` mesh name, which reaches a peer by its key and is
+///   `blossom:`'s, not the open web's;
 /// - over [`MAX_URL_LEN`] bytes.
 ///
 /// [`validate_relay_url`]: crate::nap::outbox::validate_relay_url
@@ -619,6 +768,55 @@ pub struct HttpsMemory {
 struct MemoryInner {
     recent: HashMap<(NappletIdentity, String), Remembered>,
     started: HashMap<NappletIdentity, VecDeque<Instant>>,
+    /// Blobs a napplet was delivered from a neighborhood, by hash: the
+    /// addresses they came through. They are not in the device's store.
+    neighborhood: HashMap<(NappletIdentity, String), (Vec<String>, Instant)>,
+}
+
+/// The most neighborhood deliveries remembered, across every napplet.
+const MAX_NEIGHBORHOOD_REMEMBERED: usize = 1024;
+
+/// The bytes of a blob `napplet` was delivered from a neighborhood, read
+/// again through the address it came by: how the window host serves it, as
+/// it is in no device-wide store. `None` without the `neighbor` grant, or
+/// when the neighborhood no longer has it.
+pub async fn neighborhood_bytes(
+    ctx: &NapContext,
+    napplet: &NappletIdentity,
+    granted: bool,
+    sha256: &str,
+) -> Option<Vec<u8>> {
+    let sha = sha256.to_ascii_lowercase();
+    let addresses = ctx.https_memory.neighborhood_addresses(napplet, &sha)?;
+    crate::nap::neighbor::route::blob(ctx, napplet, granted, &addresses, &sha).await
+}
+
+impl HttpsMemory {
+    fn remember_neighborhood(&self, napplet: &NappletIdentity, sha: &str, addresses: &[String]) {
+        let mut inner = self.inner.lock().unwrap();
+        let known = &mut inner.neighborhood;
+        if known.len() >= MAX_NEIGHBORHOOD_REMEMBERED {
+            if let Some(oldest) = known
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(key, _)| key.clone())
+            {
+                known.remove(&oldest);
+            }
+        }
+        known.insert(
+            (napplet.clone(), sha.to_string()),
+            (addresses.to_vec(), Instant::now()),
+        );
+    }
+
+    fn neighborhood_addresses(&self, napplet: &NappletIdentity, sha: &str) -> Option<Vec<String>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .neighborhood
+            .get(&(napplet.clone(), sha.to_string()))
+            .map(|(addresses, _)| addresses.clone())
+    }
 }
 
 struct Remembered {
@@ -764,6 +962,26 @@ fn blob_hints(query: &str) -> crate::seams::BlobHints {
     hints
 }
 
+/// The `xs` values in a `blossom:` URL that are `neighborhood:` addresses,
+/// percent-decoded. [`hint_server`] refuses their scheme, so they never reach
+/// the fetcher as servers.
+fn neighborhood_hints(url: &str) -> Vec<String> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for pair in query.split('&') {
+        if let Some(("xs", value)) = pair.split_once('=') {
+            let value = percent_decode(value);
+            if crate::nap::neighbor::address::is_address(&value) && !out.contains(&value) {
+                out.push(value);
+            }
+        }
+    }
+    out.truncate(MAX_HINTS);
+    out
+}
+
 /// A server hint as a base URL, or `None` if it is not one. Only a host
 /// (and port) is kept: a path in a hint would let a napplet steer the fetch
 /// at an arbitrary URL rather than a Blossom server's `/<sha256>`.
@@ -902,6 +1120,12 @@ pub fn sniff_mime(bytes: &[u8]) -> &'static str {
         // the window — a character the cut split, not bad UTF-8.
         Err(e) => e.error_len().is_none() && head.len() - e.valid_up_to() < 4,
     };
+    // An HTML document is HTML, whatever icons it inlines: one that opens
+    // as a document is told apart before the `<svg` search. A standalone
+    // SVG never opens with a doctype or `<html`.
+    if head_is_text && opens_as_html(head) {
+        return "text/html";
+    }
     if head_is_text && bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg")) {
         return "image/svg+xml";
     }
@@ -921,6 +1145,19 @@ pub fn sniff_mime(bytes: &[u8]) -> &'static str {
         return "text/plain";
     }
     "application/octet-stream"
+}
+
+/// Whether `head` opens, after a BOM and whitespace, with `<!doctype html`
+/// or `<html`, in any case.
+fn opens_as_html(head: &[u8]) -> bool {
+    let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    let start = head
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(head.len());
+    let rest = &head[start..];
+    let opens = |p: &[u8]| rest.len() >= p.len() && rest[..p.len()].eq_ignore_ascii_case(p);
+    opens(b"<!doctype html") || opens(b"<html")
 }
 
 /// The domain's error envelope: `<type>.error` with `error` and, when there is
@@ -1189,6 +1426,64 @@ mod tests {
         )
         .await;
         assert_eq!(r["error"], "blocked-by-policy");
+    }
+
+    /// `check` says whether bytes could be delivered, without delivering:
+    /// held here is "yes" with its size, unknown elsewhere is "unknown", and
+    /// what `bytes` would refuse is refused the same way.
+    #[tokio::test]
+    async fn check_reports_without_delivering() {
+        let (ctx, _fetcher) = test_context_with_fetcher();
+        let held = b"<!doctype html><p>hi</p>".to_vec();
+        let sha = ctx.blobs.put(&held).await.unwrap();
+        let svg = ctx
+            .blobs
+            .put(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+            .await
+            .unwrap();
+        let missing = "0".repeat(64);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.check").with_id("c1").with_field(
+                "urls",
+                serde_json::json!([
+                    format!("blossom:{sha}"),
+                    format!("blossom:{missing}"),
+                    format!("blossom:{svg}"),
+                    "ftp://nope",
+                ]),
+            ),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.check.result");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[0]["available"], "yes");
+        assert_eq!(items[0]["size"], held.len());
+        assert_eq!(items[1]["available"], "unknown");
+        assert_eq!(items[2]["error"], "blocked-by-policy");
+        assert!(items[3]["error"].is_string(), "a bad URL is refused");
+    }
+
+    /// An HTML page with inline SVG icons is HTML, and delivered: the
+    /// `<svg` search is for standalone SVGs.
+    #[test]
+    fn an_html_page_with_inline_svg_is_html() {
+        let page = b"<!doctype html>\n<html><body><svg viewBox='0 0 1 1'></svg></body></html>";
+        assert_eq!(sniff_mime(page), "text/html");
+        assert_eq!(
+            sniff_mime(b"\xEF\xBB\xBF  <HTML><svg/></HTML>"),
+            "text/html"
+        );
+        assert_eq!(
+            sniff_mime(b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>"),
+            "image/svg+xml",
+            "a standalone SVG is still refused"
+        );
+        assert_eq!(
+            sniff_mime(b"<p>hi</p><svg/>"),
+            "image/svg+xml",
+            "not a document: refused"
+        );
     }
 
     /// `<svg` past the first kilobyte is still SVG: the sniff runs over the

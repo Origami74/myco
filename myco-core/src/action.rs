@@ -34,14 +34,9 @@ pub enum NativeAppAction {
     /// Resolve a pasted nsite link / `<host>` and drive its sync to readiness
     /// (author-signed manifest + its blobs). Spawns the sync; does NOT launch any
     /// UI (Kotlin opens the fullscreen NsiteActivity on `ready`). Progress is
-    /// observed via `siteStatus` on `Tick`. `holder` is the sharer's device npub
-    /// from a scanned share QR — the mesh peer to pull from first (the public IP
-    /// fallback is tried after); `None` for a plain pasted link.
-    OpenNsite {
-        link: String,
-        #[serde(default)]
-        holder: Option<String>,
-    },
+    /// observed via `siteStatus` on `Tick`. Looked for in the neighborhoods
+    /// that carry nsites to this device, then the public IP fallback.
+    OpenNsite { link: String },
     /// DEV-ONLY side-load: import an already-signed manifest + blobs from a bundle
     /// directory (`<dir>/manifest.json` + `<dir>/blobs/<sha256>`). The app never
     /// authors or signs — it only stores externally-created artifacts.
@@ -53,21 +48,13 @@ pub enum NativeAppAction {
     /// Forget a single nsite: remove it from the Library and the Apps grid.
     ForgetNsite { link: String },
     /// Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it
-    /// locally — D9's acquisition path, online once and mesh-replicable after.
+    /// locally — from the neighborhoods that carry napplets to this device,
+    /// then the internet.
     ///
     /// Deliberately **not** an install: it reports what the napplet `requires`
     /// so the review screen can ask, and grants nothing. An `naddr` arriving
     /// from outside the app routes here, never to a silent install.
-    FetchNapplet {
-        pointer: String,
-        /// The peer who shared it, when it arrived by a tap or a scan.
-        ///
-        /// Their device is tried before the internet, so a napplet handed over
-        /// in a room with no internet still arrives — which is the whole point
-        /// of handing it over that way.
-        #[serde(default)]
-        holder: Option<String>,
-    },
+    FetchNapplet { pointer: String },
     /// Record what install review granted, and pin the napplet to the Library.
     ///
     /// `granted` replaces whatever was stored: the review screen shows the whole
@@ -100,11 +87,6 @@ pub enum NativeAppAction {
         domain: String,
         allowed: bool,
     },
-    /// Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops
-    /// a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for.
-    /// Values above what the mesh honours are stored as the maximum. Takes
-    /// effect on a napplet's next call, not its next launch.
-    SetNappletMeshReach { publish_ttl: u8, subscribe_ttl: u8 },
     /// Close the install-review screen without installing. The fetched bytes
     /// stay cached; no grant is written, so the napplet has nothing.
     DismissNappletReview,
@@ -158,7 +140,7 @@ pub enum NativeAppAction {
         auto: bool,
     },
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
-    /// Content only — the device identity (and the Circle) are untouched.
+    /// Content only — the device identity (and neighborhoods) are untouched.
     WipeStores,
     /// Clear the local relay + Blossom **except** what backs pinned nsites, and
     /// the shell cache with it (Settings → Storage → "Clear local database",
@@ -175,31 +157,6 @@ pub enum NativeAppAction {
     /// budget raised far past the one the cache opened with fully takes effect
     /// at the next launch.
     SetCacheLimits { event_bytes: u64, blob_bytes: u64 },
-
-    // --- circle (paired peers) ---
-    /// Add a paired peer to the **Circle**: the contact list of devices we pull
-    /// nsites from over the mesh. Dispatched when a share QR is scanned. `npub` is
-    /// the peer's device identity; `name` a human label from the QR.
-    AddToCircle { npub: String, name: String },
-    /// Forget a peer (remove from the Circle).
-    RemoveFromCircle { npub: String },
-
-    // --- mutual pairing ---
-    /// Scanned a peer's pairing QR: send them a signed pair request over the mesh
-    /// (to their relay). Pairs nobody yet — only a mutual accept adds both sides.
-    /// `npub`/`name` are the scanned peer's; `secret` is the QR's one-time value.
-    SendPairRequest {
-        npub: String,
-        name: String,
-        secret: String,
-    },
-    /// Accept an incoming pair request: add the requester to the Circle and signal
-    /// them (a pair-accept) so they add us back.
-    AcceptPairRequest { npub: String, name: String },
-    /// Dismiss an incoming pair request without pairing.
-    DeclinePairRequest { npub: String },
-    /// Withdraw an invite we sent that is still waiting, so it can be sent again.
-    CancelPairInvite { npub: String },
 
     /// Toggle "mesh-only": when enabled, never use the public IP relay/Blossom
     /// fallback — pull only over the mesh. Lets you verify the mesh path even
@@ -249,36 +206,82 @@ pub enum NativeAppAction {
     /// the number available at the one moment it is needed.
     SetAwareDataPaths { count: u8 },
 
-    /// Set this device's human label (memorable name). Stamped on outgoing pair
-    /// request/accept events so peers show the name the user chose. The Android
-    /// app owns the value (persisted there) and re-applies it on launch.
-    SetDeviceName { name: String },
-
-    /// Dev-menu speedtest against a mesh peer: PUT a fresh payload to the peer's
-    /// Blossom and GET it back, timing each leg. Spawn-not-block; the result lands
-    /// in `speedtest`. `npub` is the target peer's device identity.
-    SpeedtestPeer { npub: String },
-
-    // --- native paired-peer file transfer ---
-    /// Encrypt a local file and send a private offer to a Circle peer. The
-    /// Android side copies a content URI into its private outbox first, then
-    /// passes that filesystem path here.
-    ShareFile {
-        path: String,
-        name: String,
-        mime: String,
-        peer_npub: String,
+    // --- neighborhoods (NAP-NEIGHBOR) ---
+    /// Start a neighborhood, or with `auto_accept` join the one of that name.
+    CreateNeighborhood { name: String, auto_accept: bool },
+    /// Make a one-time link invitation carrying these neighborhood ids (hex);
+    /// it appears as `neighborhoods.invite`, encoded for a QR code.
+    CreateLinkInvite {
+        neighborhoods: Vec<String>,
+        /// Who is inviting, shown on the other phone.
+        #[serde(default)]
+        from: Option<String>,
     },
-    /// Accept an incoming encrypted file offer.
-    AcceptFileTransfer { transfer_id: String },
-    /// Decline an incoming encrypted file offer.
-    DeclineFileTransfer { transfer_id: String },
-    /// Cancel a transfer that is still in flight and tell the other phone, so
-    /// neither side is left waiting on a message that is no longer coming.
-    CancelFileTransfer { transfer_id: String },
-    /// Forget a finished transfer after the Android side has safely published
-    /// the received file (or after a terminal sender-side outcome).
-    ForgetFileTransfer { transfer_id: String },
+    /// Drop the shown invitation. It is revoked too, unless it left the
+    /// phone ([`NativeAppAction::LinkInviteShared`]); then it expires on its
+    /// own.
+    ClearLinkInvite,
+    /// The shown invitation was copied or shared as a link: it may be
+    /// joined after the sheet closes, so closing it doesn't revoke it.
+    LinkInviteShared,
+    /// Join a link from a scanned invitation, taking `accept` of the
+    /// neighborhoods it offers. Spawn-not-block; the outcome lands in
+    /// `neighborhoods.status`.
+    JoinLink {
+        invite: String,
+        accept: Vec<String>,
+        /// Our name, sent to the inviter only.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Answer a neighborhood a peer wants to add to a link.
+    AnswerLinkNeighborhood {
+        link_id: String,
+        neighborhood: String,
+        accept: bool,
+    },
+    /// Offer one of our neighborhoods on an existing link.
+    ShareOnLink {
+        link_id: String,
+        neighborhood: String,
+    },
+    /// End a link, telling the peer when they can be reached.
+    EndLink { link_id: String },
+    /// Turn Nearby on or off: the `nearby` neighborhood and the ephemeral
+    /// links to devices in reach that carry it. Kept with the neighborhoods.
+    SetNearby { enabled: bool },
+    /// Nearby secrets heard in BLE adverts: one or more 8-hex-char secrets,
+    /// comma-separated (the beacon batches them). Offered, as proofs, when
+    /// setting up nearby links. Our own is ignored, as is anything malformed.
+    NearbyHeard { secret: String },
+    /// How far a neighborhood pushes uploaded blobs (0: not at all).
+    SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
+    /// Turn sharing (`share: true`) or getting (`share: false`) an
+    /// extension's updates (`napplet-updates`, `nsite-updates`,
+    /// `myco-release`) on or off in a neighborhood.
+    SetNeighborhoodExtension {
+        neighborhood: String,
+        extension: String,
+        share: bool,
+        enabled: bool,
+    },
+    /// A neighborhood's reach: publish and backlog hops, and whether others'
+    /// events are passed on.
+    SetNeighborhoodPolicy {
+        neighborhood: String,
+        publish_hops: u8,
+        backlog_hops: u8,
+        pass_on: bool,
+    },
+    /// The user's local name for a neighborhood.
+    RenameNeighborhood { neighborhood: String, name: String },
+    /// Stop carrying a neighborhood on every link, and forget it.
+    LeaveNeighborhood { neighborhood: String },
+    /// Stop carrying one neighborhood on one link, telling the peer.
+    DropFromLink {
+        link_id: String,
+        neighborhood: String,
+    },
 }
 
 #[cfg(test)]

@@ -1,10 +1,10 @@
 //! Node-address prefix → self-advertised display name.
 //!
-//! The name a device chose for itself is otherwise invisible until you have
-//! exchanged pair traffic with it: the fips handshake does not carry one, and
+//! The name a device chose for itself is otherwise invisible until it arrives
+//! in a neighborhood invitation: the fips handshake does not carry one, and
 //! `PeerView.display_name` is an abbreviated npub. This module holds the one
-//! place it *is* observable before pairing — the string a peer puts in its BLE
-//! scan response — keyed by the leading bytes of the peer's own `node_addr`,
+//! place it *is* observable outside a neighborhood — the string an older Myco
+//! still puts in its BLE scan response (this build reads it, never sends one) — keyed by the leading bytes of the peer's own `node_addr`,
 //! which it advertises alongside the name.
 //!
 //! Keyed on the node address rather than the BLE MAC it arrived on, because
@@ -22,7 +22,7 @@
 //!
 //! **This name is unauthenticated.** It arrives in a plaintext broadcast that
 //! anyone in radio range can forge, so it is only ever a fallback *below* every
-//! name learned from signed pair traffic — never an override. Callers must
+//! name learned from a neighborhood invitation or link — never an override. Callers must
 //! preserve that ordering.
 
 use std::collections::HashMap;
