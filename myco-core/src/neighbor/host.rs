@@ -81,6 +81,9 @@ pub struct Neighbors {
     /// The napplets this device holds, exposed to linked neighbors where it
     /// shares `napplet-updates` (see [`super::updates::HeldNapplets`]).
     pub(super) held: std::sync::OnceLock<Arc<super::updates::HeldNapplets>>,
+    /// False when the file could be neither read nor set aside: then it is
+    /// never saved over, and changes last only until the app restarts.
+    writable: bool,
     /// The runtime that deletes a left neighborhood's content. The shell's
     /// Leave arrives on the JNI thread, which is not inside any runtime.
     rt: std::sync::OnceLock<tokio::runtime::Handle>,
@@ -111,15 +114,16 @@ impl Neighbors {
     /// neighborhood an older version kept for its paired devices.
     pub fn open(data_dir: &std::path::Path, seams: Seams) -> Self {
         let file = store::path(data_dir);
-        let mut s = store::load(&file);
+        let (mut s, writable) = store::load_checked(&file);
         let dropped = s.drop_everyone();
-        if dropped | keep_nearby(&mut s) {
+        if (dropped | keep_nearby(&mut s)) && writable {
             if let Err(e) = store::save(&file, &s) {
                 tracing::warn!(error = %e, "could not save neighborhoods");
             }
         }
         Self {
             file,
+            writable,
             store: Mutex::new(s),
             peers: seams.peers,
             asker: seams.asker,
@@ -141,6 +145,10 @@ impl Neighbors {
     fn change<T>(&self, f: impl FnOnce(&mut Store) -> T) -> T {
         let mut s = self.store.lock().unwrap();
         let out = f(&mut s);
+        if !self.writable {
+            tracing::warn!("neighborhoods.json was not set aside; not saving over it");
+            return out;
+        }
         if let Err(e) = store::save(&self.file, &s) {
             tracing::warn!(error = %e, "could not save neighborhoods");
         }

@@ -201,26 +201,45 @@ pub fn path(data_dir: &Path) -> PathBuf {
     data_dir.join(FILE)
 }
 
-/// Read the store; a missing or unreadable file is an empty store. An
-/// unreadable one is logged and set aside rather than overwritten, so a bad
-/// write never silently loses the user's neighborhoods.
+/// Read the store; a missing or unreadable file is an empty store. See
+/// [`load_checked`].
 pub fn load(file: &Path) -> Store {
-    match std::fs::read(file) {
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(store) => store,
-            Err(e) => {
-                tracing::warn!(error = %e, "neighborhoods.json unreadable; keeping it aside");
-                let _ = std::fs::rename(file, file.with_extension("json.bad"));
-                Store::default()
-            }
-        },
-        Err(_) => Store::default(),
-    }
+    load_checked(file).0
 }
 
+/// Read the store, and whether it is safe to save over `file`.
+///
+/// Missing: an empty store, safe. Unparseable or unreadable (a parse error,
+/// or an I/O error such as EIO, EMFILE or EACCES): logged and set aside as
+/// `.json.bad`, so a bad write or a transient failure never silently loses
+/// the user's neighborhoods; an empty store, safe once set aside. If even
+/// setting it aside fails, saving would overwrite it: not safe.
+pub fn load_checked(file: &Path) -> (Store, bool) {
+    let why = match std::fs::read(file) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(store) => return (store, true),
+            Err(e) => e.to_string(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Store::default(), true),
+        Err(e) => e.to_string(),
+    };
+    tracing::warn!(error = %why, "neighborhoods.json unreadable; keeping it aside");
+    let aside = std::fs::rename(file, file.with_extension("json.bad"));
+    if let Err(e) = &aside {
+        tracing::error!(error = %e, "could not set neighborhoods.json aside; not saving over it");
+    }
+    (Store::default(), aside.is_ok())
+}
+
+/// Write the store: temp file, fsync, rename, so a kill or power loss
+/// leaves the old file or the new one, never a torn one.
 pub fn save(file: &Path, store: &Store) -> anyhow::Result<()> {
+    use std::io::Write as _;
     let tmp = file.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(store)?)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&serde_json::to_vec_pretty(store)?)?;
+    f.sync_all()?;
+    drop(f);
     std::fs::rename(&tmp, file)?;
     Ok(())
 }
@@ -233,6 +252,30 @@ mod tests {
         let d = std::env::temp_dir().join(format!("myco-neighbor-store-{}", token()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A file that can't be read (here: a directory in its place, which
+    /// fails the read with an I/O error, not a parse error) is set aside,
+    /// never saved over.
+    #[test]
+    fn an_unreadable_file_is_set_aside_not_overwritten() {
+        let d = dir();
+        let file = path(&d);
+        std::fs::create_dir_all(file.join("x")).unwrap();
+        let (s, safe) = load_checked(&file);
+        assert!(s.neighborhoods.is_empty());
+        assert!(safe);
+        assert!(!file.exists());
+        assert!(file.with_extension("json.bad").join("x").exists());
+
+        let garbage = dir();
+        let file = path(&garbage);
+        std::fs::write(&file, b"{not json").unwrap();
+        assert!(load_checked(&file).1);
+        assert_eq!(
+            std::fs::read(file.with_extension("json.bad")).unwrap(),
+            b"{not json"
+        );
     }
 
     #[test]
