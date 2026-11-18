@@ -21,6 +21,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -106,7 +108,8 @@ fun InviteSheet(
     }
     // The one-time invitation lives only while this sheet does: leaving it
     // any way (dismissed, joined, a tab switch, the activity going away)
-    // clears it. Clearing twice is harmless; the core may be closed already.
+    // clears it, and the core revokes it unless it was copied or shared.
+    // Clearing twice is harmless; the core may be closed already.
     DisposableEffect(Unit) {
         onDispose { runCatching { client.dispatch(NativeActions.clearLinkInvite()) } }
     }
@@ -117,10 +120,11 @@ fun InviteSheet(
             now = System.currentTimeMillis() / 1000
         }
     }
-    // Someone joining is a new connection: say who, and close.
+    // Someone joining is a new connection: say who, and close. A Nearby link
+    // is a phone passing by, not someone who joined.
     val baseline = remember { state.neighborhoods.links.map { it.id }.toSet() }
     LaunchedEffect(state.neighborhoods.links) {
-        val joined = state.neighborhoods.links.firstOrNull { it.id !in baseline }
+        val joined = state.neighborhoods.links.firstOrNull { it.id !in baseline && !it.ephemeral }
         if (joined != null) {
             Toast.makeText(context, "${joined.name} joined", Toast.LENGTH_SHORT).show()
             client.dispatch(NativeActions.clearLinkInvite())
@@ -145,7 +149,12 @@ fun InviteSheet(
     }
     val names = choices.filter { it.id in picked }.joinToString(", ") { it.name }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = dismiss, sheetState = sheetState) {
+    ModalBottomSheet(
+        onDismissRequest = dismiss,
+        sheetState = sheetState,
+        // The code is a live secret: keep it out of screenshots and Recents.
+        properties = ModalBottomSheetProperties(securePolicy = SecureFlagPolicy.SecureOn),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -225,7 +234,12 @@ fun InviteSheet(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             Spacer(Modifier.height(12.dp))
-                            ShareLinkRow(uri = uri, title = "Join $names")
+                            ShareLinkRow(
+                                uri = uri,
+                                title = "Join $names",
+                                sensitive = true,
+                                onShared = { client.dispatch(NativeActions.linkInviteShared()) },
+                            )
                         }
                     }
                 }

@@ -1349,6 +1349,8 @@ class MainActivity : ComponentActivity() {
         text: String,
         source: app.myco.neighbor.InvitePreview.Source = app.myco.neighbor.InvitePreview.Source.Qr,
     ) {
+        // Whatever it was, the scan sheet that may be open has done its job.
+        app.myco.ui.screens.ScanSheetEvents.handled.intValue++
         // A neighborhood invitation: confirm first, then join.
         app.myco.neighbor.InvitePreview.read(text, source)?.let { invite ->
             app.myco.neighbor.IncomingInvite.pending.value = invite
@@ -1408,7 +1410,11 @@ class MainActivity : ComponentActivity() {
         // A neighborhood invitation, whatever its spelling: the shell's own
         // `neighborhood/join`, never handed to a napplet. A tapped tag comes
         // as NDEF_DISCOVERED; anything else is a link from another app.
-        val source = if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED) {
+        // Only the system's own tag dispatch carries the tag: another app can
+        // send NDEF_DISCOVERED, not a Tag.
+        val tapped = intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED &&
+            intent.hasExtra(NfcAdapter.EXTRA_TAG)
+        val source = if (tapped) {
             app.myco.neighbor.InvitePreview.Source.Tap
         } else {
             app.myco.neighbor.InvitePreview.Source.Link

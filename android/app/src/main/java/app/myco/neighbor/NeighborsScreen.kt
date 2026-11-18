@@ -75,7 +75,14 @@ fun NeighborsScreen(
     val nh = state.neighborhoods
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("neighbors", android.content.Context.MODE_PRIVATE) }
-    var noticeSeen by remember { mutableStateOf(prefs.getBoolean("circle_removed_seen", false)) }
+    // Only for people who had a Circle: the core leaves `circle-gone` when an
+    // upgrade removed one. A fresh install has nothing to be told.
+    var noticeSeen by remember {
+        mutableStateOf(
+            prefs.getBoolean("circle_removed_seen", false) ||
+                !java.io.File(context.filesDir, "circle-gone").exists(),
+        )
+    }
     var showMap by remember { mutableStateOf(false) }
     var person by remember { mutableStateOf<String?>(null) }
     var inviting by remember { mutableStateOf(false) }
@@ -212,7 +219,7 @@ fun NeighborsScreen(
         InviteSheet(state = state, client = client, preselect = emptyList(), onDismiss = { inviting = false })
     }
     if (joining) {
-        app.myco.ui.screens.ScanSheet(state = state, onScanned = onScanned, onDismiss = { joining = false })
+        app.myco.ui.screens.ScanSheet(onScanned = onScanned, onDismiss = { joining = false })
     }
     nh.peers.firstOrNull { it.key == person }?.let { p ->
         PersonSheet(p, nh, client, onDismiss = { person = null })

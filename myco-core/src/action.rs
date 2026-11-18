@@ -217,8 +217,13 @@ pub enum NativeAppAction {
         #[serde(default)]
         from: Option<String>,
     },
-    /// Drop the shown invitation (it still expires on its own).
+    /// Drop the shown invitation. It is revoked too, unless it left the
+    /// phone ([`NativeAppAction::LinkInviteShared`]); then it expires on its
+    /// own.
     ClearLinkInvite,
+    /// The shown invitation was copied or shared as a link: it may be
+    /// joined after the sheet closes, so closing it doesn't revoke it.
+    LinkInviteShared,
     /// Join a link from a scanned invitation, taking `accept` of the
     /// neighborhoods it offers. Spawn-not-block; the outcome lands in
     /// `neighborhoods.status`.

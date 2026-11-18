@@ -1213,6 +1213,9 @@ object NativeActions {
 
     fun clearLinkInvite(): JSONObject = JSONObject().put("type", "clear_link_invite")
 
+    /** The shown invitation was copied or shared: closing the sheet leaves it to expire. */
+    fun linkInviteShared(): JSONObject = JSONObject().put("type", "link_invite_shared")
+
     /** Join from an invitation, sending [name] to the inviter only. */
     fun joinLink(invite: String, accept: List<String>, name: String): JSONObject =
         JSONObject().put("type", "join_link").put("invite", invite)

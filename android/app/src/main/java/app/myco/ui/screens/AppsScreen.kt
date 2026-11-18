@@ -313,7 +313,7 @@ fun AppsScreen(
     }
 
     if (showAdd) {
-        ScanSheet(state = state, onScanned = onScanned, onDismiss = { showAdd = false })
+        ScanSheet(onScanned = onScanned, onDismiss = { showAdd = false })
     }
 
     // Review is driven by state, not by a local flag: a fetch may finish while

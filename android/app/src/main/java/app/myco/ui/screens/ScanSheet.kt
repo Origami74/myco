@@ -23,7 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import app.myco.core.AppState
 import app.myco.neighbor.IncomingInvite
 import app.myco.neighbor.InvitePreview
 import app.myco.nfc.NfcReader
@@ -37,9 +36,14 @@ import app.myco.nfc.NfcReader
  * Closes on a scan or paste, and also when an NFC tap (read by the Activity,
  * not here) brought an invitation to confirm or a new app.
  */
+/** Bumped by the activity each time it handles a scanned, tapped or pasted code. */
+object ScanSheetEvents {
+    val handled = androidx.compose.runtime.mutableIntStateOf(0)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ScanSheet(state: AppState, onScanned: (String) -> Unit, onDismiss: () -> Unit) {
+fun ScanSheet(onScanned: (String) -> Unit, onDismiss: () -> Unit) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // Claim foreground NFC reader mode while we're up — a modal sheet's own window
     // misses the OS's passive tap dispatch, so the Activity reads the tag directly.
@@ -47,9 +51,12 @@ fun ScanSheet(state: AppState, onScanned: (String) -> Unit, onDismiss: () -> Uni
         NfcReader.begin()
         onDispose { NfcReader.stop() }
     }
-    val apps = state.sites.size + state.library.size
-    val baseline = remember { apps }
-    LaunchedEffect(apps) { if (apps > baseline) onDismiss() }
+    // Closes once something it read was handled (a tap is read by the
+    // activity, not here), not whenever an app shows up: a background sync
+    // adding one must not close it under the user.
+    val handled = ScanSheetEvents.handled.intValue
+    val baseline = remember { handled }
+    LaunchedEffect(handled) { if (handled != baseline) onDismiss() }
     val incoming = IncomingInvite.pending.value
     LaunchedEffect(incoming) { if (incoming != null) onDismiss() }
     val take: (String) -> Unit = { text ->

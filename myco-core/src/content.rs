@@ -732,8 +732,12 @@ impl Content {
         // The Circle and its pairing handshake are gone; neighborhoods
         // replaced them. Their files go with them. So does file transfer
         // between phones, with its records, outbox and received files.
+        // An upgrade from a version with a Circle leaves a marker, so the
+        // Neighbors tab tells only those users the Circle is gone.
+        if std::fs::remove_file(data_dir.join("circle.json")).is_ok() {
+            let _ = std::fs::write(data_dir.join(CIRCLE_GONE_MARKER), b"");
+        }
         for old in [
-            "circle.json",
             "outbound_pairs.json",
             "file_transfers.json",
             "completed_transfers.json",
@@ -2910,6 +2914,11 @@ pub(crate) fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+/// Written into the data dir when an upgrade removed the old Circle, so
+/// the app can say the Circle is gone to those users only. The app reads
+/// it as `<filesDir>/circle-gone`.
+pub const CIRCLE_GONE_MARKER: &str = "circle-gone";
 
 fn load_library(path: &Path) -> Vec<LibraryItem> {
     std::fs::read(path)

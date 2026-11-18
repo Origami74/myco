@@ -297,6 +297,9 @@ pub struct AppRuntime {
     neighbors: Option<Arc<crate::neighbor::Neighbors>>,
     /// The link screen's open invitation and last status line.
     link_ui: Arc<std::sync::Mutex<crate::neighbor::view::NeighborhoodsView>>,
+    /// The shown invitation left the phone (copied or shared): replacing or
+    /// clearing it leaves it to expire rather than revoking it.
+    invite_left: bool,
     /// A fetched napplet awaiting the user's answer on install review. Written
     /// by the fetch task, cleared when the user installs or dismisses.
     napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
@@ -705,6 +708,7 @@ impl AppRuntime {
             link_service: Some(link_service),
             neighbors: None,
             link_ui: Arc::default(),
+            invite_left: false,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -925,6 +929,7 @@ impl AppRuntime {
             link_service: None,
             neighbors: None,
             link_ui: Arc::default(),
+            invite_left: false,
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -1294,8 +1299,11 @@ impl AppRuntime {
                 self.rev += 1;
             }
             NativeAppAction::ClearLinkInvite => {
-                self.link_ui.lock().unwrap().invite = None;
+                self.drop_shown_invite();
                 self.rev += 1;
+            }
+            NativeAppAction::LinkInviteShared => {
+                self.invite_left = true;
             }
             NativeAppAction::JoinLink {
                 invite,
@@ -1489,7 +1497,28 @@ impl AppRuntime {
         self.link_ui.lock().unwrap().status = status.into();
     }
 
+    /// Take the shown invitation off the sheet and, unless it left the
+    /// phone, revoke it: only a shown or sent invitation can be joined, not
+    /// every one a sheet ever made while its ticks changed.
+    fn drop_shown_invite(&mut self) {
+        let shown = self.link_ui.lock().unwrap().invite.take();
+        let left = std::mem::take(&mut self.invite_left);
+        if left {
+            return;
+        }
+        let (Some(svc), Some(offer)) = (
+            self.link_service.as_ref(),
+            shown
+                .as_deref()
+                .and_then(crate::neighbor::link::LinkOffer::decode),
+        ) else {
+            return;
+        };
+        svc.links.revoke(&offer.pk);
+    }
+
     fn create_link_invite(&mut self, ids: Vec<String>, from: Option<String>) {
+        self.drop_shown_invite();
         let (Some(svc), Some(n)) = (self.link_service.clone(), self.neighbors()) else {
             return;
         };
