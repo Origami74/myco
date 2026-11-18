@@ -2484,7 +2484,9 @@ impl AppRuntime {
             });
         }
 
-        // Receiving.
+        // Receiving: started on the runtime, where its standing
+        // subscriptions run.
+        let _entered = handle.enter();
         let content = content.clone();
         let receiving = Arc::downgrade(neighbors);
         neighbors.on_update(Arc::new(move |n, extension, manifest| {

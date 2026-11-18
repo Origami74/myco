@@ -106,7 +106,7 @@ Most of the runtime is wiring. The parts that carry over unchanged:
 - **`nsite-deck`** — the shape to follow, and now a shared dependency: trait seams
   (`RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink`), manifest parsing, verified
   sync, and the base36 host-label encoder. Transport-agnostic and testable off-device.
-- **Neighborhood extensions** (`neighbor/updates.rs`) — `napplet-updates` shares a new
+- **Neighborhood extensions** (`neighbor/updates/`) — `napplet-updates` shares a new
   version into neighborhoods and fetches one shared there.
 - **`remote_backend.rs` / `remote_blobs.rs`** — the online relay and Blossom fetch paths
   that D9 needs.

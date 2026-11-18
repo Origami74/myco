@@ -123,6 +123,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   review when not.
 - **An old invitation or share is not replayed** when Android recreates
   Myco or reopens it from Recents.
+- **An app update reaches phones that weren't around when it was shared.**
+  An update was pushed only to phones in reach at that moment; one met
+  later never got it, and one seen through an app store's subscription
+  wasn't installed. Each phone now keeps asking the phones it meets for
+  updates, and every update that arrives is applied the same way.
 
 ### Deprecated
 

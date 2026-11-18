@@ -43,7 +43,8 @@ and of the peers:
 
 ## napplet-updates
 
-Code: `myco-core/src/neighbor/updates.rs`.
+Code: `myco-core/src/neighbor/updates/` (`share.rs` sends, `receive.rs`
+receives, `held.rs` exposes, `sources.rs` fetches).
 
 **Pushing.** When an installed napplet is pinned at a newer version (the
 update check, or a push), the device, in every neighborhood where it
@@ -55,8 +56,19 @@ shares `napplet-updates`:
 3. publishes it to every link carrying the neighborhood, with the
    neighborhood's publish hops.
 
-**Receiving.** A napplet manifest is kept and passed on like any
-neighborhood event. Where this device gets `napplet-updates`, then:
+**Receiving.** A push reaches only the links in reach at that moment. So
+in every neighborhood where this device gets any update extension, it
+holds one subscription for those kinds open on every link carrying the
+neighborhood (as in [data-plane.md](data-plane.md#following-peers)). A link
+that starts, comes back in reach or reconnects answers with what it holds,
+then sends what it shares later. An update shared while nobody was around
+arrives at the next meeting.
+
+Every update manifest that lands in the neighborhood from a peer, however it
+came (pushed, followed, or pulled for a napplet's own subscription), and
+every one a peer in reach sends again, goes to one hand-off. It is kept and
+passed on like any neighborhood event. Where this device gets
+`napplet-updates`, then:
 
 - **Installed here and newer:** the files are fetched from that
   neighborhood (its scope, then its links; see
@@ -74,7 +86,7 @@ anything:
 - a linked neighbor's backlog request for napplet manifests gets them;
 - its blob request gets their `index.html` and icon.
 
-Code: `HeldNapplets` in `updates.rs`. Only installed napplets, and only
+Code: `HeldNapplets` in `updates/held.rs`. Only installed napplets, and only
 those two files: not a napplet merely cached here, no nsite, and no other
 file in storage. If the neighborhood can't supply them, the public servers
 are tried, unless the phone is mesh-only.
@@ -103,7 +115,7 @@ A release is Zapstore's signed announcement (kind 30063) and file event
 
 Opening a Library nsite that isn't ready, opening or installing from a
 share link or `naddr`, and installing a napplet all look in the same
-places, in order (`ExtensionSource` in `neighbor/updates.rs`):
+places, in order (`ExtensionSource` in `neighbor/updates/sources.rs`):
 
 1. **This device's own store.**
 2. **Neighborhoods where this device gets the matching extension**

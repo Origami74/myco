@@ -996,6 +996,63 @@ async fn with_nobody_in_reach_nearby_forgets_at_once_and_meets_again_as_stranger
     assert_eq!(again[0].name, None);
 }
 
+/// The Pixel/A52 case: an update shared while nobody was in reach reaches
+/// a peer met afterwards, through the standing update subscription.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_shared_while_nobody_was_in_reach_arrives_when_they_meet() {
+    use super::extensions::NAPPLET_UPDATES;
+    let p = pair().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    p.bob.neighbors.on_update(Arc::new(move |_n, ext, ev| {
+        let _ = tx.send((ext, ev.id));
+    }));
+    let manifest = EventBuilder::new(Kind::from(myco_napplet_runtime::KIND_NAMED), "")
+        .tags([nostr::Tag::identifier("chat")])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    // Nobody around: kept in Alice's nearby neighborhood, sent to no link.
+    p.alice
+        .neighbors
+        .share_update(NAPPLET_UPDATES, manifest.clone(), &[])
+        .await;
+    assert!(p.alice.svc.links.all().is_empty());
+
+    p.in_reach();
+    p.alice_tick().await;
+    let got = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("Bob was told once they met")
+        .unwrap();
+    assert_eq!(got, (NAPPLET_UPDATES, manifest.id));
+}
+
+/// An update a napplet's own subscription brought in is applied too: every
+/// way an update lands here ends at the same hand-off.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_pulled_for_a_napplet_subscription_is_offered() {
+    let p = pair().await;
+    let held = hold_napplet(&p.alice).await;
+    let addr = nearby_addr(&p.bob).await;
+    let mut feed = p
+        .bob
+        .neighbors
+        .subscribe(&app(), &addr, napplet_kinds())
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    p.bob.neighbors.on_update(Arc::new(move |_n, _ext, ev| {
+        let _ = tx.send(ev.id);
+    }));
+    p.in_reach();
+    p.alice_tick().await;
+    assert!(arrives(&mut feed, held.id).await, "the napplet saw it");
+    let got = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("and the runtime was offered it")
+        .unwrap();
+    assert_eq!(got, held.id);
+}
+
 /// Bob holds a napplet he never shared, as `HeldNapplets` exposes it.
 async fn hold_napplet(dev: &Device) -> nostr::Event {
     use nsite_deck::{BlobStore as _, RelayBackend as _};
@@ -1121,7 +1178,7 @@ async fn a_links_relay_sockets_are_capped_and_close_when_the_link_ends() {
 // --- What a peer is given -------------------------------------------------------
 
 /// The napplet slots of `manifests`, as the Library would list them.
-fn installed(manifests: &[&nostr::Event]) -> super::updates::Installed {
+fn installed(manifests: &[&nostr::Event]) -> super::updates::held::Installed {
     let slots: Vec<(nostr::PublicKey, Option<String>)> = manifests
         .iter()
         .map(|m| {

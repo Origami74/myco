@@ -981,6 +981,11 @@ impl nsite_deck::BlobStore for NoBlobs {
 }
 
 impl Neighbors {
+    /// Delete what no neighborhood keeps any more. Set once.
+    pub fn set_prune(&self, prune: Arc<dyn Prune>) {
+        let _ = self.scoped.prune.set(prune);
+    }
+
     fn target(
         &self,
         napplet: &NappletIdentity,
@@ -997,7 +1002,7 @@ impl Neighbors {
         Ok((target, record))
     }
 
-    fn record(&self, n: NeighborhoodId) -> Option<Record> {
+    pub(super) fn record(&self, n: NeighborhoodId) -> Option<Record> {
         self.records().into_iter().find(|r| r.id == n)
     }
 
@@ -1232,9 +1237,6 @@ impl Neighbors {
             Ok(added) => added,
             Err(_) => return false,
         };
-        if added == Added::New {
-            self.offer_update(&record, n, &event);
-        }
         if matches!(added, Added::New | Added::Upgraded) && provenance.hops > 0 {
             let hops = (ttl - 1).min(record.policy.publish_hops);
             self.forward(n, event, Some(from_link), hops);
@@ -1314,7 +1316,7 @@ impl Neighbors {
     /// in reach, goes to the returned receiver: the follower's own subscriber
     /// sees it again, as a sign it can be fetched from someone now, without
     /// learning who.
-    fn follow_links(
+    pub(super) fn follow_links(
         &self,
         n: NeighborhoodId,
         filters: Vec<Filter>,
@@ -1432,7 +1434,7 @@ async fn follow_link(
 const RETRY_FOLLOW: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Aborts its task when dropped.
-pub(super) struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub(super) struct AbortOnDrop(pub(super) tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
