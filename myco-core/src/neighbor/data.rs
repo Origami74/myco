@@ -1223,6 +1223,12 @@ impl Neighbors {
                 }
             }
         }
+        // A REQ without a limit must not dump the whole store: the newest
+        // [`MAX_LINK_BACKLOG`] go.
+        if events.len() > MAX_LINK_BACKLOG {
+            events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+            events.truncate(MAX_LINK_BACKLOG);
+        }
         events
     }
 
@@ -1261,6 +1267,9 @@ impl Neighbors {
         if event.verify().is_err() || !unmuted(&record)(&event) {
             return false;
         }
+        // Kept with no more hops than this side would ever give: a peer's
+        // 255 must not live on in provenance for later code to trust.
+        let ttl = ttl.min(record.policy.publish_hops.saturating_add(1));
         let provenance = Provenance::pushed(ttl, record.policy.pass_on);
         let added = match self
             .scoped
@@ -1423,6 +1432,9 @@ impl Neighbors {
         Some((AbortOnDrop(supervise), again))
     }
 }
+
+/// The most events one linked peer's REQ is answered with.
+pub const MAX_LINK_BACKLOG: usize = 1000;
 
 /// Events a follow holds between the links' sockets and the keeper.
 const FOLLOW_QUEUE: usize = 256;

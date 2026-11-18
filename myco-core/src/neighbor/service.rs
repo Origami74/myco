@@ -586,6 +586,16 @@ async fn blob(
     if !link.neighborhoods.contains(&n) {
         return refused();
     }
+    // A blob is read whole into memory: only a few at once, so 64 requests
+    // in flight can't hold 64 large files.
+    static READING: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let Ok(_reading) = READING
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_BLOBS_READING)))
+        .clone()
+        .try_acquire_owned()
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     match neighbors.link_blob(n, &sha256).await {
         Some(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
@@ -674,6 +684,9 @@ pub async fn keep_in_touch(links: Arc<Links>) {
         }
     }
 }
+
+/// Blobs served to links at once; past it, 503 and the peer tries later.
+const MAX_BLOBS_READING: usize = 4;
 
 /// The most of a peer's link URLs a call tries. An offer is the peer's
 /// to write: a thousand blackholed URLs must not cost a thousand dials.
