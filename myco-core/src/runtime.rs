@@ -2662,6 +2662,17 @@ impl AppRuntime {
                 outbox.clone(),
             ));
 
+            // NAP-CVM: ContextVM servers over the shared relay pool, under
+            // offline-only and the private-address check. Discovery reads the
+            // user's own relays too, as the outbox holds them.
+            let cvm = Arc::new(myco_napplet_runtime::nap::cvm::Cvm::new(Arc::new(
+                crate::cvm_relays::PoolCvmRelays::new(
+                    content.clone(),
+                    signer.clone(),
+                    outbox.clone(),
+                ),
+            )));
+
             let host = Arc::new(
                 crate::napplet::NappletHost::new(myco_napplet_runtime::dispatch::NapContext {
                     signer,
@@ -2687,6 +2698,7 @@ impl AppRuntime {
                     https: account.https(),
                     https_memory: Arc::default(),
                     local_uploads: Arc::default(),
+                    cvm,
                     // NAP-INTENT's catalog: the Library, and the user's
                     // defaults.
                     intents: Arc::new(crate::intent::LibraryIntents::new(

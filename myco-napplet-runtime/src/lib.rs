@@ -72,11 +72,11 @@ pub use prelude::{
 };
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    BlobFetcher, BlobHints, BlobStore, Direction, EarlyAnswer, Envelope, EventSink, HttpsError,
-    HttpsErrorCode, HttpsFetcher, LaneTransport, NapTransport, NoFetcher, NoHttps, NoUploads,
-    OutboxResolver, PickedBytes, PickedFile, PlanSource, PulledEvents, RelayBackend, RelayLane,
-    RelayPlan, ScopeOwner, Signer, StoreOnlySink, UploadBlob, UploadError, UploadErrorCode,
-    UploadSink, Uploaded, WorkScope,
+    BlobFetcher, BlobHints, BlobStore, CvmListen, CvmRelays, Direction, EarlyAnswer, Envelope,
+    EventSink, HttpsError, HttpsErrorCode, HttpsFetcher, LaneTransport, NapTransport, NoCvmRelays,
+    NoFetcher, NoHttps, NoUploads, OutboxResolver, PickedBytes, PickedFile, PlanSource,
+    PulledEvents, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer, StoreOnlySink,
+    UploadBlob, UploadError, UploadErrorCode, UploadSink, Uploaded, WorkScope,
 };
 pub use session::{
     Appearance, NappletIdentity, Session, Streamer, SubscriptionHandle, IMPLEMENTED_DOMAINS,

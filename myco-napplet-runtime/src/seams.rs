@@ -1089,6 +1089,107 @@ impl Envelope {
     }
 }
 
+/// What a live [`CvmRelays::listen`] holds open. Dropping it ends the
+/// subscription on every relay it was opened on.
+pub struct CvmListen(#[allow(dead_code)] Box<dyn Send + Sync>);
+
+impl CvmListen {
+    /// A listen that holds `guard` and stops when it is dropped.
+    pub fn new(guard: impl Send + Sync + 'static) -> Self {
+        Self(Box::new(guard))
+    }
+
+    /// A listen with nothing behind it.
+    pub fn none() -> Self {
+        Self(Box::new(()))
+    }
+}
+
+/// Relay I/O for NAP-CVM: ContextVM messages are Nostr events on relays the
+/// server names, so the runtime needs to read, write and listen there.
+///
+/// Distinct from [`LaneTransport`] because ContextVM needs a **live**
+/// subscription on the transport key, opened before the first request is
+/// published — ContextVM messages are ephemeral (kind 25910), and a relay
+/// does not keep one for a subscription that arrives late. Relay URLs reach
+/// this seam already checked against the runtime's own rules (`wss://`,
+/// public host); the implementation applies the device's (offline-only, the
+/// private-address check at the dial).
+#[async_trait]
+pub trait CvmRelays: Send + Sync {
+    /// Whether ContextVM may reach relays now. `false` when the user switched
+    /// the internet off.
+    fn available(&self) -> bool;
+
+    /// The relays used for a server named without relay hints and with no
+    /// relay list of its own.
+    fn default_relays(&self) -> Vec<String>;
+
+    /// The relays discovery reads, and where a server's relay list is looked
+    /// up: the defaults, and whatever else the device chooses (the user's
+    /// own relays). The default is [`CvmRelays::default_relays`].
+    async fn discovery_relays(&self) -> Vec<String> {
+        self.default_relays()
+    }
+
+    /// Stored events matching `filters` on `relays`, signature-verified, each
+    /// relay bounded by `timeout`.
+    async fn query(
+        &self,
+        relays: &[String],
+        filters: Vec<nostr::Filter>,
+        timeout: std::time::Duration,
+    ) -> Vec<Event>;
+
+    /// Publish `event` to `relays`; whether at least one accepted it.
+    async fn publish(&self, relays: &[String], event: &Event, timeout: std::time::Duration)
+        -> bool;
+
+    /// Hand every event matching `filters` on `relays` to `deliver`, verified,
+    /// until the returned [`CvmListen`] is dropped. Returns once the
+    /// subscription is live on at least one relay (or a short wait for one has
+    /// passed), so a request published after it cannot miss its answer.
+    async fn listen(
+        &self,
+        relays: &[String],
+        filters: Vec<nostr::Filter>,
+        deliver: std::sync::Arc<dyn Fn(Event) + Send + Sync>,
+    ) -> CvmListen;
+}
+
+/// A [`CvmRelays`] that reaches nothing: for hosts and tests without
+/// ContextVM. Every call fails as the internet being off does.
+pub struct NoCvmRelays;
+
+#[async_trait]
+impl CvmRelays for NoCvmRelays {
+    fn available(&self) -> bool {
+        false
+    }
+    fn default_relays(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn query(
+        &self,
+        _: &[String],
+        _: Vec<nostr::Filter>,
+        _: std::time::Duration,
+    ) -> Vec<Event> {
+        Vec::new()
+    }
+    async fn publish(&self, _: &[String], _: &Event, _: std::time::Duration) -> bool {
+        false
+    }
+    async fn listen(
+        &self,
+        _: &[String],
+        _: Vec<nostr::Filter>,
+        _: std::sync::Arc<dyn Fn(Event) + Send + Sync>,
+    ) -> CvmListen {
+        CvmListen::none()
+    }
+}
+
 /// The shell ↔ Rust channel.
 ///
 /// On device this is `addWebMessageListener`, scoped to this window's shell

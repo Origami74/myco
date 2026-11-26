@@ -27,6 +27,11 @@
 // - `window.napplet.fs.pickFile` / `pickFiles` / `pickSaveFile` — replaced
 //   for the same reason (NAP-FS, napplet/naps PR #88): the answer comes once
 //   the user has chosen a file in the system picker, which can take a while.
+// - `window.napplet.cvm` — replaced whole (NAP-CVM, napplet/naps PR #31).
+//   The vendored build predates the current draft: it rejects a notification
+//   or response's message-less result (the spec resolves `null`), keeps only
+//   the first `resources/read` entry, gives every call but `request` a fixed
+//   30 s timer, and has the old `registry.has(family)` signature.
 // - `window.napplet.intent` — replaced whole (NAP-INTENT). The vendored build
 //   has the first draft's `open(archetype, payload, options)`; the current
 //   draft's binding takes a convention URI, `open("napplet:profile/open?…")`,
@@ -82,6 +87,7 @@ var MycoPrelude = (function () {
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
     if (domains.has("fs") && napplet.fs) installFsPick(napplet, routers);
     if (domains.has("intent")) installIntent(napplet, routers);
+    if (domains.has("cvm")) installCvm(napplet, routers);
     return napplet;
   }
 
@@ -731,6 +737,126 @@ var MycoPrelude = (function () {
       }
     };
     napplet.intent = intent;
+  }
+
+  // --- NAP-CVM ---------------------------------------------------------------
+  // The binding of the current draft. A call that carries `timeoutMs` waits
+  // that long plus `CVM_SLACK_MS` for the runtime's answer: the runtime
+  // enforces the deadline and always answers, so the timer here is only the
+  // backstop and must not cut an accepted 120 s call off at 30 s.
+  var CVM_SLACK_MS = 5000;
+  function installCvm(napplet, routers) {
+    var request = requester(routers, [
+      "cvm.discover.result", "cvm.request.result", "cvm.close.result",
+      "cvm.registry.list.result", "cvm.registry.has.result",
+      "cvm.registry.describe.result", "cvm.registry.call.result"
+    ]);
+    var eventHandlers = new Set();
+    routers.push(function (msg) {
+      if (msg.type !== "cvm.event" || !msg.server || !msg.message) return;
+      eventHandlers.forEach(function (h) { h({ server: msg.server, message: msg.message }); });
+    });
+    function waitFor(options) {
+      var ms = options && options.timeoutMs;
+      return (typeof ms === "number" && ms > 0 ? ms : REQUEST_TIMEOUT_MS) + CVM_SLACK_MS;
+    }
+    function field(name) {
+      return function (msg, resolve, reject) {
+        if (msg.error !== undefined) reject(new Error(msg.error));
+        else resolve(msg[name]);
+      };
+    }
+    function withOptional(message, key, value) {
+      if (value !== undefined) message[key] = value;
+      return message;
+    }
+    function cvmRequest(server, message, options) {
+      return request(
+        withOptional({ type: "cvm.request", server: server, message: message }, "options", options),
+        function (msg, resolve, reject) {
+          if (msg.error !== undefined) reject(new Error(msg.error));
+          else resolve(msg.message === undefined ? null : msg.message);
+        },
+        waitFor(options)
+      );
+    }
+    var nextId = 0;
+    function mcp(server, method, params, options) {
+      var message = { jsonrpc: "2.0", id: "myco-" + (++nextId) + "-" + crypto.randomUUID(), method: method };
+      if (params !== undefined) message.params = params;
+      return cvmRequest(server, message, options).then(function (reply) {
+        if (!reply) throw new Error(method + ": no response");
+        if (reply.error !== undefined) {
+          var e = reply.error;
+          throw new Error(e && e.message ? method + ": " + e.message : method + " failed");
+        }
+        return reply.result;
+      });
+    }
+    var registry = Object.freeze({
+      list: function (query) {
+        return request(withOptional({ type: "cvm.registry.list" }, "query", query), field("entries"));
+      },
+      has: function (selector, options) {
+        // The first draft took a family name; still accepted.
+        if (typeof selector === "string") selector = { family: selector };
+        return request(
+          withOptional({ type: "cvm.registry.has", selector: selector }, "options", options),
+          function (msg, resolve, reject) {
+            if (msg.error !== undefined) reject(new Error(msg.error));
+            else resolve(msg.has === true);
+          });
+      },
+      describe: function (selector, options) {
+        return request(
+          withOptional({ type: "cvm.registry.describe", selector: selector }, "options", options),
+          field("entry"));
+      },
+      call: function (selector, tool, args, options) {
+        var message = { type: "cvm.registry.call", selector: selector, tool: tool };
+        withOptional(message, "args", args);
+        withOptional(message, "options", options);
+        return request(message, field("result"), waitFor(options));
+      }
+    });
+    napplet.cvm = Object.freeze({
+      discover: function (query) {
+        return request(withOptional({ type: "cvm.discover" }, "query", query), field("servers"));
+      },
+      request: cvmRequest,
+      listTools: function (server, options) {
+        return mcp(server, "tools/list", undefined, options).then(function (r) {
+          return (r && r.tools) || [];
+        });
+      },
+      callTool: function (server, name, args, options) {
+        var params = { name: name };
+        if (args !== undefined) params.arguments = args;
+        return mcp(server, "tools/call", params, options);
+      },
+      listResources: function (server, options) {
+        return mcp(server, "resources/list", undefined, options).then(function (r) {
+          return (r && r.resources) || [];
+        });
+      },
+      // Every entry, in order: a resource can be several text and blob parts.
+      readResource: function (server, uri, options) {
+        return mcp(server, "resources/read", { uri: uri }, options).then(function (r) {
+          return (r && r.contents) || [];
+        });
+      },
+      close: function (server) {
+        return request({ type: "cvm.close", server: server }, function (msg, resolve, reject) {
+          if (msg.error !== undefined) reject(new Error(msg.error));
+          else resolve();
+        });
+      },
+      onEvent: function (handler) {
+        eventHandlers.add(handler);
+        return { close: function () { eventHandlers.delete(handler); } };
+      },
+      registry: registry
+    });
   }
 
   // --- NAP-LOCAL -------------------------------------------------------------

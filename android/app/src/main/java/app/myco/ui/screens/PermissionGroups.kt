@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
@@ -76,6 +77,7 @@ private val PART_TIER = mapOf(
     "neighbor" to Tier.Sensitive,
     "fs" to Tier.Sensitive,
     "notify" to Tier.Sensitive,
+    "cvm" to Tier.Sensitive,
 )
 
 /** Every app has these; no switch. */
@@ -116,6 +118,12 @@ private val GROUPS = listOf(
         domains = listOf("intent", "inc", "link"),
     ),
     PermissionGroup("Notifications", Icons.Filled.Notifications, "Send you notifications.", domains = listOf("notify")),
+    PermissionGroup(
+        "Remote tools", Icons.Filled.Build,
+        "Call tools on ContextVM servers over the internet.",
+        note = "What it sends them leaves this phone.",
+        domains = listOf("cvm"),
+    ),
 )
 
 /** A domain no group knows: a newer napplet than this build. Shown, never hidden. */

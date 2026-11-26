@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless you copied or shared the link: a sent link works until it
   expires. The code is kept out of screenshots and Recents, and a copied
   link is hidden from the clipboard preview.
+- **Napplets can call ContextVM tools (NAP-CVM).** A napplet granted
+  `cvm` finds ContextVM servers on Nostr and calls their MCP tools and
+  resources through Myco. Each window talks to each server under its own
+  throwaway key, never your identity. Calls need the internet; a server that
+  asks for payment gets refused, since Myco pays nothing. The tool registry
+  is not built yet.
 - **An app can recommend the app it wants to open, and Myco offers to
   install it.** A napplet opening a role (NAP-INTENT) can name an app with
   `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default

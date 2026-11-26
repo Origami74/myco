@@ -235,6 +235,7 @@ mod tests {
             https: Arc::new(crate::seams::NoHttps),
             https_memory: Arc::default(),
             local_uploads: Arc::default(),
+            cvm: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };
@@ -326,6 +327,7 @@ mod tests {
             https: Arc::new(crate::seams::NoHttps),
             https_memory: Arc::default(),
             local_uploads: Arc::default(),
+            cvm: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };
@@ -353,6 +355,7 @@ mod tests {
             https: Arc::new(crate::seams::NoHttps),
             https_memory: Arc::default(),
             local_uploads: Arc::default(),
+            cvm: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };
@@ -417,6 +420,7 @@ mod tests {
             https: Arc::new(crate::seams::NoHttps),
             https_memory: Arc::default(),
             local_uploads: Arc::default(),
+            cvm: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };

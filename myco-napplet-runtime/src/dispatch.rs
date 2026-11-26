@@ -73,6 +73,9 @@ pub struct NapContext {
     /// What each napplet kept through uploads no server took. One per
     /// device, like `https_memory`. See [`nap::upload::LocalUploads`].
     pub local_uploads: Arc<nap::upload::LocalUploads>,
+    /// The ContextVM bridge behind NAP-CVM: its relays, and each window's
+    /// sessions with servers. One per device. See [`nap::cvm::Cvm`].
+    pub cvm: Arc<nap::cvm::Cvm>,
 }
 
 /// What to do with an inbound message.
@@ -261,6 +264,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "intent" => nap::intent::handle(ctx, message).await,
         "upload" => Outcome::Reply(nap::upload::handle(ctx, session, message).await),
         "fs" => nap::fs::handle(session, message),
+        "cvm" => nap::cvm::handle(ctx, session, message).await,
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.

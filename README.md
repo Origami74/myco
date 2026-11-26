@@ -196,6 +196,9 @@ run. It asks Myco for what it needs, and gets only what the person grants:
   with live input only while the app has focus,
 - other apps, by role: "open this profile" opens the person's profile app,
   the one they chose as the default, or the one they pick when asked.
+- ContextVM tools: remote MCP servers reached over Nostr relays when
+  online (`window.napplet.cvm`). Myco signs and routes the calls; it never
+  pays a server.
 
 ### nsites, as a bonus
 
@@ -262,7 +265,7 @@ Read on:
 
 - [Concepts & glossary](docs/design/core/concepts.md) — start here
 - [Architecture](docs/design/core/architecture.md)
-- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-NEIGHBOR](https://github.com/napplet/naps/pull/146) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md) · [NAP-UPLOAD](docs/design/napplet/NAP-UPLOAD.md) · [NAP-FS](docs/design/napplet/NAP-FS.md)
+- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-NEIGHBOR](https://github.com/napplet/naps/pull/146) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md) · [NAP-UPLOAD](docs/design/napplet/NAP-UPLOAD.md) · [NAP-FS](docs/design/napplet/NAP-FS.md) · [NAP-CVM](docs/design/napplet/NAP-CVM.md)
 - [The nsite layer](docs/design/nsite/nsite-layer.md) · [Propagation](docs/design/nsite/propagation.md)
 - [Neighborhoods](docs/design/nap-neighbor/README.md) · [Identity](docs/design/core/identity.md) · [Security](docs/design/core/security.md)
 - [Build from source](docs/how-to/build.md) · [All docs](docs/README.md) · [Roadmap](docs/roadmap.md)
