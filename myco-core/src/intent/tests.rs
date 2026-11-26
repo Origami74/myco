@@ -1065,7 +1065,6 @@ fn show_review(f: &Fixture, pointer: &str) {
         unsupported: Vec::new(),
         icon: None,
         error: String::new(),
-        holder: None,
         manifest: None,
     });
 }

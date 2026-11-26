@@ -205,6 +205,12 @@ async fn subscribe(
             .and_then(|o| o.get("relay"))
             .and_then(|v| v.as_str())
     });
+    // A `neighborhood:` address is the host's, not a lane: caught before
+    // validation, which would refuse its scheme (NAP-NEIGHBOR).
+    if let Some(addr) = named.filter(|u| crate::nap::neighbor::address::is_address(u)) {
+        let addr = addr.to_string();
+        return crate::nap::neighbor::route::subscribe(ctx, session, &sub_id, filters, &addr).await;
+    }
     let target = match named {
         Some(url) => match crate::nap::outbox::validate_relay_url(url) {
             Ok(lane) => Some(lane),
@@ -288,8 +294,8 @@ async fn publish(
     };
 
     // Accepted, not merely stored: this is what wakes local subscriptions and
-    // hands the event to the relay pool. The pool, not the mesh — flooding the
-    // Circle is NAP-MESH's, behind its own grant and the user's hop cap.
+    // hands the event to the relay pool. The pool, not the mesh — sharing
+    // with people nearby is NAP-NEIGHBOR's, behind its own grant.
     let sent = if as_is {
         ctx.sink.rebroadcast(signed.clone()).await
     } else {
@@ -365,8 +371,8 @@ async fn publish_encrypted(ctx: &NapContext, message: &Envelope) -> Envelope {
 
 /// Sign the `event` template on `message` as the user.
 ///
-/// Shared with NAP-MESH and NAP-OUTBOX, whose templates are NAP-RELAY's
-/// `EventTemplate` by declared wire dependency — one parser, so the three
+/// Shared with NAP-OUTBOX and NAP-LOCAL, whose templates are NAP-RELAY's
+/// `EventTemplate` by declared wire dependency — one parser, so the
 /// domains cannot disagree about what a napplet may and may not set. The rules
 /// are the module's: `kind`, `content` and `tags` are the napplet's; `pubkey`,
 /// `created_at`, `id` and `sig` are the runtime's — and the kinds in
@@ -483,8 +489,7 @@ pub(crate) fn carries_signed_event(message: &Envelope) -> bool {
 /// else's words. The kinds refused under the grant stay refused either way.
 ///
 /// A NIP-70 protected event (`["-"]`) is only ever **kept** as it is, never
-/// sent on: its author asked that no one but they publish it to a relay, and
-/// the Circle's relays are relays. `outward` says whether this publish sends.
+/// sent on: its author asked that no one but they publish it to a relay. `outward` says whether this publish sends.
 ///
 /// Returns the event and whether it arrived signed.
 pub(crate) async fn signed_or_template(
@@ -1295,7 +1300,7 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
-            mesh: base.mesh.clone(),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
             blobs: base.blobs.clone(),
@@ -1335,7 +1340,7 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
-            mesh: base.mesh.clone(),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
             blobs: base.blobs.clone(),
@@ -1410,7 +1415,7 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
-            mesh: base.mesh.clone(),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
             blobs: base.blobs.clone(),

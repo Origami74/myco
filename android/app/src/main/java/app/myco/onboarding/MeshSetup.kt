@@ -3,13 +3,14 @@ package app.myco.onboarding
 /**
  * Where the setup popup is.
  *
- * The popup has up to four segments — Install Myco (always done), Nearby
- * devices, Connection and Name — and these are the states it can be in across
- * the last three. Only the two explain cards, the three refusal cards and
- * [Name] ask the user anything; the `Asking…` and [Connecting] states are what
+ * The popup has up to three segments — Install Myco (always done), Nearby
+ * devices and Connection — and these are the states it can be in across the
+ * last two. Only the two explain cards and the three refusal cards ask the
+ * user anything; the `Asking…` and [Connecting] states are what
  * sits behind Android's own prompts. Each Android prompt comes after a card
  * that says what it is for, and only on that card's button: the happy path is
- * "Allow nearby devices", Android's nearby prompt, then "Use this name".
+ * "Allow nearby devices", then Android's nearby prompt. Nobody is asked for a
+ * name: the generated one is used until the user sets one in Settings.
  *
  * The mesh itself is on from the first launch: it needs no permission of its
  * own (Myco's traffic has its own stack in the core, no VPN). The popup only
@@ -53,9 +54,6 @@ enum class SetupStep {
 
     /** Another app's always-on VPN holds the slot: "Another VPN is always on". */
     AlwaysOnVpn,
-
-    /** The device name, edited in place on the card. Always last. */
-    Name,
 }
 
 /** What opened this run of the popup. */
@@ -74,22 +72,19 @@ enum class SetupEntry {
 }
 
 /** A segment of the progress bar. */
-enum class Segment { Install, Nearby, Connection, Name }
+enum class Segment { Install, Nearby, Connection }
 
 /** How one segment of the progress bar draws. */
 enum class SegmentState { Done, Active, Problem, Pending }
 
 /**
  * Which segments this run of the popup has. [mesh] covers Nearby devices and,
- * when [connection], the VPN; [name] is the name step. A fresh install has
- * both; the mesh switch reopens it with only the mesh steps once the name is
- * chosen; an upgrade whose mesh already works but never chose a name gets only
- * the name. [connection] is whether the VPN is wanted at all (other apps
- * allowed on the mesh); without it the mesh steps end after Nearby devices.
+ * when [connection], the VPN. [connection] is whether the VPN is wanted at all
+ * (other apps allowed on the mesh); without it the mesh steps end after
+ * Nearby devices.
  */
 data class SetupPlan(
     val mesh: Boolean,
-    val name: Boolean,
     val entry: SetupEntry = SetupEntry.Launch,
     val connection: Boolean = true,
 ) {
@@ -97,7 +92,6 @@ data class SetupPlan(
         add(Segment.Install)
         if (mesh) add(Segment.Nearby)
         if (mesh && connection) add(Segment.Connection)
-        if (name) add(Segment.Name)
     }
 }
 
@@ -228,22 +222,19 @@ object MeshSetup {
 
     /**
      * What this launch puts in the popup: the mesh steps when [atLaunch] says
-     * [LaunchDecision.Show], the name step when no name was ever chosen.
-     * Null when there is nothing to ask.
+     * [LaunchDecision.Show]. Null when there is nothing to ask.
      */
     fun launchPlan(
         mesh: LaunchDecision,
-        nameChosen: Boolean,
         entry: SetupEntry = SetupEntry.Launch,
         connection: Boolean = true,
     ): SetupPlan? {
         val plan = SetupPlan(
             mesh = mesh == LaunchDecision.Show,
-            name = !nameChosen,
             entry = entry,
             connection = connection,
         )
-        return if (plan.mesh || plan.name) plan else null
+        return if (plan.mesh) plan else null
     }
 
     /**
@@ -259,17 +250,17 @@ object MeshSetup {
 
     /**
      * The mesh steps opened from outside the popup — the mesh switch, a
-     * Settings fix, a radio toggle — with the name step only if it was never
-     * answered. Opens on its first card with something to ask ([firstStep]).
+     * Settings fix, a radio toggle. Opens on its first card with something to
+     * ask ([firstStep]).
      */
-    fun reopenPlan(entry: SetupEntry, nameChosen: Boolean, connection: Boolean = true): SetupPlan =
-        SetupPlan(mesh = true, name = !nameChosen, entry = entry, connection = connection)
+    fun reopenPlan(entry: SetupEntry, connection: Boolean = true): SetupPlan =
+        SetupPlan(mesh = true, entry = entry, connection = connection)
 
     /**
      * The card a run of the popup opens on: the first one with something to
      * ask. The "Nearby devices" card when the nearby group is missing, then
-     * the VPN card when this run wants the VPN and it isn't Myco's, then the
-     * name. Null when nothing is left to ask. Never an `Asking…` step, so
+     * the VPN card when this run wants the VPN and it isn't Myco's. Null when
+     * nothing is left to ask. Never an `Asking…` step, so
      * opening the popup never puts an Android prompt up by itself.
      *
      * @param vpnPrepared the VPN consent is Myco's, or it isn't wanted.
@@ -277,7 +268,6 @@ object MeshSetup {
     fun firstStep(plan: SetupPlan, nearbyGranted: Boolean, vpnPrepared: Boolean): SetupStep? = when {
         plan.mesh && !nearbyGranted -> SetupStep.ExplainNearby
         plan.mesh && plan.connection && !vpnPrepared -> SetupStep.ExplainVpn
-        plan.name -> SetupStep.Name
         else -> null
     }
 
@@ -290,18 +280,12 @@ object MeshSetup {
         step == SetupStep.AskingNearby || step == SetupStep.AskingVpn
 
     /**
-     * Where to go once the mesh steps are over, whichever way they ended: the
-     * name step if this run has one, otherwise null, which closes the popup.
-     */
-    fun afterMesh(plan: SetupPlan): SetupStep? = if (plan.name) SetupStep.Name else null
-
-    /**
      * Where to go once the nearby step is behind (granted, or carried on past
      * a refusal), in a run with the Connection steps: the card that explains
      * the VPN before Android asks for it — or, with the consent already Myco's
      * and so no prompt to come, straight to bringing the tunnel up. Never an
      * `Asking…` step: the VPN prompt waits for a tap on the card ([vpnStep]).
-     * A run without them ([SetupPlan.connection]) goes to [afterMesh] instead.
+     * A run without them ([SetupPlan.connection]) closes the popup instead.
      */
     fun afterNearby(vpnPrepared: Boolean): SetupStep =
         if (vpnPrepared) SetupStep.Connecting else SetupStep.ExplainVpn
@@ -317,7 +301,7 @@ object MeshSetup {
     /**
      * "Not now" on the connection card or a VPN refusal, "Continue without" on
      * the always-on card: the Connection segment is marked skipped (other apps
-     * stay off the mesh; Myco's own mesh carries on), then [afterMesh].
+     * stay off the mesh; Myco's own mesh carries on), and the popup closes.
      */
     fun skipConnection(outcome: MeshOutcome): MeshOutcome = outcome.copy(connectionSkipped = true)
 
@@ -327,7 +311,6 @@ object MeshSetup {
         SetupStep.NearbyRefused -> Segment.Nearby
         SetupStep.ExplainVpn, SetupStep.AskingVpn, SetupStep.Connecting,
         SetupStep.VpnRefused, SetupStep.AlwaysOnVpn -> Segment.Connection
-        SetupStep.Name -> Segment.Name
     }
 
     /** "Step N of [SetupPlan.segments].size": [step]'s place in this run. */

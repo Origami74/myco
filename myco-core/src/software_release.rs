@@ -1,7 +1,7 @@
 //! Find and authenticate Myco's publisher-signed Zapstore announcements, from
-//! the Zapstore relay or from the Circle.
+//! the Zapstore relay or kept here (neighbors share them under
+//! `myco-release`).
 use crate::content::Content;
-use crate::mesh_wire::{new_query_id, MeshMeta};
 use nostr::{Event, Filter, PublicKey};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -134,11 +134,10 @@ pub(crate) async fn from_zapstore(filter: serde_json::Value) -> anyhow::Result<V
 }
 
 /// Find the newest signed release this device can reach: the announcements
-/// it keeps, its Circle up to two hops out, and — when `online` — the
-/// Zapstore relay, asked side by side. The winner is kept, so this device
-/// answers its Circle's next check, mesh-only phones included. Every source
-/// is checked against the pinned publisher alike: a peer can withhold a
-/// release, not forge one.
+/// it keeps (Zapstore's, or a neighbor's under `myco-release`) and — when
+/// `online` — the Zapstore relay, asked side by side. The winner is kept.
+/// Every source is checked against the pinned publisher alike: a neighbor
+/// can withhold a release, not forge one.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub async fn check(content: Option<Arc<Content>>, online: bool) -> anyhow::Result<String> {
     let filter = release_filter()?;
@@ -146,17 +145,10 @@ pub async fn check(content: Option<Arc<Content>>, online: bool) -> anyhow::Resul
         let Some(content) = &content else {
             return Vec::new();
         };
-        let mut events = match serde_json::from_value::<Filter>(filter.clone()) {
+        match serde_json::from_value::<Filter>(filter.clone()) {
             Ok(kept) => content.relay().query(&[kept]).await.unwrap_or_default(),
             Err(_) => Vec::new(),
-        };
-        let meta = MeshMeta::pull(1, new_query_id(), crate::content::PULL_BUDGET_MS);
-        events.extend(
-            content
-                .pull_from_peers(vec![filter.clone()], meta, None)
-                .await,
-        );
-        events
+        }
     };
     let zapstore = async {
         if online {
@@ -312,31 +304,5 @@ mod tests {
             "0.11.0"
         );
         assert!(newest(vec![metadata("99.0.0", "app.myco", "main")], now).is_none());
-    }
-
-    /// A mesh-only phone learns of a release from its Circle, and keeps it to
-    /// answer its own Circle in turn.
-    #[tokio::test]
-    async fn mesh_only_check_asks_the_circle_and_keeps_the_answer() {
-        use nostr::nips::nip19::ToBech32;
-        let dir = std::env::temp_dir().join(format!("myco-release-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Arc::new(Content::open(&dir).unwrap());
-        let real: Event =
-            serde_json::from_str(include_str!("software-release-fixture.json")).unwrap();
-        let peer_npub = Keys::generate().public_key().to_bech32().unwrap();
-        let url = crate::content::library_kind_tests::mesh_peer_holding(vec![real.clone()]).await;
-        content.add_to_circle(&peer_npub, "peer");
-        content.peer_relays().redirect(&peer_npub, &url);
-
-        assert_eq!(check(Some(content.clone()), false).await.unwrap(), "0.11.0");
-        let kept = content
-            .relay()
-            .query(&[Filter::new().id(real.id)])
-            .await
-            .unwrap();
-        assert_eq!(kept, vec![real]);
-        assert!(check(None, false).await.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

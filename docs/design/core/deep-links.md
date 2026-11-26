@@ -24,19 +24,28 @@ in the WebView. The path is left exactly as written.
 
 ## §1 It carries no secrets
 
-Deliberately: **no holder npub, no pairing secret, no token Myco interprets.**
+Deliberately: **no holder npub, no invitation secret, no token Myco interprets.**
 
 A deep link goes places nobody controls — a chat message, a printed QR on a wall, a
 URL bar, a screenshot in someone's camera roll. Anything inside it is public, durable
-and replayable, which is the exact opposite of what a one-time pairing secret needs to
-be. Pairing keeps its own carrier: the scanned or tapped `myco://pair/…` and
-`myco://share/…` payloads (`docs/design/identity-pairing.md`), exchanged face to face,
-one-shot, and short-lived.
+and replayable, which is the exact opposite of what a one-time secret needs to
+be. Invitations are links too (`https://napplet.link/neighborhood/join#invite=…`,
+[nap-neighbor/links.md](../nap-neighbor/links.md)), but what makes them safe
+is not the carrier: the secret inside works once and expires in 15 minutes,
+and the shell asks before joining. The secret rides in the fragment, so
+napplet.link's web host never sees it. `neighborhood` is a shell-reserved
+archetype: the shell handles `neighborhood/join` itself and never resolves
+it to a napplet
+([napplet-runtime.md](../napplet/napplet-runtime.md#nappletlink)). Share one face to face where you can. `myco://share/…` (an app shared face to
+face) may still carry the sharer's npub, but nobody is contacted directly any
+more. `myco://pair/…` is
+gone with pairing.
 
-Dropping the holder hint costs a retry and nothing else. `Content::open_site` with
-`holder = None` already walks every Circle peer in turn and then the public IP source
-(`myco-core/src/content.rs`), so a link with no sharer attached still finds the app
-through whoever nearby happens to have it.
+A deep link loses nothing by having no holder. Opening an app looks in the
+local store, then the neighborhoods where this device gets the matching
+extension, then the public internet unless offline-only
+([nap-neighbor/extensions.md](../nap-neighbor/extensions.md#getting-an-app-that-isnt-here-yet)),
+so a link still finds the app through a linked neighbor who has it.
 
 ## §2 The deferred open
 
@@ -50,7 +59,7 @@ tap myco://app/<host>/dumpling/…
         │
         └── not ready
               │  remember {host → path} in SharedPreferences
-              │  dispatch OpenNsite{link: host, holder: null}
+              │  dispatch OpenNsite{link: host}
               │
               ├── foreground watcher (3 min, 1s poll) ──► ready ──► open at path
               ├── every MainActivity.onResume ──────────► ready ──► open at path

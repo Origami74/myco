@@ -1,9 +1,10 @@
 # Myco signed release notifications
 
 The Android app looks for NIP-82 kind 30063 release announcements for
-`app.myco`, restricted to the publisher in `zapstore.yaml`, in three places at
-once: its own store, its Circle (one forwarded hop, the ordinary mesh pull),
-and `wss://relay.zapstore.dev` unless mesh-only mode is on. Filtering is not authentication: Rust's existing `nostr`
+`app.myco`, restricted to the publisher in `zapstore.yaml`, in two places at
+once: its own kept relay (where neighbors deliver them under the
+`myco-release` extension) and `wss://relay.zapstore.dev` unless mesh-only mode
+is on. Filtering is not authentication: Rust's existing `nostr`
 implementation verifies both the event ID and BIP-340 signature against the
 pinned publisher key before validating the announcement in Rust. Wrong publishers,
 tampered events, future timestamps, other app IDs, prereleases, non-main
@@ -12,24 +13,29 @@ notice. The highest stable numeric version is compared with the installed build.
 There is no GitHub metadata fallback that could bypass signature verification.
 
 This authenticates a release announcement. Tapping the notice opens the fixed
-official Zapstore listing, unless the Circle has already brought the APK (see
+official Zapstore listing, unless the phone already holds the APK (see
 [Carrying the APK](#carrying-the-apk)). No user identity or private signing key
 is sent to the relay.
 
-## Asking the Circle
+## From neighborhoods
 
-Every check keeps the newest verified announcement in the device's own relay,
-so the device answers its Circle's next check. One phone that reaches Zapstore
-is enough for the room: a mesh-only phone asks its peers, and their peers, and
-gets the same signed event. A peer can withhold a release but cannot forge or
-alter one; the event is verified against the pinned key as if it came from
-Zapstore. The Circle is asked only while the core runs (the mesh service or the
-UI); a background check in a process without one asks only Zapstore.
+Release events travel through neighborhoods as the `myco-release` extension
+([nap-neighbor/extensions.md](../nap-neighbor/extensions.md)). Where this
+phone gets `myco-release`, the publisher's events that arrive are kept in its
+own relay, where the next check finds them. Where it shares `myco-release`,
+it passes on the release it keeps.
+
+One phone that reaches Zapstore is enough for a neighborhood: a mesh-only
+phone finds the release its neighbors delivered. A neighbor can withhold a
+release but cannot forge or alter one; the event is verified against the
+pinned key as if it came from Zapstore. Nobody is asked directly: the check
+reads the kept relay and Zapstore only.
 
 ## Carrying the APK
 
-Each phone keeps the newest release APK in its kept Blossom store, so the
-Circle updates with no internet (`myco-core/src/release_apk.rs`).
+Each phone keeps the newest release APK in its kept Blossom store and shares
+it into neighborhoods with `myco-release` on, so linked phones update with no
+internet (`myco-core/src/release_apk.rs`).
 
 ### What vouches for it
 
@@ -43,8 +49,7 @@ accepts one only if:
   (`98:43:2B:…:7E:79`), and `x` and `size` are well formed, size at most
   64 MiB.
 
-The file event is kept beside the announcement, so the phone answers its
-Circle's next pull for it.
+The file event is kept beside the announcement, and shared with the APK.
 
 ### Where the bytes come from
 
@@ -53,19 +58,17 @@ In order, stopping at the first that works:
 1. **Kept already.**
 2. **This phone's installed APK**, when it hashes to `x` — a phone updated
    through Zapstore carries the release it runs for free.
-3. **A Circle peer's Blossom** (`http://<npub>.fips:24243/<x>`). Only the
-   peers `mesh_blobs` finds holding `x` are asked, one at a time, from a
-   rotating start. A peer that fails is skipped for three hours.
+3. **Neighborhoods with `myco-release` on**: each one's scope here, then its
+   links (`GET /nh/{pk}/blob/<x>`), one at a time.
 4. **The file event's Blossom URLs** (`https://…/<x>`, Zapstore's CDN), only
    on an unmetered connection outside mesh-only, and only while automatic
    checks are on. A plain download link (GitHub) is not used.
 
-Every source goes through the same fetch as any blob (`IpPeerSource`), and
-is checked the same way: exactly `size` bytes hashing to `x`.
+Every source is checked the same way: exactly `size` bytes hashing to `x`.
 
 ### Bounded in time
 
-A peer can't hold a carry:
+A slow source can't hold a carry:
 
 - Each source gets a time budget sized from the APK: 30 s to start, then
   the time 64 KiB/s needs for the whole file (about 6.5 min for 25 MB).
@@ -74,33 +77,15 @@ A peer can't hold a carry:
 - The carry runs apart from the update check, so a slow one never holds
   "Checking for updates…" or the next check.
 
-### Compressed for the mesh
+### Not compressed
 
-A release APK stores its native library and dex uncompressed, so zstd
-shrinks it a lot. Measured on the v0.12.1 APK (25.0 MB) on a laptop:
-
-| Level | Size | Time | Memory |
-| --- | --- | --- | --- |
-| 9 | 11.3 MB | 0.2 s | 59 MB |
-| **17** | **10.6 MB** | **3.3 s** | **86 MB** |
-| 19 | 10.1 MB | 4.7 s | 118 MB |
-
-Myco uses level 17. Once kept, the phone writes the variant to
-`blossom/zstd/<x>`, once per release, off the async workers; a phone is
-several times slower than these figures. A write that fails is not retried
-for six hours.
-
-The Blossom server hands the variant out only to a client sending
-`Accept-Encoding: zstd`, as `Content-Encoding: zstd`; any other client gets
-the plain blob. The fetching phone decodes it bounded to `size`, with the
-zstd window capped at 16 MiB, and checks the result against `x`: the
-variant needs no signature of its own. A variant that fails the check is
-followed by one fetch of the plain blob from the same peer.
+The APK travels as the plain blob. The zstd variant earlier builds wrote for
+peers (`blossom/zstd/<x>`) is no longer written.
 
 ### One release kept
 
 After a release is kept, the APKs named by every other publisher-signed
-Myco file event the phone keeps are removed, with their variants. No one
+Myco file event the phone keeps are removed. No one
 else's event can name a blob for removal. "Clear local database" keeps the
 newest announcement, the publisher-signed file events it names, and every
 APK they name (one per ABI). A phone using a custom Blossom server carries
@@ -129,15 +114,13 @@ and Zapstore, and neither restricts it.
 
 ### Scheduling the carry
 
-Every check starts a carry, due or not (Circle members come and go), while
+Every check starts a carry, due or not (neighbors come and go), while
 the core runs; one carry runs at a time. With automatic checks off, the
-carry still runs but never downloads from the internet: it serves the
-Circle what this phone has, or gets from it. Background work waits for the
+carry still runs but never downloads from the internet: it takes the APK
+only from this phone or its neighborhoods. Background work waits for the
 carry it started.
 
 A carry with the release already kept is cheap: a few kept-store queries.
-One without it asks each reachable Circle member once (`HEAD`, remembered
-briefly), then downloads from a holder if there is one.
 
 ## Scheduling
 
@@ -145,7 +128,7 @@ Automatic checks default on; saved choices are preserved. Outside mesh-only
 they contact `wss://relay.zapstore.dev` daily, including with the UI closed.
 The relay sees the phone's IP address and a Myco release query. Check now runs
 even with automatic checks off. A unique WorkManager task wakes approximately
-hourly with no network constraint, since the Circle needs none,
+hourly with no network constraint, since neighborhoods need none,
 sharing the foreground check's persisted daily success / hourly failure gate
 and one process-wide SoftwareUpdates instance. Concurrent callers join the
 same in-flight check, and the UI observes background progress and results
@@ -198,9 +181,9 @@ Publisher key rotation requires updating the pinned trust anchor deliberately.
 5. Deny notifications: the banner still works. Grant permission, reopen, and
    confirm one notice. Disable the channel: no crash or repeated alert.
 6. Automatic off: no active periodic worker. Offline: no crash; reconnect and
-   retry. Mesh-only with a Circle peer that has checked online: Check now finds
-   the release with no internet. Mesh-only with no core running: "Start the
-   mesh to ask your Circle for updates".
+   retry. Mesh-only, linked in a neighborhood with `myco-release` on to a phone that
+   has checked online: Check now finds the release with no internet. Mesh-only with no core running: "Start the
+   mesh to ask your neighbors for updates".
 7. A test build at the latest version should report up to date. Rust tests use
    a real public signed 0.11.0 fixture, reject content/key tampering and valid
    attacker signatures. Rust tests cover announcement fields and authentication; Kotlin tests cover

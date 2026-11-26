@@ -10,8 +10,9 @@
 //! Where an nsite is a document Myco *serves*, a napplet is a program Myco
 //! *hosts* — and hosting means mediating. Every capability a napplet uses is
 //! one Myco decided to grant, implemented by Myco, on the napplet's behalf. The
-//! relay, the blob store, the mesh and the signing key all sit behind the seams
-//! in [`seams`], which the napplet asks through rather than reaches around.
+//! relay, the blob store, the neighborhoods and the signing key all sit behind
+//! the seams in [`seams`], which the napplet asks through rather than reaches
+//! around.
 //!
 //! A napplet is a single self-contained `/index.html` in Blossom, named by a
 //! signed manifest at kinds `5129` / `15129` / `35129` whose `x` tag is the
@@ -25,7 +26,7 @@
 //! ```text
 //! manifest.rs  the NIP-5D kinds and the tags they add
 //! resolve.rs   manifest → blobs → verify → renderable artifact
-//! seams.rs     RelayBackend / BlobStore / Signer / EventSink / MeshSink / NapTransport
+//! seams.rs     RelayBackend / BlobStore / Signer / EventSink / NapTransport
 //! error.rs     one error type; every variant is a refusal to render
 //! napplet_link.rs  `https://napplet.link/<archetype>/<intent>` → a NAP-INTENT request
 //! ```
@@ -64,18 +65,18 @@ pub use manifest::{
 pub use nap::deliveries_for;
 pub use nap::fs::{PickMode, PickRequest, PickedHandle, PickedStore};
 pub use nap::intent::{IntentCatalog, IntentCatalogSnapshot, IntentHandler, NoIntents};
+pub use nap::neighbor::{NeighborHost, NoNeighborhoods};
 pub use napplet_link::NappletLink;
 pub use prelude::{
     render_for as render_prelude, PRELUDE_GLOBAL, SIGNING_TIMEOUT, SUPPLEMENT_GLOBAL,
 };
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    is_mesh_relay_url, BlobFetcher, BlobHints, BlobReach, BlobStore, Direction, EarlyAnswer,
-    Envelope, EventSink, HttpsError, HttpsErrorCode, HttpsFetcher, LaneTransport, MeshLimits,
-    MeshReach, MeshSink, NapTransport, NoFetcher, NoHttps, NoUploads, OutboxResolver, PickedBytes,
-    PickedFile, PlanSource, PulledEvents, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer,
-    StoreOnlySink, UploadBlob, UploadError, UploadErrorCode, UploadSink, Uploaded, WorkScope,
-    MAX_BLOB_HASHES,
+    BlobFetcher, BlobHints, BlobStore, Direction, EarlyAnswer, Envelope, EventSink, HttpsError,
+    HttpsErrorCode, HttpsFetcher, LaneTransport, NapTransport, NoFetcher, NoHttps, NoUploads,
+    OutboxResolver, PickedBytes, PickedFile, PlanSource, PulledEvents, RelayBackend, RelayLane,
+    RelayPlan, ScopeOwner, Signer, StoreOnlySink, UploadBlob, UploadError, UploadErrorCode,
+    UploadSink, Uploaded, WorkScope,
 };
 pub use session::{
     Appearance, NappletIdentity, Session, Streamer, SubscriptionHandle, IMPLEMENTED_DOMAINS,

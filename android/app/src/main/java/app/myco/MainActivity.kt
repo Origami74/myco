@@ -1,11 +1,8 @@
 package app.myco
 
 import android.content.ComponentName
-import android.content.ContentValues
 import android.content.Intent
 import android.provider.Settings
-import android.provider.MediaStore
-import android.webkit.MimeTypeMap
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
@@ -50,8 +47,6 @@ import app.myco.ble.BleRadio
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
-import app.myco.core.CircleContact
-import app.myco.core.FileTransfer
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.nfc.NfcReader
@@ -66,16 +61,11 @@ import app.myco.onboarding.SystemAsk
 import app.myco.onboarding.TunnelWait
 import app.myco.onboarding.VpnConsent
 import app.myco.nfc.PairPresent
-import app.myco.share.DeviceName
-import app.myco.share.ExternalShare
-import app.myco.share.FileOfferNotifier
 import app.myco.share.MycoLink
 import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
-import app.myco.ui.applyDeviceName
-import app.myco.ui.publishProvisionalName
 import app.myco.ui.intro.IntroScreen
 import app.myco.hotspot.HotspotService
 import app.myco.ui.onboarding.Confirmed
@@ -90,13 +80,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.util.UUID
-
-private data class ReceivedFilePresentation(
-    val transfer: FileTransfer,
-    val uri: Uri,
-)
 
 /**
  * Developer-UI entry point: device identity, node status, BLE diagnostics, and
@@ -108,8 +91,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var core: AppCoreClient
     private val prefs by lazy { getSharedPreferences("myco_prefs", MODE_PRIVATE) }
     private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
-    private val externalShareUris = mutableStateOf<List<Uri>>(emptyList())
-    private val receivedFilePresentation = mutableStateOf<ReceivedFilePresentation?>(null)
     /** A `napplet.link`'s "open with…" question: the link, and what to ask. */
     private val linkChooser = mutableStateOf<Pair<String, IntentChooser>?>(null)
     /** A `napplet.link` nothing here opens, waiting on "Open in browser". */
@@ -144,13 +125,12 @@ class MainActivity : ComponentActivity() {
     private val setupStep = mutableStateOf<SetupStep?>(null)
 
     /** Which steps this run of the popup has; set whenever it opens. */
-    private val setupPlan = mutableStateOf(SetupPlan(mesh = true, name = false))
+    private val setupPlan = mutableStateOf(SetupPlan(mesh = true))
 
     /** How this run's mesh steps went, for the segments behind the current one. */
     private val setupOutcome = mutableStateOf(MeshOutcome())
 
     /** The name the Name step's field starts with; read when the step opens. */
-    private val setupName = mutableStateOf("")
 
     /** Android refused nearby without asking; "Try again" opens app info instead. */
     private val setupNearbyBlocked = mutableStateOf(false)
@@ -184,9 +164,6 @@ class MainActivity : ComponentActivity() {
         core = MycoCore.client(this)
         // A compile-time property of the core; one read is enough.
         BleRadio.multipathCore = core.state().multipathCore
-        // Watches for file offers only while nothing is on screen; idempotent.
-        FileOfferNotifier.install(this)
-        captureExternalShare(intent)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
         // Tell the core what this chipset can carry, before anything starts the
@@ -278,16 +255,6 @@ class MainActivity : ComponentActivity() {
                             onReplayIntro = {
                                 prefs.edit().putBoolean(PREF_INTRO_SEEN, false).apply()
                             },
-                            externalShareUris = externalShareUris.value,
-                            onExternalShareDismissed = { externalShareUris.value = emptyList() },
-                            onShareToPeer = { uris, peer -> preparePeerShare(uris, peer) },
-                            onFileReceived = { transfer -> publishReceivedFile(transfer) },
-                            receivedFile = receivedFilePresentation.value?.transfer,
-                            receivedFileUri = receivedFilePresentation.value?.uri,
-                            onDismissReceivedFile = { receivedFilePresentation.value = null },
-                            onOpenReceivedFile = { transfer, uri ->
-                                openReceivedFile(ReceivedFilePresentation(transfer, uri))
-                            },
                         )
                     }
 
@@ -300,10 +267,8 @@ class MainActivity : ComponentActivity() {
                             plan = setupPlan.value,
                             outcome = setupOutcome.value,
                             nearbyBlocked = setupNearbyBlocked.value,
-                            name = setupName.value,
                             onAction = ::onSetupAction,
                             onAsk = ::onSetupAsk,
-                            onSaveName = ::chooseName,
                         )
                     }
 
@@ -367,7 +332,12 @@ class MainActivity : ComponentActivity() {
             } }
         }
 
-        handleDeepLink(intent)
+        // Only a fresh launch carries a link to act on. A recreated activity
+        // (saved state) or a relaunch from Recents hands back the intent that
+        // started it long ago: acting on it again would replay an old
+        // invitation or share.
+        val fromHistory = ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (savedInstanceState == null && !fromHistory) handleDeepLink(intent)
     }
 
     // --- mesh adapter (app-owned TUN) ---
@@ -620,7 +590,6 @@ class MainActivity : ComponentActivity() {
         )
         val plan = MeshSetup.launchPlan(
             mesh,
-            nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false),
             entry = entry,
             connection = vpnWanted(),
         ) ?: return
@@ -641,9 +610,8 @@ class MainActivity : ComponentActivity() {
         if (first != null) goTo(first) else finishSetup()
     }
 
-    /** Show [step]; the Name step reads the name it offers as it opens. */
+    /** Show [step]. */
     private fun goTo(step: SetupStep) {
-        if (step == SetupStep.Name) setupName.value = offeredName()
         setupStep.value = step
     }
 
@@ -658,18 +626,10 @@ class MainActivity : ComponentActivity() {
         openSetup(
             MeshSetup.reopenPlan(
                 entry,
-                nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false),
                 connection = vpnWanted(),
             ),
         )
     }
-
-    /**
-     * The name the Name step's field starts with: a name the user set before,
-     * otherwise the phone's own name (Settings › About phone), otherwise the
-     * generated one — the same order the first-run name dialog used.
-     */
-    private fun offeredName(): String = DeviceName.current(this, core.state().ownNpub)
 
     private fun restoreSetup(state: Bundle) {
         setupStep.value = state.getString(STATE_SETUP_STEP)?.let { name ->
@@ -677,7 +637,6 @@ class MainActivity : ComponentActivity() {
         }
         setupPlan.value = SetupPlan(
             mesh = state.getBoolean(STATE_SETUP_PLAN_MESH, true),
-            name = state.getBoolean(STATE_SETUP_PLAN_NAME),
             entry = state.getString(STATE_SETUP_ENTRY)
                 ?.let { name -> SetupEntry.entries.firstOrNull { it.name == name } }
                 ?: SetupEntry.Launch,
@@ -688,7 +647,6 @@ class MainActivity : ComponentActivity() {
             connectionSkipped = state.getBoolean(STATE_SETUP_SKIPPED),
         )
         setupNearbyBlocked.value = state.getBoolean(STATE_SETUP_BLOCKED)
-        setupName.value = state.getString(STATE_SETUP_NAME).orEmpty()
         tunnelSince = state.getLong(STATE_PROMPT_AT)
         // The wait was a coroutine of the Activity that is gone; pick it up.
         if (setupStep.value == SetupStep.Connecting) waitForTunnel(since = tunnelSince)
@@ -698,13 +656,11 @@ class MainActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
         outState.putString(STATE_SETUP_STEP, setupStep.value?.name)
         outState.putBoolean(STATE_SETUP_PLAN_MESH, setupPlan.value.mesh)
-        outState.putBoolean(STATE_SETUP_PLAN_NAME, setupPlan.value.name)
         outState.putString(STATE_SETUP_ENTRY, setupPlan.value.entry.name)
         outState.putBoolean(STATE_SETUP_PLAN_CONNECTION, setupPlan.value.connection)
         outState.putBoolean(STATE_SETUP_REFUSED, setupOutcome.value.nearbyRefused)
         outState.putBoolean(STATE_SETUP_SKIPPED, setupOutcome.value.connectionSkipped)
         outState.putBoolean(STATE_SETUP_BLOCKED, setupNearbyBlocked.value)
-        outState.putString(STATE_SETUP_NAME, setupName.value)
         outState.putLong(STATE_PROMPT_AT, tunnelSince)
         asker.save(outState)
     }
@@ -775,26 +731,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** The mesh steps are over, however they ended: on to the name, or close. */
+    /** The mesh steps are over, however they ended: close the popup. */
     private fun endMeshSteps() {
         tunnelWait?.cancel()
         tunnelWait = null
         // Asked at all means asked: launch doesn't bring the mesh steps back.
         prefs.edit().putBoolean(PREF_SETUP_DONE, true).remove(PREF_SETUP_FIRST_RUN).apply()
-        val next = MeshSetup.afterMesh(setupPlan.value)
-        if (next != null) goTo(next) else finishSetup()
-    }
-
-    /**
-     * The Name step's answer: the field's content on "Use this name". The
-     * same path the first-run name dialog took: published everywhere by
-     * [applyDeviceName], and remembered as answered.
-     */
-    private fun chooseName(picked: String) {
-        val name = picked.trim().take(DeviceName.MAX_LENGTH)
-        if (name.isEmpty()) return
-        applyDeviceName(this, core, core.state().ownNpub, name)
-        prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
         finishSetup()
     }
 
@@ -980,144 +922,13 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        captureExternalShare(intent)
         handleDeepLink(intent)
     }
 
-    /** Receive a photo from another app's Sharesheet without copying it yet. */
-    private fun captureExternalShare(intent: Intent?) {
-        val uris = ExternalShare.uris(intent)
-        if (uris.isEmpty()) return
-        ExternalShare.retainReadAccess(this, intent, uris)
-        externalShareUris.value = uris
-    }
-
-    private fun preparePeerShare(uris: List<Uri>, peer: CircleContact) {
-        if (uris.isEmpty()) return
-        lifecycleScope.launch(Dispatchers.IO) {
-            val outbox = File(filesDir, "myco-share-outbox").apply { mkdirs() }
-            var sent = 0
-            var failure: String? = null
-            for (uri in uris) {
-                try {
-                    val item = ExternalShare.describe(this@MainActivity, uri)
-                    val safe = item.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
-                    val local = File(outbox, "${UUID.randomUUID()}-$safe")
-                    val input = contentResolver.openInputStream(uri)
-                        ?: error("could not open ${item.name}")
-                    input.use { source ->
-                        local.outputStream().use { destination -> source.copyTo(destination) }
-                    }
-                    core.dispatch(NativeActions.shareFile(local.path, item.name, item.mimeType, peer.npub))
-                    sent += 1
-                } catch (t: Throwable) {
-                    failure = t.message ?: "could not prepare the file"
-                    break
-                }
-            }
-            // Only a local failure is worth a toast. Whether the offer actually
-            // reached the peer is not known yet — the dispatch only queues the
-            // work — so claiming success here told the user a send had happened
-            // even when the frame was dropped. The share sheet and the Circle
-            // tab report the real outcome from the transfer's own status.
-            if (sent == 0) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        failure ?: "Could not share the file",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-            }
-        }
-    }
-
-    /** Move a decrypted native receive into Downloads and retain its URI for the preview. */
-    private fun publishReceivedFile(transfer: FileTransfer) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            var destination: Uri? = null
-            try {
-                val source = File(transfer.receivedPath)
-                check(source.isFile) { "received file is missing" }
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, "Myco-${transfer.name}")
-                    put(MediaStore.MediaColumns.MIME_TYPE, resolvedMime(transfer.name))
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Myco")
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                destination = contentResolver.insert(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    values,
-                ) ?: error("could not create a Downloads entry")
-                contentResolver.openOutputStream(destination!!).use { output ->
-                    checkNotNull(output) { "could not open the Downloads entry" }
-                    source.inputStream().use { input -> input.copyTo(output!!) }
-                }
-                contentResolver.update(
-                    destination!!,
-                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                    null,
-                    null,
-                )
-                withContext(Dispatchers.Main) {
-                    receivedFilePresentation.value = ReceivedFilePresentation(transfer, destination!!)
-                    // The public MediaStore copy is now durable. Tell Rust to
-                    // forget the terminal transfer and delete its private
-                    // decrypted staging file; a later identical send gets a
-                    // new offer/blob and Android will choose the next name.
-                    core.dispatch(NativeActions.forgetFileTransfer(transfer.id))
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Received ${transfer.name}; saved in Downloads/Myco",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-            } catch (t: Throwable) {
-                destination?.let { contentResolver.delete(it, null, null) }
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Received file but could not save it: ${t.message ?: "unknown error"}",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-            }
-        }
-    }
-
-    private fun openReceivedFile(file: ReceivedFilePresentation) {
-        val mime = resolvedMime(file.transfer.name)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(file.uri, mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        runCatching {
-            startActivity(Intent.createChooser(intent, "Open with"))
-        }.onFailure {
-            Toast.makeText(this, "No app can open ${file.transfer.name}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    /**
-     * The type Android is told a received file is.
-     *
-     * Derived from the **name**, never from the sender's declared MIME. The name
-     * is what the user actually read on the accept prompt, so it is the only
-     * claim they consented to; a file called `holiday.jpg` that the sender typed
-     * as something executable would otherwise reach the "open with" chooser as
-     * that type. An extension Android does not recognise falls back to a neutral
-     * type rather than to the sender's word for it.
-     */
-    private fun resolvedMime(name: String): String {
-        val ext = name.substringAfterLast('.', "").lowercase()
-        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-            ?: "application/octet-stream"
-    }
-
-    // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---
+    // --- NFC tap-to-share (numo-style: we are the card; the other phone reads) ---
     //
-    // While the QR/present screen is open we claim foreground HCE for the standard
-    // NDEF AID and emulate a URI tag (myco://pair/…). The *other* phone needs no
+    // While an invite or share sheet is open we claim foreground HCE for the standard
+    // NDEF AID and emulate a URI tag (an invitation's napplet link, or myco://share/…). The *other* phone needs no
     // special mode: its OS tag dispatch reads the URI and delivers it to us as an
     // NDEF_DISCOVERED intent (see the manifest filter) → handleScannedText.
 
@@ -1150,33 +961,15 @@ class MainActivity : ComponentActivity() {
             setupNearbyBlocked.value = false
             afterNearbyStep()
         }
-        // Presenting is owned by the Circle screen (it's the only place we emulate a
-        // card). Here we just (re)apply the current presenting state — re-claiming
-        // the foreground HCE service after a background→foreground while on Circle.
+        // Presenting is owned by the invite and share sheets (the only places we
+        // emulate a card). Here we just (re)apply the current presenting state —
+        // re-claiming the foreground HCE service after a background→foreground.
         PairPresent.onChanged = { runOnUiThread { updateNfcPresent() } }
         updateNfcPresent()
         // Foreground reader mode is owned by the add-app sheet (a modal window where
         // passive NDEF dispatch can't reach us). Re-apply its current state here.
         NfcReader.onChanged = { runOnUiThread { updateNfcReader() } }
         updateNfcReader()
-        // (Re)assert our memorable name into the core so pair events carry it. Done
-        // here (not just onCreate) in case the device identity wasn't ready yet at
-        // first launch; set_device_name is idempotent.
-        core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
-            // Re-assert rather than set: passing the stored override back
-            // through resolves to the same name, and every publish site is
-            // idempotent. This is the belt to the rename sites' braces, for a
-            // radio that started after the last rename.
-            val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
-                .getString("device_name", "").orEmpty()
-            // No name chosen yet (the setup popup's last step): the radios may
-            // already be up, so publish the pseudonym, not the phone's own name.
-            if (prefs.getBoolean(PREF_NAME_CHOSEN, false) || stored.isNotBlank()) {
-                applyDeviceName(this, core, it, stored)
-            } else {
-                publishProvisionalName(core, it)
-            }
-        }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.
         reconcilePendingLinks()
@@ -1197,7 +990,7 @@ class MainActivity : ComponentActivity() {
     /** Claim (or release) foreground HCE for our NDEF service while presenting.
      *  We deliberately do NOT suppress polling: leaving the default poll+listen
      *  loop on means a presenting phone also *reads* the other phone's tag, so two
-     *  phones in the pairing flow pair symmetrically on a single bump. */
+     *  presenting phones exchange codes on a single bump. */
     private fun updateNfcPresent() {
         val adapter = nfcAdapter ?: return
         val cardEmu = runCatching { CardEmulation.getInstance(adapter) }.getOrNull() ?: return
@@ -1239,18 +1032,14 @@ class MainActivity : ComponentActivity() {
             }
             msg?.records?.firstNotNullOfOrNull { it.toUri() }
         }.getOrNull() ?: return
-        // Only act on our own scheme. Reader mode reads *any* tapped NDEF tag, so
-        // without this an unrelated URL tag would fall through to openNsite(). Raw
-        // nsite links are entered via QR/paste, never NFC.
-        if (uri.scheme != NsiteShare.SCHEME) return
-        // While the file-share hotspot runs, a bump's only job is handing over
-        // the page URL — reading the peer's pair tag here would start a pairing
-        // anyway, from this side. Drop exactly that; hotspot off, pairing resumes.
-        if (PairPresent.hotspotActive && NsiteShare.parsePairUri(uri.toString()) != null) {
-            android.util.Log.i("MycoNfc", "ignoring pair tag — hotspot owns NFC")
-            return
-        }
-        runOnUiThread { handleScannedText(uri.toString()) }
+        // Only act on our own scheme or a neighborhood invitation (the invite
+        // sheet presents `https://napplet.link/neighborhood/join#invite=…`).
+        // Reader mode reads *any* tapped NDEF tag, so without this an
+        // unrelated URL tag would fall through to openNsite(). Raw nsite links
+        // are entered via QR/paste, never NFC.
+        val text = uri.toString()
+        if (uri.scheme != NsiteShare.SCHEME && app.myco.neighbor.InvitePreview.payload(text) == null) return
+        runOnUiThread { handleScannedText(text, app.myco.neighbor.InvitePreview.Source.Tap) }
     }
 
     // --- BLE toggle (remembered) ---
@@ -1553,14 +1342,24 @@ class MainActivity : ComponentActivity() {
 
     // --- share QR: scan (in-app PairScreen) + deep-link ---
 
-    /** A scanned QR is a `myco://pair/…` pairing code, a `myco://share/…` shared
-     *  nsite, or a raw nsite link. */
-    private fun handleScannedText(text: String) {
+    /** A scanned QR is a neighborhood invitation, a `myco://share/…` shared
+     *  nsite, or a raw nsite link. [source] is how an invitation arrived, for
+     *  the join sheet to say. */
+    private fun handleScannedText(
+        text: String,
+        source: app.myco.neighbor.InvitePreview.Source = app.myco.neighbor.InvitePreview.Source.Qr,
+    ) {
+        // Whatever it was, the scan sheet that may be open has done its job.
+        app.myco.ui.screens.ScanSheetEvents.handled.intValue++
+        // A neighborhood invitation: confirm first, then join.
+        app.myco.neighbor.InvitePreview.read(text, source)?.let { invite ->
+            app.myco.neighbor.IncomingInvite.pending.value = invite
+            return
+        }
+        // A pairing code from an older Myco: pairing is gone, neighborhoods replaced it.
         NsiteShare.parsePairUri(text)?.let { pair ->
-            // Mutual pairing: send a request to the scanned device; it pops up there
-            // to accept, and only then do both sides add each other.
-            core.dispatch(NativeActions.sendPairRequest(pair.npub, pair.name, pair.secret))
-            Toast.makeText(this, "Pair request sent to ${pair.name}…", Toast.LENGTH_SHORT).show()
+            val who = pair.name.ifEmpty { "them" }
+            Toast.makeText(this, "That's an old pairing code. Ask $who for a neighborhood invite.", Toast.LENGTH_LONG).show()
             return
         }
         NsiteShare.parseShareUri(text)?.let { info ->
@@ -1608,6 +1407,22 @@ class MainActivity : ComponentActivity() {
 
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
+        // A neighborhood invitation, whatever its spelling: the shell's own
+        // `neighborhood/join`, never handed to a napplet. A tapped tag comes
+        // as NDEF_DISCOVERED; anything else is a link from another app.
+        // Only the system's own tag dispatch carries the tag: another app can
+        // send NDEF_DISCOVERED, not a Tag.
+        val tapped = intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED &&
+            intent.hasExtra(NfcAdapter.EXTRA_TAG)
+        val source = if (tapped) {
+            app.myco.neighbor.InvitePreview.Source.Tap
+        } else {
+            app.myco.neighbor.InvitePreview.Source.Link
+        }
+        app.myco.neighbor.InvitePreview.read(data.toString(), source)?.let { invite ->
+            app.myco.neighbor.IncomingInvite.pending.value = invite
+            return
+        }
         if (NappletLinks.isNappletLink(data)) {
             openNappletLink(data.toString())
             return
@@ -1619,16 +1434,6 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (data.scheme != NsiteShare.SCHEME) return
-        // The passive-dispatch twin of the reader-mode gate in handleNfcTag:
-        // while the hotspot owns NFC, a peer's pair tag delivered by the OS as
-        // an NDEF intent must not start a pairing. QR-scanned and browsed
-        // myco:// links arrive with other actions and stay unaffected.
-        if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED &&
-            PairPresent.hotspotActive && NsiteShare.parsePairUri(data.toString()) != null
-        ) {
-            android.util.Log.i("MycoNfc", "ignoring pair tap — hotspot owns NFC")
-            return
-        }
         handleScannedText(data.toString())
     }
 
@@ -1680,8 +1485,8 @@ class MainActivity : ComponentActivity() {
      * the wait is shown as a modal — the app appears in the Apps grid with its
      * download ring, same as any other incoming app.
      *
-     * No holder is passed because the link carries none by design (see [MycoLink]);
-     * `open_site` falls through every Circle peer and then the public source anyway.
+     * `open_site` looks in the neighborhoods that carry nsites here and then the
+     * public source.
      */
     private fun openAppLink(link: MycoLink.AppLink) {
         val site = core.state().sites.firstOrNull { it.host == link.host }
@@ -1760,34 +1565,28 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Receive a shared nsite: add the sharer to your Circle and kick off its sync.
-     * We do **not** open the fullscreen view here — the app appears in the Apps
-     * drawer with a download ring (iOS-install style) and opens when tapped. The
-     * sharer's device becomes a paired peer we pull from (holder = their npub).
+     * Receive a shared nsite: kick off its sync — from the neighborhoods that
+     * carry nsites here, then the internet; the sharer's device is not
+     * contacted directly. We do **not** open the fullscreen view here — the
+     * app appears in the Apps drawer with a download ring (iOS-install style)
+     * and opens when tapped.
      */
     private fun openSharedNsite(info: NsiteShare.ShareInfo) {
-        if (info.npub.isNotEmpty()) {
-            // Mutual pairing: request to pair (the sharer accepts on their device);
-            // the nsite can still download from them as a holder meanwhile.
-            core.dispatch(NativeActions.sendPairRequest(info.npub, info.name, info.secret))
-        }
-
-        // A shared napplet is fetched and reviewed, never installed outright.
-        // Pairing and installing are separate decisions: accepting a tap from
-        // someone should not also hand their app permission to post as you.
+        // A shared napplet is fetched and reviewed, never installed outright:
+        // accepting a tap from someone should not also hand their app
+        // permission to post as you.
         if (info.isNapplet) {
-            // Their device first, then the internet — a napplet handed over in
-            // a room with no internet still has to arrive.
-            core.dispatch(NativeActions.fetchNapplet(info.nappletPointer, holder = info.npub))
+            // The neighborhoods first, then the internet.
+            core.dispatch(NativeActions.fetchNapplet(info.nappletPointer))
             val who = info.name.ifEmpty { "a peer" }
-            Toast.makeText(this, "Getting an app from $who…", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Getting the app $who shared…", Toast.LENGTH_SHORT).show()
             offerHomeScreenWhenNappletInstalled(info.nappletPointer)
             return
         }
 
-        core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
+        core.dispatch(NativeActions.openNsite(info.nsiteHost))
         val who = info.name.ifEmpty { "a peer" }
-        Toast.makeText(this, "Downloading from $who — find it in Apps", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Getting the app $who shared — find it in Apps", Toast.LENGTH_SHORT).show()
         offerHomeScreenWhenReady(info.nsiteHost)
     }
 
@@ -1878,11 +1677,9 @@ class MainActivity : ComponentActivity() {
         private const val STATE_SETUP_STEP = "setup_step"
         private const val STATE_SETUP_PLAN_MESH = "setup_plan_mesh"
         private const val STATE_SETUP_PLAN_CONNECTION = "setup_plan_connection"
-        private const val STATE_SETUP_PLAN_NAME = "setup_plan_name"
         private const val STATE_SETUP_REFUSED = "setup_nearby_refused"
         private const val STATE_SETUP_SKIPPED = "setup_connection_skipped"
         private const val STATE_SETUP_ENTRY = "setup_entry"
-        private const val STATE_SETUP_NAME = "setup_name"
         private const val STATE_SETUP_BLOCKED = "setup_nearby_blocked"
         private const val STATE_PROMPT_AT = "setup_prompt_at"
 
@@ -1916,6 +1713,5 @@ class MainActivity : ComponentActivity() {
         /** Set once the setup popup's name step has been answered. Separate from
          *  [PREF_INTRO_SEEN] so replaying the intro doesn't re-ask it, and so an
          *  upgrade from a build that never asked still gets the question once. */
-        private const val PREF_NAME_CHOSEN = "name_chosen"
     }
 }

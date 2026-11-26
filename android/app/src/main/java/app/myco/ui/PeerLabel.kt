@@ -6,12 +6,11 @@ import app.myco.share.DeviceName
 /**
  * The name a peer has actually told us, or null when they have told us nothing.
  *
- * A device's chosen name reaches us only inside pair traffic: the Circle entry
- * written when pairing completed, the pending request they sent us, or the
- * invite we sent them (which echoes the name they were showing at the time).
- * Those are checked in that order — most recently confirmed first.
+ * A device's chosen name reaches us only through a neighborhood invitation:
+ * the peer's diagnostics row carries it as `linkName`, the name they gave when
+ * the link was made.
  *
- * Below those sits the name a peer broadcasts for itself in its BLE scan
+ * Below that sits the name an older build broadcasts for itself in its BLE scan
  * response. It is deliberately last: it is an unauthenticated plaintext
  * broadcast that anyone in range can forge, so it may fill a gap but must never
  * displace a name that arrived signed. It is also BLE-only — a peer found over
@@ -24,11 +23,9 @@ import app.myco.share.DeviceName
  */
 fun peerNameOrNull(state: AppState, npub: String): String? {
     if (npub.isEmpty()) return null
-    val told = state.circle.firstOrNull { it.npub == npub }?.name
-        ?: state.pendingPairRequests.firstOrNull { it.npub == npub }?.name
-        ?: state.outboundPairs.firstOrNull { it.npub == npub }?.name
-    told?.trim()?.ifBlank { null }?.let { return it }
-    return state.peers.firstOrNull { it.npub == npub }?.advertisedName?.trim()?.ifBlank { null }
+    val row = state.peers.firstOrNull { it.npub == npub } ?: return null
+    return row.linkName.trim().ifBlank { null }
+        ?: row.advertisedName.trim().ifBlank { null }
 }
 
 /**

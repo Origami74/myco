@@ -1,9 +1,10 @@
 //! The BUD-01 Blossom HTTP server over any [`BlobStore`] (the embedded
-//! [`FsBlobStore`], or a view that also reads a cache), so the node can serve its
-//! blobs to mesh peers at `http://[fd00::self]:24243`. Blobs are
-//! self-authenticating, so there is no per-blob auth; access is decided per
-//! request by an [`AccessFn`] taking the [`BlobOp`], which is how `myco-core`
-//! grants reads to paired peers while withholding uploads. Routes:
+//! [`FsBlobStore`], or a view that also reads a cache), for an embedder that
+//! wants its blobs served over HTTP. `myco-core` binds it nowhere today (its
+//! blob store is used in-process only); its tests stand it up as someone
+//! else's Blossom. Blobs are self-authenticating, so there is no per-blob
+//! auth; access can be decided per request by an [`AccessFn`] taking the
+//! [`BlobOp`], to allow reads while withholding uploads. Routes:
 //!
 //! - `GET  /<sha256>` → blob bytes (`application/octet-stream`; the gateway infers
 //!   the real content-type from the manifest path, not from Blossom). A client
@@ -39,11 +40,9 @@ pub enum BlobOp {
     Write,
 }
 
-/// Decides whether a non-loopback (mesh) source may perform `op` on our Blossom.
-/// `myco-core` backs this with the Circle and its per-peer permissions, so only
-/// paired peers can pull, and only peers granted upload can push; loopback (the
-/// in-app gateway) always bypasses it. Behind an `Arc` so the **live** Circle is
-/// consulted per request — membership and permissions change at runtime.
+/// Decides whether a non-loopback source may perform `op` on this Blossom;
+/// loopback always bypasses it. Behind an `Arc` so a **live** set can be
+/// consulted per request — membership and permissions may change at runtime.
 pub type AccessFn = Arc<dyn Fn(IpAddr, BlobOp) -> bool + Send + Sync>;
 
 /// Shared handler state: the blob store plus an optional mesh access gate.
@@ -106,9 +105,9 @@ pub async fn serve_on(
     .await
 }
 
-/// Serve on an already-bound listener, restricting **mesh** sources to those that
-/// pass `access` (loopback is always allowed). The runtime uses this so only
-/// paired (Circle) peers can pull/push blobs. `precompressed` is the store's
+/// Serve on an already-bound listener, restricting non-loopback sources to
+/// those that pass `access` (loopback is always allowed). `precompressed` is
+/// the store's
 /// [`FsBlobStore::zstd_dir`], when it keeps zstd variants.
 ///
 /// Any listener that names its peers by socket address will do — a kernel
@@ -137,9 +136,8 @@ async fn serve_state<L>(state: BlossomState, listener: L) -> anyhow::Result<()>
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    // Raise the request-body cap from axum's 2 MB default: nsite assets and the
-    // adaptive dev speedtest (up to 16 MiB) exceed it. 64 MiB is a generous cap
-    // that still bounds a single upload.
+    // Raise the request-body cap from axum's 2 MB default: nsite assets exceed
+    // it. 64 MiB is a generous cap that still bounds a single upload.
     const MAX_UPLOAD: usize = 64 * 1024 * 1024;
     let app = Router::new()
         .route("/{sha256}", get(get_blob).head(head_blob))
@@ -243,8 +241,7 @@ async fn upload(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     body: Bytes,
 ) -> Response {
-    // Uploads are the one operation a paired peer is not granted by default:
-    // nothing in normal operation pushes blobs to a peer, and it costs us disk.
+    // Uploads are gated apart from reads: they cost us disk.
     if !st.allows(addr, BlobOp::Write) {
         return StatusCode::FORBIDDEN.into_response();
     }

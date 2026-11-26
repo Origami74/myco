@@ -96,7 +96,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_appNew(
 
 /// Android system property holding an `EnvFilter` directive string that
 /// overrides [`DEFAULT_LOG_FILTER`], e.g. `debug` or
-/// `info,fips=debug,myco_core::peer_relay=debug`. Read once, when the native
+/// `info,fips=debug,myco_core::neighbor=debug`. Read once, when the native
 /// core is created, so a change takes effect on the next app start.
 const LOG_FILTER_PROPERTY: &std::ffi::CStr = c"debug.myco.log";
 
@@ -280,6 +280,24 @@ pub extern "system" fn Java_app_myco_core_NativeCore_accountRevealNsec(
         None => String::new(),
     };
     jstr(&mut env, nsec)
+}
+
+/// The nearby secret to advertise (8 hex chars), or empty while Nearby is
+/// off. Outside the reducer so the 2 s beacon poll builds no state.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbySecret(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    let secret = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.nearby_secret()
+        }
+        None => String::new(),
+    };
+    jstr(&mut env, secret)
 }
 
 /// The account's avatar bytes; empty while there is none. Re-fetch when
@@ -844,8 +862,8 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
     }
 }
 
-/// Make this phone hold the newest signed release APK for its Circle (see
-/// `release_apk`): kept already, its own installed APK, a Circle peer, or —
+/// Make this phone hold the newest signed release APK for its neighborhoods
+/// (see `release_apk`): kept already, its own installed APK, a neighbor, or —
 /// with `internet` — the release's own URLs. Returns the release as JSON
 /// (`version`, `version_code`, `sha256`, `size`, `source`); throws
 /// `IOException` with the reason it isn't held. Needs a running core.
@@ -931,7 +949,8 @@ pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
     online: jboolean,
 ) -> jstring {
     let online = online != 0;
-    // With a running core the check also asks the Circle, on the core's runtime.
+    // With a running core the check also reads what is kept here, on the
+    // core's runtime.
     let context = unsafe { handle_ref(handle) }.and_then(|h| {
         let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
         guard.gateway_context()

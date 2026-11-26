@@ -1,7 +1,6 @@
 //! Keep what we see: a handful of event kinds that arrive from outside the
-//! local relay — a public relay, a Circle peer's relay, a multi-hop pull —
-//! are written into the local relay on the way past, so the next lookup
-//! answers here, works offline, and is served on to the Circle.
+//! local relay — a public relay, say — are written into the local relay on
+//! the way past, so the next lookup answers here and works offline.
 //!
 //! Only kinds another lookup will want again, and only replaceable ones, so
 //! each author (and `d` tag) costs one event however often it is seen:
@@ -20,7 +19,7 @@
 //! What this is not: it never touches blobs (a manifest is kept, the bytes it
 //! names are not fetched), and it never installs anything. A newer manifest
 //! kept for an installed app sits in the store beside the **pinned** version
-//! this phone has the files for; the gateway, a napplet's open and the Circle
+//! this phone has the files for; the gateway, a napplet's open and the mesh
 //! relay all read through the pin (`docs/design/nsite/nsite-layer.md` §2.1,
 //! "Events kept as they pass").
 //!

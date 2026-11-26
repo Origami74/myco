@@ -645,7 +645,7 @@ class NappletActivity : ComponentActivity() {
                             watchReview()
                         },
                         onRetry = {
-                            act(NativeActions.fetchNapplet(r.pointer, r.holder))
+                            act(NativeActions.fetchNapplet(r.pointer))
                             watchReview()
                         },
                         onOpen = {

@@ -8,13 +8,14 @@
 //   has no `shell` domain, so without this `shell.supports()` — the spec's
 //   discovery mechanism — is undefined for every domain.
 // - `window.napplet.gamepad` — NAP-GAMEPAD cached controller snapshots.
-// - `window.napplet.mesh` — NAP-MESH (`docs/design/napplet/NAP-MESH.md`),
-//   Myco's own domain, which the vendored installer filters out because it is
-//   not in the upstream registry yet.
+// - `window.napplet.neighbor` — NAP-NEIGHBOR (napplet/naps#146), not in the
+//   vendored build yet.
 // - `window.napplet.local` — NAP-LOCAL (`docs/design/napplet/NAP-LOCAL.md`),
 //   Myco's keep-on-this-device domain, filtered out for the same reason; and
 //   `window.napplet.resource.keep`, its blob half, added to the vendored
 //   `resource` object.
+// - `window.napplet.resource.check` — whether URLs could be delivered,
+//   without delivering them (a local extension to NAP-RESOURCE).
 // - `window.napplet.outbox.publish` — replaced, same wire and same result
 //   shape, only to wait longer. The vendored one gives up after 30 s, and a
 //   publish is signed first: with a signer app (NIP-55) that is a human
@@ -46,6 +47,8 @@ var MycoPrelude = (function () {
   "use strict";
 
   var REQUEST_TIMEOUT_MS = 30000;
+  // A check asks peers in each neighborhood, each bounded on the runtime side.
+  var CHECK_TIMEOUT_MS = 30000;
 
   // How long a request that is signed before it is answered may wait: the
   // publishes. The runtime bounds the signing itself (the signer app gets
@@ -72,9 +75,10 @@ var MycoPrelude = (function () {
     installShell(napplet, domains, routers);
     if (domains.has("gamepad")) installGamepad(napplet, routers);
     if (domains.has("outbox") && napplet.outbox) installOutboxPublish(napplet, routers);
-    if (domains.has("mesh")) installMesh(napplet, routers);
+    if (domains.has("neighbor")) installNeighbor(napplet, routers);
     if (domains.has("local")) installLocal(napplet, routers);
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
+    if (domains.has("resource") && napplet.resource) installResourceCheck(napplet, routers);
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
     if (domains.has("fs") && napplet.fs) installFsPick(napplet, routers);
     if (domains.has("intent")) installIntent(napplet, routers);
@@ -353,14 +357,15 @@ var MycoPrelude = (function () {
     napplet.fs.pickSaveFile = picker("fs.pickSaveFile");
   }
 
-  // --- NAP-MESH --------------------------------------------------------------
-  function installMesh(napplet, routers) {
+  // --- NAP-NEIGHBOR ----------------------------------------------------------
+  // Neighborhoods and their `neighborhood:` addresses. Every call answers
+  // with a result or rejects with the NAP's error string ("unsupported",
+  // "denied", "cancelled", "not found", "invalid"). `create`, `invite`, `leave` and
+  // `setOffer` put a prompt in front of the user, so they wait as long as a
+  // signed publish does.
+  function installNeighbor(napplet, routers) {
     var pending = new Map();
-    var subscriptions = new Map();
-
-    function post(message) {
-      window.parent.postMessage(message, "*");
-    }
+    var handlers = new Set();
 
     function request(message, project, timeoutMs) {
       var id = crypto.randomUUID();
@@ -370,18 +375,16 @@ var MycoPrelude = (function () {
           if (pending.delete(id)) reject(new Error(message.type + " timed out"));
         }, timeoutMs || REQUEST_TIMEOUT_MS);
         pending.set(id, { resolve: resolve, reject: reject, timeout: timeout, project: project });
-        post(message);
+        window.parent.postMessage(message, "*");
       });
     }
 
     routers.push(function (msg) {
-      if (msg.type.indexOf("mesh.") !== 0) return;
-      if (msg.type === "mesh.event" || msg.type === "mesh.eose" || msg.type === "mesh.closed") {
-        var sub = subscriptions.get(msg.subId);
-        if (!sub) return;
-        if (msg.type === "mesh.event") sub.emit("event", msg.result);
-        else if (msg.type === "mesh.eose") sub.emit("eose", msg.ttl);
-        else { sub.emit("closed", msg.reason); subscriptions.delete(msg.subId); }
+      if (msg.type.indexOf("neighbor.") !== 0) return;
+      if (msg.type === "neighbor.event") {
+        handlers.forEach(function (cb) {
+          try { cb(msg.event); } catch (e) { console.error("neighbor event handler threw", e); }
+        });
         return;
       }
       if (typeof msg.id !== "string") return;
@@ -389,90 +392,59 @@ var MycoPrelude = (function () {
       if (!p) return;
       pending.delete(msg.id);
       clearTimeout(p.timeout);
-      if (typeof msg.error === "string" && msg.type !== "mesh.publish.result") {
+      if (typeof msg.error === "string") {
         p.reject(new Error(msg.error));
         return;
       }
       p.resolve(p.project(msg));
     });
 
-    function info() {
-      return request({ type: "mesh.info" }, function (msg) {
-        return { online: !!msg.online, peers: msg.peers | 0, limits: msg.limits || {} };
-      });
+    function field(name) {
+      return function (msg) { return msg[name]; };
     }
+    function nothing() { return undefined; }
 
-    // A publish failure is a result with `ok: false`, not a rejection — the
-    // napplet reads one field to branch on, as NAP-RELAY has it. Signed
-    // first, so it waits as long as an outbox publish does.
-    function publish(template, options) {
-      var message = { type: "mesh.publish", event: template };
-      if (options && options.ttl !== undefined) message.ttl = options.ttl;
-      return request(message, function (msg) {
-        var out = { ok: !!msg.ok };
-        if (msg.event !== undefined) out.event = msg.event;
-        if (msg.eventId !== undefined) out.eventId = msg.eventId;
-        if (msg.ttl !== undefined) out.ttl = msg.ttl;
-        if (msg.error !== undefined) out.error = msg.error;
-        return out;
-      }, SIGNING_TIMEOUT_MS);
-    }
-
-    // How many reachable peers hold each blob: `{ peers, blobs: { <sha256>: n } }`.
-    // Rejects with the shell's reason (too many hashes, not granted).
-    function blobs(hashes) {
-      return request({ type: "mesh.blobs", hashes: Array.isArray(hashes) ? hashes.slice() : [] }, function (msg) {
-        return { peers: msg.peers | 0, blobs: msg.blobs || {} };
-      });
-    }
-
-    function subscribe(filters, options) {
-      var subId = crypto.randomUUID();
-      var handlers = { event: new Set(), eose: new Set(), closed: new Set() };
-      var handle = {
-        id: subId,
-        on: function (name, cb) {
-          var set = handlers[name];
-          if (!set) throw new Error("unknown mesh subscription event: " + name);
-          set.add(cb);
-          return { close: function () { set.delete(cb); } };
-        },
-        close: function () {
-          if (!subscriptions.delete(subId)) return;
-          post({ type: "mesh.close", subId: subId });
-        },
-        emit: function (name, value) {
-          handlers[name].forEach(function (cb) {
-            try { cb(value); } catch (e) { console.error("mesh subscription handler threw", e); }
-          });
-        }
-      };
-      subscriptions.set(subId, handle);
-      var message = {
-        type: "mesh.subscribe",
-        subId: subId,
-        filters: Array.isArray(filters) ? filters : [filters]
-      };
-      if (options && options.ttl !== undefined) message.ttl = options.ttl;
-      // A subscribe has no `.result`; its answer is the stream. The `id` is
-      // still sent so a refusal (`mesh.subscribe.result` carrying `error`)
-      // has something to correlate with, and surfaces as `closed`.
-      var id = crypto.randomUUID();
-      message.id = id;
-      pending.set(id, {
-        resolve: function () {},
-        reject: function (err) { handle.emit("closed", err.message); subscriptions.delete(subId); },
-        timeout: setTimeout(function () { pending.delete(id); }, REQUEST_TIMEOUT_MS),
-        project: function () {}
-      });
-      post(message);
-      return { id: subId, on: handle.on, close: handle.close };
-    }
-
-    Object.defineProperty(napplet, "mesh", {
-      value: Object.freeze({ info: info, publish: publish, subscribe: subscribe, blobs: blobs }),
-      enumerable: true, configurable: false, writable: false
-    });
+    napplet.neighbor = {
+      info: function () {
+        return request({ type: "neighbor.info" }, field("info"));
+      },
+      list: function () {
+        return request({ type: "neighbor.list" }, function (msg) { return msg.neighborhoods || []; });
+      },
+      peers: function (neighborhood) {
+        return request({ type: "neighbor.peers", neighborhood: neighborhood }, function (msg) {
+          return msg.peers || [];
+        });
+      },
+      create: function (req) {
+        return request({ type: "neighbor.create", request: req }, field("neighborhood"), SIGNING_TIMEOUT_MS);
+      },
+      invite: function (neighborhood, candidates) {
+        var message = { type: "neighbor.invite", neighborhood: neighborhood };
+        if (Array.isArray(candidates)) message.candidates = candidates.slice();
+        return request(message, field("result"), SIGNING_TIMEOUT_MS);
+      },
+      leave: function (neighborhood) {
+        return request({ type: "neighbor.leave", neighborhood: neighborhood }, nothing, SIGNING_TIMEOUT_MS);
+      },
+      setOffer: function (neighborhood, offer) {
+        return request(
+          { type: "neighbor.setOffer", neighborhood: neighborhood, offer: offer },
+          field("offer"),
+          SIGNING_TIMEOUT_MS
+        );
+      },
+      mute: function (neighborhood, author, muted) {
+        return request(
+          { type: "neighbor.mute", neighborhood: neighborhood, author: author, muted: !!muted },
+          nothing
+        );
+      },
+      onEvent: function (cb) {
+        handlers.add(cb);
+        return { close: function () { handlers.delete(cb); } };
+      },
+    };
   }
 
   // --- NAP-INTENT: both generations of the binding ---------------------------
@@ -834,6 +806,27 @@ var MycoPrelude = (function () {
           resolve(true);
         }
       });
+    };
+  }
+
+  // `resource.check(urls)` — for each URL, whether its bytes could be
+  // delivered now, without transferring them. Resolves the runtime's items:
+  // `{ url, available: "yes" | "no" | "unknown", size?, error? }`, in order.
+  function installResourceCheck(napplet, routers) {
+    if (typeof napplet.resource.check === "function") return;
+    if (Object.isFrozen(napplet.resource)) {
+      console.warn("myco: resource is frozen; resource.check is unavailable");
+      return;
+    }
+    var request = requester(routers, ["resource.check.result", "resource.check.error"]);
+    napplet.resource.check = function check(urls) {
+      return request({ type: "resource.check", urls: urls }, function (msg, resolve, reject) {
+        if (msg.type === "resource.check.error") {
+          reject(new Error(msg.message || msg.error || "resource.check refused"));
+        } else {
+          resolve(Array.isArray(msg.items) ? msg.items : []);
+        }
+      }, CHECK_TIMEOUT_MS);
     };
   }
 

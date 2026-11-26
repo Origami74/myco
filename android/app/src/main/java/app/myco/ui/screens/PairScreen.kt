@@ -64,40 +64,6 @@ import com.journeyapps.barcodescanner.BarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
 
 
-/**
- * The **QR** screen (per reference/mockups/pair-05-qr.svg): scan a friend's code on
- * top, show your own below. The "show yours" half is also the NFC "present" spot.
- */
-@Composable
-fun QrScreen(
-    state: AppState,
-    onScanned: (String) -> Unit,
-    onBack: () -> Unit,
-) {
-    val context = LocalContext.current
-    val name = remember(state.ownNpub) { DeviceName.current(context, state.ownNpub) }
-
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-            Text("QR", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
-        }
-
-        Spacer(Modifier.height(12.dp))
-        Text("SCAN A FRIEND'S CODE", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
-        Spacer(Modifier.height(8.dp))
-        Box(modifier = Modifier.fillMaxWidth().height(240.dp)) { ScanPanel(onScanned = onScanned) }
-
-        Spacer(Modifier.height(20.dp))
-        Text("OR SHOW YOURS", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
-        Spacer(Modifier.height(8.dp))
-        MyCodePanel(state = state, deviceName = name)
-
-        Spacer(Modifier.height(16.dp))
-        PasteCodeButton(label = "Paste a code", onPaste = onScanned)
-    }
-}
-
 @Composable
 internal fun ScanPanel(onScanned: (String) -> Unit) {
     val context = LocalContext.current
@@ -229,41 +195,3 @@ private fun ReticleOverlay() {
     }
 }
 
-@Composable
-private fun MyCodePanel(state: AppState, deviceName: String) {
-    // Use the same payload NFC is presenting (rotates after each tap is consumed),
-    // so the shown QR and the tapped code always carry the same live secret.
-    val fallback = remember(state.ownNpub, deviceName) {
-        NsiteShare.buildPairUri(state.ownNpub, deviceName, NsiteShare.newPairSecret())
-    }
-    val pairUri = PairPresent.payload.value ?: fallback
-    val qr = remember(pairUri) { NsiteShare.qrBitmap(pairUri) }
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            QrCodeCard(qr, contentDescription = "Your pairing code")
-            Spacer(Modifier.height(12.dp))
-            Text(deviceName, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
-            Text("Friend scans this — or taps phones — to add you", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(10.dp))
-            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primaryContainer) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(Icons.Filled.Contactless, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
-                    Text("also tap-to-pair ready", color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-        }
-    }
-}

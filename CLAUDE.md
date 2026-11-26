@@ -40,11 +40,11 @@ Seven Rust crates build into the one `cdylib`, `libmyco_core.so`:
 - **`fips-host`** — hosting a FIPS node inside an app, with no Myco types: today the userspace TCP/IP stack (`netstack`, smoltcp) that terminates the node's packets in process, so Myco needs no `VpnService`. Headed to own the node lifecycle, transports, shared-node detection and the system TUN, and to be extracted as a library; new FIPS plumbing goes here.
 
 - **`myco-napplet-runtime`** — the napplet host: NIP-5D manifest, verified resolve, sessions and grants, one module per NAP.
-- **`myco-core`** — the app crate and only cdylib. Owns device identity (one Nostr keypair, persisted on first launch), embeds the FIPS mesh node, and wires everything together: Tokio multi-thread runtime (`runtime.rs`), TUN packet bridge, `.fips` DNS interception, BLE/Wi-Fi Aware/AP lane bridges, peer diagnostics, and mesh gossip.
+- **`myco-core`** — the app crate and only cdylib. Owns device identity (one Nostr keypair, persisted on first launch), embeds the FIPS mesh node, and wires everything together: Tokio multi-thread runtime (`runtime.rs`), TUN packet bridge, `.fips` DNS interception, BLE/Wi-Fi Aware/AP lane bridges, peer diagnostics, neighborhoods (`neighbor/`: links, the link service on :4873 — the only port open to other phones — scoped neighborhood traffic, and the update extensions `napplet-updates` / `nsite-updates` / `myco-release` that carry apps and updates between phones).
 - **`nsite-deck`** — reusable, transport-agnostic nsite host: gateway (manifest → path → sha256 → serve), sync/import engine, propagator. Reaches the outside world only through four trait seams in `seams.rs`: `RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink`. It names no concrete relay, store, or radio — keep it that way.
-- **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on :4870). Durable events (manifests, replaceable kinds, notes) live in rust-nostr's LMDB store (`nostr-lmdb`, indexed NIP-01 queries, replaceable/addressable and NIP-09 semantics applied by the database); events with a NIP-40 `expiration` (chat) are stored too and swept once expired; deliberately no relay framework in front of it. Holds only what the device **keeps**.
+- **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on 127.0.0.1:4870, loopback only). Durable events (manifests, replaceable kinds, notes) live in rust-nostr's LMDB store (`nostr-lmdb`, indexed NIP-01 queries, replaceable/addressable and NIP-09 semantics applied by the database); events with a NIP-40 `expiration` (chat) are stored too and swept once expired; deliberately no relay framework in front of it. Holds only what the device **keeps**.
 - **`myco-cache`** — the shell cache: a second `nostr-lmdb` + blob directory for everything that only passed through (query answers, pulls, mesh pushes, napplet blob fetches), held to a byte budget by segmented LRU. `myco-core/src/tiered.rs` reads relay+cache / Blossom+cache as one and decides which a write lands in.
-- **`myco-blossom`** — embedded Blossom blob store implementing `BlobStore` (http on :24243). Content-addressed files named by sha256; verifies hash on write (atomic temp+rename), trusts the name on read.
+- **`myco-blossom`** — embedded Blossom blob store implementing `BlobStore` (used in-process; served on no port). Content-addressed files named by sha256; verifies hash on write (atomic temp+rename), trusts the name on read.
 
 ### The FFI boundary
 
@@ -54,15 +54,15 @@ Kotlin ↔ Rust is a **JNI + JSON-over-strings Redux-style reducer**: `dispatch(
 
 ### Android app (`android/app/src/main/java/app/myco/`)
 
-Compose bottom-nav shell (`ui/MycoApp.kt`: Apps · Circle · Settings · Dev). Each installed nsite renders in its own chrome-less WebView activity (`NsiteActivity`). Radios are their own packages: `ble/`, `nfc/`, `aware/`, `ap/`; pairing/share links in `share/`; the reducer client in `core/`.
+Compose bottom-nav shell (`ui/MycoApp.kt`: Apps · Neighbors · Settings · Dev). Each installed nsite renders in its own chrome-less WebView activity (`NsiteActivity`). Radios are their own packages: `ble/`, `nfc/`, `aware/`, `ap/`; the Neighbors tab, invitations and joins in `neighbor/`; share links in `share/`; the reducer client in `core/`.
 
 ## Testing philosophy
 
-Host `cargo test` uses in-memory mocks (`nsite-deck/src/testing.rs`: `MemRelay`, `MemBlobs`) and is necessary but **not sufficient** for pairing/BLE/NFC/mesh changes — those regress only on physical devices, usually two paired ones. When core logic can't be host-tested, say so in the PR and describe the manual on-device test. See `docs/how-to/run-two-device-demo.md`.
+Host `cargo test` uses in-memory mocks (`nsite-deck/src/testing.rs`: `MemRelay`, `MemBlobs`) and is necessary but **not sufficient** for neighborhood-link/BLE/NFC/mesh changes — those regress only on physical devices, usually two linked ones. When core logic can't be host-tested, say so in the PR and describe the manual on-device test. See `docs/how-to/run-two-device-demo.md`.
 
 ## Conventions
 
 - Single-trunk: branch off `main`, PR back into `main`, squash WIP commits.
 - One logical change per PR; no drive-by reformatting or out-of-footprint cleanups.
-- Design-affecting changes update the matching `docs/design/` page; user-visible changes update `README.md`; release notes go in `CHANGELOG.md` under `[Unreleased]`.
+- Design-affecting changes update the matching `docs/design/` page; a NAP's design lives in a folder named for it, like its code (`docs/design/nap-neighbor/` ↔ `myco-core/src/neighbor/`, `myco-napplet-runtime/src/nap/neighbor/`); user-visible changes update `README.md`; release notes go in `CHANGELOG.md` under `[Unreleased]`.
 - Many docs in `docs/design/` and `docs/how-to/` were written in forward-looking "proposal voice" before the code existed and mark items **TBD / open** — where a doc and the tree disagree, the tree (justfile, Cargo.toml, build.gradle.kts) is current. `docs/design/core/concepts.md` is the glossary; start there for terminology (npub/node_addr, `.fips` vs `.nsite`, Pillars of Propagation).

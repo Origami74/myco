@@ -7,7 +7,7 @@
 //! and refuses, **at the dial**, anything outside it.
 //!
 //! - [`Reach::Internet`] — the public internet only. The default.
-//! - [`Reach::Mesh`] — a Circle peer over FIPS: `.fips` names and the mesh's
+//! - [`Reach::Mesh`] — a linked peer over FIPS: `.fips` names and the mesh's
 //!   `fd00::/8` addresses, nothing else.
 //! - [`Reach::Configured`] — a server the user typed in themselves (a custom
 //!   Blossom store), which may well be on their own network. The one
@@ -101,14 +101,9 @@ impl HttpClient {
         Self::build(Reach::Internet, Redirects::None, builder, cfg!(test))
     }
 
-    /// A Circle peer over the mesh only.
+    /// A linked peer over the mesh only.
     pub(crate) fn mesh(builder: reqwest::ClientBuilder) -> Self {
         Self::build(Reach::Mesh, Redirects::Judged, builder, cfg!(test))
-    }
-
-    /// A Circle peer over the mesh only, redirects not followed.
-    pub(crate) fn mesh_unredirected(builder: reqwest::ClientBuilder) -> Self {
-        Self::build(Reach::Mesh, Redirects::None, builder, cfg!(test))
     }
 
     /// A server the user configured themselves. Not guarded: it may be on
@@ -238,7 +233,7 @@ pub(crate) fn shared_mesh() -> HttpClient {
         .get_or_init(|| {
             HttpClient::mesh(
                 reqwest::Client::builder()
-                    // Generous: a blob can be MBs over a slow BLE mesh link.
+                    // Generous: a link's blob can be MBs over a slow BLE mesh link.
                     .timeout(Duration::from_secs(60)),
             )
         })
@@ -298,6 +293,36 @@ pub(crate) fn may_dial(
             }
         }
     }
+}
+
+/// Whether a URL a peer handed us (a service in a link offer) may be dialled
+/// outside an [`HttpClient`], as a WebSocket is: a mesh peer (a `.fips` name
+/// or a mesh address) or a public internet host, judged before any lookup.
+/// The addresses a name resolves to are judged by [`may_connect_peer`].
+pub(crate) fn may_dial_peer(url: &reqwest::Url) -> Result<(), String> {
+    let allow_loopback = cfg!(test);
+    if may_dial(Reach::Mesh, url, allow_loopback).is_ok() {
+        return Ok(());
+    }
+    may_dial(Reach::Internet, url, allow_loopback)?;
+    let literal = match url.host() {
+        Some(nostr::types::url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Some(nostr::types::url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
+        _ => None,
+    };
+    match literal {
+        Some(ip) if !may_connect_peer(ip) => Err("not a public or mesh address".into()),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a connection to `ip` may be made for a URL a peer handed us: a
+/// mesh address, or a globally routable one outside this device's network.
+/// Loopback only in host tests.
+pub(crate) fn may_connect_peer(ip: IpAddr) -> bool {
+    (cfg!(test) && ip.is_loopback())
+        || is_mesh_address(ip)
+        || (!is_private_ip(ip) && crate::public_nodes::is_public_ip(ip) && !is_own_network(ip))
 }
 
 /// A FIPS mesh name: `<npub>.fips`.
@@ -484,10 +509,10 @@ mod tests {
         }
         for refused in [
             "http://127.0.0.1/x",
-            "http://localhost:24243/x",
+            "http://localhost:4873/x",
             "http://10.0.0.1/x",
-            "http://[fd00::1]:24243/x",
-            "http://npub1peer.fips:24243/x",
+            "http://[fd00::1]:4873/x",
+            "http://npub1peer.fips:4873/x",
             "http://[64:ff9b::c0a8:101]/x",
             "https://user@example.com/x",
             "file:///etc/passwd",
@@ -497,7 +522,7 @@ mod tests {
                 "{refused}"
             );
         }
-        for ok in ["http://npub1peer.fips:24243/x", "http://[fd12::3]:24243/x"] {
+        for ok in ["http://npub1peer.fips:4873/x", "http://[fd12::3]:4873/x"] {
             assert!(may_dial(Reach::Mesh, &url(ok), false).is_ok(), "{ok}");
         }
         for refused in [

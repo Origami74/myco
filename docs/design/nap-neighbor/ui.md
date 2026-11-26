@@ -1,0 +1,69 @@
+# UI
+
+Neighborhoods are managed in native Compose, not in a napplet.
+
+Code: `android/app/src/main/java/app/myco/neighbor/` and
+`myco-core/src/neighbor/view.rs` (the `neighborhoods` field of the app
+state). Actions are in `myco-core/src/action.rs`; see
+[../../reference/ffi-surface.md](../../reference/ffi-surface.md).
+
+## Tabs
+
+Apps · Neighbors · Settings · Dev.
+
+## Neighbors tab
+
+- The mesh bar on top.
+- **Here now:** peers reachable in the last two minutes.
+- **Nearby** first, with its on/off switch on the card. Off, the card
+  stays and says so, so it can be turned back on
+  ([proximity.md](proximity.md)).
+- Neighborhood cards, with a list / map toggle. On the map, Nearby is a
+  pulsing bubble.
+- Pending additions from peers ("Alice added you to …"), with **Join** /
+  **No thanks**.
+- Round icon buttons, bottom right: **Join** (scanner) at the bottom,
+  **Invite** above it. Apps has the same scanner (add an app) with
+  **Share Myco** above it.
+
+## A person
+
+- What you share with them, with **Remove** per neighborhood.
+- Add a neighborhood: they're asked first. Not for someone on a nearby
+  link, and Nearby itself can't be removed.
+- **Disconnect**: stops sharing every neighborhood with them. What was
+  received stays on the phone.
+
+## Neighborhood page
+
+- **Rename** (only on this phone), **Reach**, **Files** (blob push hops).
+- **People** in it.
+- **Posts reach:** Close / Friends of friends / Wide
+  ([policy.md](policy.md#reach-presets)).
+- **Install updates from people here** and **Send my updates to people here** switches, for apps, sites and Myco at once ([extensions.md](extensions.md)).
+- **Leave** and **Invite**.
+- On **Nearby**: no Rename, Leave or Invite, and one line saying phones in
+  reach join by themselves.
+
+## Invite
+
+- Shows a QR code, a share link and, while open, an NFC tag.
+- Says how the other side will see you ("They'll see you as …") and the
+  short code they'll see ("They'll see code …"): the first and last four
+  hex digits of this invitation's link key.
+- Waits for them to join.
+- Below that, "Inviting them to": one big tick row per neighborhood, in
+  thumb reach, and **+ New neighborhood**. The code says which it joins.
+
+## Join
+
+- The scan sheet, the same one Apps opens to add an app: it takes an
+  invitation or an app share and the shell routes each.
+- Scan a QR, tap phones (also while the scan sheet is open), or open a
+  `https://napplet.link/neighborhood/join#invite=…` link.
+- Shows who is inviting and to which neighborhoods. Pick which to accept.
+- Says where the invitation came from (a link, a QR code or a phone tap)
+  and shows the inviter's code, to compare with their invite sheet.
+  Anyone can make a link that names anybody.
+- An expired invitation says so and can't be joined.
+- A **Not private** note: people in a neighborhood can pass posts on.

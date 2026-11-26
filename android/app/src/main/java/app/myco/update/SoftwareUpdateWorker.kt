@@ -28,7 +28,7 @@ class SoftwareUpdateWorker(context: Context, parameters: WorkerParameters) :
                 manager.cancelUniqueWork(NAME)
                 return
             }
-            // No network constraint: in mesh-only mode the Circle answers.
+            // No network constraint: in mesh-only mode neighborhoods answer.
             val request = PeriodicWorkRequestBuilder<SoftwareUpdateWorker>(1, TimeUnit.HOURS).build()
             manager.enqueueUniquePeriodicWork(NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
         }

@@ -53,3 +53,7 @@ node_modules/
 
 # GSD planning artifacts stay local
 .planning/
+
+# Runtime state a stray run can drop into a crate dir — never commit a device key
+*.nsec
+/myco-core/settings.json

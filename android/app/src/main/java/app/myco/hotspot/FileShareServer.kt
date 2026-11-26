@@ -34,9 +34,9 @@ import org.json.JSONObject
  * nothing of theirs. That makes it the one large download here with no
  * approval in front of it, so it answers `Range` (a dropped 100 MB transfer
  * resumes) and `HEAD`, and serves at most [MAX_APK_STREAMS] guests at once.
- * The mesh file transfer refuses APKs on purpose (`myco-core/src/
- * file_transfer.rs`); this route is not a way around that: it serves only
- * Myco's own installed APK, never a file someone picked or sent.
+ * This route serves only Myco's own installed APK, never an APK someone
+ * picked or sent: shared files and uploads go through the owner's approval
+ * like everything else on the page.
  */
 class FileShareServer(
     private val files: SharedFiles,

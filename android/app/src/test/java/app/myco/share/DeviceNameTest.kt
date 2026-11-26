@@ -49,9 +49,9 @@ class DeviceNameTest {
         assertTrue("only ${distinct.size} distinct names from 1000 npubs", distinct.size > 700)
     }
 
-    /** Twenty devices — a big Circle — should almost never collide. */
+    /** Twenty devices — a big neighborhood — should almost never collide. */
     @Test
-    fun `a circle sized run is collision free`() {
+    fun `a neighborhood sized run is collision free`() {
         val names = (0 until 20).map { DeviceName.generated(npub(it)) }
         assertEquals(names.toString(), names.size, names.toSet().size)
     }

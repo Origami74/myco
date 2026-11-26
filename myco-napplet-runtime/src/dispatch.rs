@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use crate::nap;
 use crate::seams::{
-    BlobFetcher, BlobStore, Envelope, EventSink, HttpsFetcher, LaneTransport, MeshSink,
-    OutboxResolver, RelayBackend, Signer, UploadSink,
+    BlobFetcher, BlobStore, Envelope, EventSink, HttpsFetcher, LaneTransport, OutboxResolver,
+    RelayBackend, Signer, UploadSink,
 };
 use crate::session::Session;
 
@@ -41,9 +41,9 @@ pub struct NapContext {
     /// Where a napplet's published events are accepted — stored, shown here,
     /// and carried to other people. See [`EventSink`].
     pub sink: Arc<dyn EventSink>,
-    /// Hop-limited publish and pull over the mesh, behind NAP-MESH. See
-    /// [`MeshSink`].
-    pub mesh: Arc<dyn MeshSink>,
+    /// The device's neighborhoods, behind NAP-NEIGHBOR. See
+    /// [`nap::neighbor::NeighborHost`].
+    pub neighbor: Arc<dyn nap::neighbor::NeighborHost>,
     /// NIP-65 relay planning, behind NAP-OUTBOX. See [`OutboxResolver`].
     pub outbox: Arc<dyn OutboxResolver>,
     /// Lane I/O for NAP-OUTBOX. See [`LaneTransport`].
@@ -141,7 +141,7 @@ pub fn needs_session(message: &Envelope) -> bool {
     matches!(
         (message.domain(), message.action()),
         ("shell", _)
-            | ("relay" | "mesh" | "outbox", "subscribe" | "close")
+            | ("relay" | "outbox", "subscribe" | "close")
             | ("inc", "subscribe" | "unsubscribe")
             | ("gamepad", _)
     )
@@ -180,7 +180,7 @@ fn refusal(message: &Envelope, why: &str) -> Envelope {
     // NAP-OUTBOX names its refusal too: "policy denied".
     if matches!(
         (message.domain(), message.action()),
-        ("relay" | "outbox" | "mesh" | "local", "publish") | ("relay", "publishEncrypted")
+        ("relay" | "outbox" | "local", "publish") | ("relay", "publishEncrypted")
     ) {
         let error = if message.domain() == "outbox" {
             nap::upload::POLICY_DENIED
@@ -251,7 +251,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "gamepad" => nap::gamepad::handle(session, message),
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
         "relay" => Outcome::Reply(nap::relay::handle(ctx, session, message).await),
-        "mesh" => Outcome::Reply(nap::mesh::handle(ctx, session, message).await),
+        "neighbor" => Outcome::Reply(nap::neighbor::handle(ctx, session, message).await),
         "outbox" => Outcome::Reply(nap::outbox::handle(ctx, session, message).await),
         "local" => Outcome::Reply(nap::local::handle(ctx, session, message).await),
         "resource" => Outcome::Reply(nap::resource::handle(ctx, session, message).await),
@@ -302,9 +302,14 @@ mod tests {
         assert!(r["message"].as_str().unwrap().contains("not granted"));
 
         // And the other domains keep the registry's result-with-error shape.
-        let out = dispatch(&ctx, &mut s, &Envelope::new("mesh.info").with_id("i1")).await;
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("identity.getPublicKey").with_id("i1"),
+        )
+        .await;
         let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
-        assert_eq!(r["type"], "mesh.info.result");
+        assert_eq!(r["type"], "identity.getPublicKey.result");
         assert!(r["error"].is_string());
     }
 
@@ -319,7 +324,6 @@ mod tests {
             "relay.publish",
             "relay.publishEncrypted",
             "outbox.publish",
-            "mesh.publish",
             "local.publish",
         ] {
             for established in [false, true] {
@@ -357,7 +361,12 @@ mod tests {
         assert_eq!(r["error"], "policy denied");
 
         // A refused non-publish keeps the registry's error-only shape.
-        let out = dispatch(&ctx, &mut s, &Envelope::new("mesh.info").with_id("i1")).await;
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("identity.getPublicKey").with_id("i1"),
+        )
+        .await;
         let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
         assert!(r.get("ok").is_none());
         assert!(r["error"].is_string());
@@ -370,7 +379,7 @@ mod tests {
         let (ctx, _signer) = test_context();
         let mut s = Session::new(
             NappletIdentity::new("chat", "aggregate"),
-            ["relay", "mesh", "outbox", "resource", "identity"],
+            ["relay", "outbox", "resource", "identity"],
         );
         s.on_ready();
         s.subscribe("keep", vec![nostr::Filter::new()]).unwrap();
@@ -379,11 +388,6 @@ mod tests {
             ("relay.query", json!({"filters": {"kinds": [1]}})),
             (
                 "relay.publish",
-                json!({"event": {"kind": 1, "content": "x"}}),
-            ),
-            ("mesh.info", json!({})),
-            (
-                "mesh.publish",
                 json!({"event": {"kind": 1, "content": "x"}}),
             ),
             ("outbox.query", json!({"filters": {"kinds": [1]}})),
@@ -407,8 +411,6 @@ mod tests {
             "shell.ready",
             "relay.subscribe",
             "relay.close",
-            "mesh.subscribe",
-            "mesh.close",
             "outbox.subscribe",
             "outbox.close",
         ] {

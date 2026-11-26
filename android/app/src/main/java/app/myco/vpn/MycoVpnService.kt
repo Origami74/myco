@@ -29,8 +29,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * normal internet traffic is untouched — this is not a full-tunnel VPN.
  *
  * The node installs the bridge channels when it starts (BLE on); this service just
- * moves bytes. With it up, a native socket to `[fd00::peer]:4870/:24243` routes
- * over the mesh, so the sync engine can pull a shared nsite from a peer's device.
+ * moves bytes. With it up, a native socket to a peer's link service
+ * (`[fd00::peer]:4873`, the only port Myco serves to other phones) routes over
+ * the mesh, so neighborhoods can share apps and updates.
  *
  * It also advertises the in-mesh sentinel resolver `fd00::53` as the VPN's DNS
  * server and leaves every app on the tunnel (no [Builder.addAllowedApplication]

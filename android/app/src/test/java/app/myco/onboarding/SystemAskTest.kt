@@ -133,7 +133,6 @@ class SystemAskTest {
         ),
         Regex("""rememberLauncherForActivityResult""") to setOf(
             "ui/MycoApp.kt", // file picker: send files to a peer
-            "ui/screens/CircleScreen.kt", // file picker: hotspot share
             "ui/screens/AccountSettings.kt", // Amber signer login
         ),
         // Only a tap on an explanation makes a Confirmed.

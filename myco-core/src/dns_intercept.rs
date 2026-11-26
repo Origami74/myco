@@ -75,9 +75,8 @@ const RESPONDER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// npubs already resolved through the responder since the current node started.
 ///
-/// `keepwarm_tick` calls [`warm_route`] for every Circle member every 8s. That
-/// used to be an in-memory channel send; it is a UDP round trip now, on the
-/// battery-sensitive background path, so it happens once per npub per node.
+/// [`warm_route`] is a UDP round trip, possibly on a battery-sensitive
+/// background path, so it happens once per npub per node.
 static WARMED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn warmed() -> &'static Mutex<HashSet<String>> {
@@ -216,12 +215,11 @@ fn register_route(npub: &str, addr: SocketAddr) -> bool {
 /// dropped and the address looks unroutable. A *direct* neighbour hides this,
 /// since its identity came from the Noise handshake.
 ///
-/// `keepwarm_tick`'s dials register their peer themselves, right before they
-/// connect ([`mesh_literal_url`]). This is the cheap once-per-node head start
-/// for every Circle member, so a route is already known when something other
-/// than a dial (a napplet, a pull) reaches for it. Fire-and-forget on its own
-/// thread: the caller is a tokio task and this must not be what stalls the
-/// keepwarm loop.
+/// A link's dials register their peer themselves, right before they connect
+/// ([`mesh_literal_url`]). This is the cheap once-per-node head start for a
+/// peer reached some other way (the SOCKS exit), so a route is already known
+/// when it is reached for. Fire-and-forget on its own thread: the caller is a
+/// tokio task and this must not be what stalls it.
 pub fn warm_route(npub: &str) {
     if fips::PeerIdentity::from_npub(npub).is_err() {
         return;
@@ -567,8 +565,8 @@ mod tests {
             Ok(format!("ws://[{ip}]:4870/"))
         );
         assert_eq!(
-            mesh_literal_url_via(&format!("http://{npub}.fips:24243/abc?x=1"), responder).await,
-            Ok(format!("http://[{ip}]:24243/abc?x=1"))
+            mesh_literal_url_via(&format!("http://{npub}.fips:4873/abc?x=1"), responder).await,
+            Ok(format!("http://[{ip}]:4873/abc?x=1"))
         );
         assert_eq!(
             mesh_literal_url_via("wss://relay.example/", responder).await,
@@ -581,7 +579,7 @@ mod tests {
     }
 
     /// Before the node has a responder a `.fips` dial is not ready — the
-    /// signal `peer_relay::dial` uses to leave the peer's backoff alone. Other
+    /// signal a caller uses to leave the peer's backoff alone. Other
     /// hosts don't need the node and pass through.
     #[tokio::test]
     async fn a_fips_dial_without_a_responder_is_not_ready() {

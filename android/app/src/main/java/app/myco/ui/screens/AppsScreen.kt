@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material3.AlertDialog
@@ -120,7 +121,7 @@ import kotlinx.coroutines.withContext
 /**
  * The **Apps** surface: an app-drawer of installed nsites (icon grid + search),
  * each opening as its own fullscreen task. Long-press an app for its sheet
- * (share, add-to-home, info); the "+" tile adds one by pasting a link or scanning.
+ * (share, add-to-home, info); the scan bubble adds one by scanning or pasting a link.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -143,8 +144,8 @@ fun AppsScreen(
     var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
 
     // Share Myco: the choice sheet, and the hotspot sheet it leads to. The
-    // hotspot is the Circle tab's one (HotspotService owns it); this only
-    // opens it worded for handing over the app.
+    // hotspot is HotspotService's; this only opens it worded for handing
+    // over the app.
     var shareMyco by remember { mutableStateOf(false) }
     var mycoHotspot by remember { mutableStateOf(false) }
     val hotspot by HotspotService.view.collectAsState()
@@ -186,12 +187,12 @@ fun AppsScreen(
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
         modifier = Modifier.fillMaxSize(),
-        // The bottom leaves room for the Share Myco bubble over the last row.
+        // The bottom leaves room for the two bubbles over the last rows.
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
             start = APPS_SIDE_PADDING,
             end = APPS_SIDE_PADDING,
             top = 20.dp,
-            bottom = 96.dp,
+            bottom = 160.dp,
         ),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -227,9 +228,6 @@ fun AppsScreen(
                 )
             }
         }
-        item {
-            AddTile { showAdd = true }
-        }
         if (apps.isEmpty() && query.isBlank()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
@@ -243,9 +241,11 @@ fun AppsScreen(
         }
     }
     }
-    ShareMycoBubble(
-        onClick = { shareMyco = true },
-        modifier = Modifier.align(Alignment.BottomEnd).padding(24.dp),
+    // Add an app (scan) bottom-right, as Join on Neighbors; Share Myco above it.
+    app.myco.ui.ActionBubbles(
+        main = app.myco.ui.BubbleAction(Icons.Filled.QrCodeScanner, "Add an app") { showAdd = true },
+        above = app.myco.ui.BubbleAction(Icons.Filled.Share, "Share Myco") { shareMyco = true },
+        modifier = Modifier.align(Alignment.BottomEnd),
     )
     }
 
@@ -271,7 +271,7 @@ fun AppsScreen(
                 else asker?.explain(SystemAsk.Hotspot)
             },
             onStop = { HotspotService.stop(context) },
-            // Handing over the app, not files: the Circle tab's sheet adds those.
+            // Handing over the app, not files.
             onShareFiles = null,
             onDismiss = { mycoHotspot = false },
             forMyco = true,
@@ -308,17 +308,12 @@ fun AppsScreen(
     shareFor?.let { target ->
         ShareQrSheet(
             target = target,
-            pendingRequestCount = state.pendingPairRequests.size,
             onDismiss = { shareFor = null },
         )
     }
 
     if (showAdd) {
-        AddAppSheet(
-            siteCount = state.sites.size,
-            onScanned = { showAdd = false; onScanned(it) },
-            onDismiss = { showAdd = false },
-        )
+        ScanSheet(onScanned = onScanned, onDismiss = { showAdd = false })
     }
 
     // Review is driven by state, not by a local flag: a fetch may finish while
@@ -329,10 +324,9 @@ fun AppsScreen(
             onInstall = { granted ->
                 client.dispatch(NativeActions.installNapplet(review.pointer, granted))
             },
-            // The same fetch again, sharer first — a tap in a room with no
-            // internet fails when the sharer's link is still coming up, and
-            // that is the case a retry is for.
-            onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer, review.holder)) },
+            // The same fetch again — a neighbor's link may have come up
+            // since, and that is the case a retry is for.
+            onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer)) },
             onOpen = {
                 val (pointer, title) = nappletLaunchTarget(review, state.library)
                 client.dispatch(NativeActions.dismissNappletReview())
@@ -1352,7 +1346,7 @@ internal data class Capability(val title: String, val detail: String)
 internal fun capabilityWording(domain: String): Capability = when (domain) {
     "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time. It can also read the private data your apps keep encrypted there")
     "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs. It can also read the private data your apps keep encrypted there")
-    "mesh" -> Capability("Mesh", "Post as you to phones nearby, and read what they share, without asking each time. It can also read the private data your apps keep encrypted on this phone")
+    "neighbor" -> Capability("Neighborhoods", "See the neighborhoods you pick for it, and people nearby, and reach them through your other permissions. It can ask you to start, share or leave a neighborhood")
     "local" -> Capability("Keep on this phone", "Keep notes, and things it showed you, on this phone")
     "identity" -> Capability("Identity", "See your name and profile")
     "resource" -> Capability("Pictures & files", "Load pictures and files by their content hash")
@@ -1368,21 +1362,6 @@ internal fun capabilityWording(domain: String): Capability = when (domain) {
     "config" -> Capability("Settings", "Have settings you can change")
     "shell" -> Capability("Start up", "Every app does this")
     else -> Capability(domain, "Something this version of Myco doesn't know about")
-}
-
-@Composable
-private fun AddTile(onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.combinedClickableSafe(onClick)) {
-        LauncherIcon(
-            // A faint disc from the text colour, so it shows in every theme.
-            background = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
-            content = {
-                Icon(Icons.Filled.Add, contentDescription = "Add app", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-        LauncherLabel("Add", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1438,26 +1417,18 @@ private fun AppSheet(
 private class ShareTarget(val uri: String, val title: String)
 
 /**
- * The **Share an app** surface — a bottom sheet styled like the pair "My code"
- * panel: the share QR plus a prominent tap-phones-together prompt. While it's
+ * The **Share an app** surface — a bottom sheet: the share QR plus a prominent tap-phones-together prompt. While it's
  * visible the device presents the share URI over NFC ([PairPresent.beginRaw]),
  * so a phone tap shares the app exactly like a scan would.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismiss: () -> Unit) {
+private fun ShareQrSheet(target: ShareTarget, onDismiss: () -> Unit) {
     // Emulate an NDEF tag carrying the share URI for as long as the sheet is up.
-    // The reader phone's OS reads it → MainActivity.openSharedNsite (pair + pull).
+    // The reader phone's OS reads it → MainActivity.openSharedNsite (pull).
     DisposableEffect(target.uri) {
         PairPresent.beginRaw(target.uri)
         onDispose { PairPresent.stop() }
-    }
-    // The recipient tapping/scanning sends a pair request back to us. Once one
-    // lands, the share has gone through — drop the sheet and let the normal
-    // accept prompt take over (it's suppressed while we're presenting).
-    val baselineRequests = remember { pendingRequestCount }
-    LaunchedEffect(pendingRequestCount) {
-        if (pendingRequestCount > baselineRequests) onDismiss()
     }
     val qr = remember(target.uri) { NsiteShare.qrBitmap(target.uri) }
     // Open fully expanded (not the half-height detent) so the whole thing — QR plus
@@ -1485,7 +1456,7 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                     Text(target.title, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "Scan to open this app — and pair with this device",
+                        "Scan to open this app",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
@@ -1498,7 +1469,7 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
             }
             Spacer(Modifier.height(12.dp))
             // The headline action: just bump phones (no scanning needed). The
-            // breathing NFC bubble mirrors the Circle tab's tap-to-connect hint.
+            // breathing NFC bubble mirrors the invite sheet's tap-to-connect hint.
             Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -1521,69 +1492,6 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * **Add an app** — a bottom sheet mirroring the share sheet, but with a live
- * camera scanner in place of the QR (you're the one reading a friend's code).
- * A scan, a pasted link, or an NFC tap (handled passively by the OS) all route
- * through [onScanned] → MainActivity.handleScannedText.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AddAppSheet(siteCount: Int, onScanned: (String) -> Unit, onDismiss: () -> Unit) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    // Claim foreground NFC reader mode while we're up — a modal sheet's own window
-    // misses the OS's passive tap dispatch, so the Activity reads the tag directly.
-    DisposableEffect(Unit) {
-        NfcReader.begin()
-        onDispose { NfcReader.stop() }
-    }
-    // A camera scan routes through onScanned (which dismisses us); an NFC tap is read
-    // into MainActivity — either way close the sheet when a new app shows up, to
-    // reveal it downloading in the grid behind us.
-    val baselineSites = remember { siteCount }
-    LaunchedEffect(siteCount) {
-        if (siteCount > baselineSites) onDismiss()
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text("Add an app", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            Box(modifier = Modifier.fillMaxWidth().height(300.dp)) {
-                ScanPanel(onScanned = onScanned)
-            }
-            Spacer(Modifier.height(12.dp))
-            // Same breathing NFC bubble as the share sheet — here you're the reader.
-            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    NfcPulseBubble(size = 44.dp)
-                    Column {
-                        Text(
-                            "Or tap a friend's phone",
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            style = MaterialTheme.typography.titleSmall,
-                        )
-                        Text(
-                            "Hold the backs together to add their app",
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            PasteCodeButton(label = "Paste a link", onPaste = onScanned)
         }
     }
 }

@@ -61,9 +61,8 @@ import app.myco.share.NsiteShare
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 
 /**
- * The file-share hotspot sheet, opened from the Circle tab's hotspot bubble —
- * or from Share Myco on the Apps tab ([forMyco]), which is the same hotspot
- * and page, worded for handing over the app (the page's Get Myco card).
+ * The file-share hotspot sheet, opened from Share Myco on the Apps tab
+ * ([forMyco]: worded for handing over the app, the page's Get Myco card).
  *
  * Off: explains and offers to start. On: the two steps a guest walks —
  * (1) a `WIFI:` QR that joins this phone's hotspot, (2) the file page's

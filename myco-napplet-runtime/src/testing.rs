@@ -451,26 +451,9 @@ impl crate::seams::Signer for AbsentSigner {
 
 /// A context over in-memory seams, for driving capabilities in tests.
 pub fn test_context() -> (crate::dispatch::NapContext, std::sync::Arc<TestSigner>) {
-    let (ctx, _mesh, signer) = test_context_with_mesh(crate::seams::MeshLimits {
-        publish_ttl: 3,
-        subscribe_ttl: 2,
-    });
-    (ctx, signer)
-}
-
-/// As [`test_context`], with the [`MemMesh`] handed back so a test can assert
-/// what reached the mesh, and with the user's caps set to `limits`.
-pub fn test_context_with_mesh(
-    limits: crate::seams::MeshLimits,
-) -> (
-    crate::dispatch::NapContext,
-    std::sync::Arc<MemMesh>,
-    std::sync::Arc<TestSigner>,
-) {
     let signer = std::sync::Arc::new(TestSigner::new());
     let relay: std::sync::Arc<dyn crate::seams::RelayBackend> =
         std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
-    let mesh = std::sync::Arc::new(MemMesh::new(relay.clone(), limits));
     let outbox = std::sync::Arc::new(OutboxFixture::new(relay.clone()));
     let blobs: std::sync::Arc<dyn crate::seams::BlobStore> =
         std::sync::Arc::new(nsite_deck::testing::MemBlobs::new());
@@ -478,7 +461,7 @@ pub fn test_context_with_mesh(
         signer: signer.clone(),
         relay: relay.clone(),
         sink: std::sync::Arc::new(crate::seams::StoreOnlySink(relay)),
-        mesh: mesh.clone(),
+        neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
         outbox: outbox.clone(),
         lanes: outbox,
         blobs: blobs.clone(),
@@ -490,7 +473,7 @@ pub fn test_context_with_mesh(
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
-    (ctx, mesh, signer)
+    (ctx, signer)
 }
 
 /// As [`test_context`], with the [`OutboxFixture`] handed back so a test can
@@ -503,13 +486,6 @@ pub fn test_context_with_outbox() -> (
     let signer = std::sync::Arc::new(TestSigner::new());
     let relay: std::sync::Arc<dyn crate::seams::RelayBackend> =
         std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
-    let mesh = std::sync::Arc::new(MemMesh::new(
-        relay.clone(),
-        crate::seams::MeshLimits {
-            publish_ttl: 3,
-            subscribe_ttl: 2,
-        },
-    ));
     let outbox = std::sync::Arc::new(OutboxFixture::new(relay.clone()));
     let blobs: std::sync::Arc<dyn crate::seams::BlobStore> =
         std::sync::Arc::new(nsite_deck::testing::MemBlobs::new());
@@ -517,7 +493,7 @@ pub fn test_context_with_outbox() -> (
         signer: signer.clone(),
         relay: relay.clone(),
         sink: std::sync::Arc::new(crate::seams::StoreOnlySink(relay)),
-        mesh,
+        neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
         outbox: outbox.clone(),
         lanes: outbox.clone(),
         blobs: blobs.clone(),
@@ -790,7 +766,7 @@ impl OutboxFixture {
 
     fn lanes_of(urls: &[String]) -> Vec<crate::seams::RelayLane> {
         urls.iter()
-            .map(|u| crate::seams::RelayLane::from_url(u))
+            .map(|u| crate::seams::RelayLane::Internet { url: u.clone() })
             .collect()
     }
 }
@@ -907,135 +883,6 @@ impl crate::seams::LaneTransport for OutboxFixture {
             .unwrap()
             .push((lanes.to_vec(), filters.to_vec()));
         Ok(())
-    }
-}
-
-/// A [`MeshSink`](crate::seams::MeshSink) with no mesh behind it: stores a
-/// publish locally and records the hop budget it came with, records every
-/// pull and answers it with what [`MemMesh::answer_pulls_with`] staged, and
-/// reports whatever reach a test sets. It answers `mesh.blobs` from
-/// a table a test sets with [`MemMesh::set_blob_holders`], and not at all
-/// until then.
-pub struct MemMesh {
-    store: std::sync::Arc<dyn crate::seams::RelayBackend>,
-    limits: std::sync::Mutex<crate::seams::MeshLimits>,
-    reach: std::sync::Mutex<crate::seams::MeshReach>,
-    published: std::sync::Mutex<Vec<(Event, u8)>>,
-    rebroadcast: std::sync::Mutex<Vec<(Event, u8)>>,
-    pulled: std::sync::Mutex<Vec<(Vec<serde_json::Value>, u8)>>,
-    pull_answers: std::sync::Mutex<Vec<Event>>,
-    blob_holders: std::sync::Mutex<Option<crate::seams::BlobReach>>,
-    blob_asks: std::sync::Mutex<Vec<Vec<String>>>,
-}
-
-impl MemMesh {
-    pub fn new(
-        store: std::sync::Arc<dyn crate::seams::RelayBackend>,
-        limits: crate::seams::MeshLimits,
-    ) -> Self {
-        Self {
-            store,
-            limits: std::sync::Mutex::new(limits),
-            reach: std::sync::Mutex::new(crate::seams::MeshReach::default()),
-            published: std::sync::Mutex::new(Vec::new()),
-            rebroadcast: std::sync::Mutex::new(Vec::new()),
-            pulled: std::sync::Mutex::new(Vec::new()),
-            pull_answers: std::sync::Mutex::new(Vec::new()),
-            blob_holders: std::sync::Mutex::new(None),
-            blob_asks: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Answer `mesh.blobs` as if `peers` peers were asked and `held` lists
-    /// how many of them hold each hash; any other hash is held by none.
-    pub fn set_blob_holders(&self, peers: usize, held: &[(&str, usize)]) {
-        *self.blob_holders.lock().unwrap() = Some(crate::seams::BlobReach {
-            peers,
-            holders: held.iter().map(|(h, n)| (h.to_string(), *n)).collect(),
-        });
-    }
-
-    /// Every `mesh.blobs` ask that reached the seam, with its hashes.
-    pub fn blob_asks(&self) -> Vec<Vec<String>> {
-        self.blob_asks.lock().unwrap().clone()
-    }
-
-    /// Every event passed on as it is ([`MeshSink::rebroadcast`]), with its
-    /// hop budget. Kept apart from [`MemMesh::published`] so a test can tell
-    /// the two doors apart.
-    ///
-    /// [`MeshSink::rebroadcast`]: crate::seams::MeshSink::rebroadcast
-    pub fn rebroadcasts(&self) -> Vec<(Event, u8)> {
-        self.rebroadcast.lock().unwrap().clone()
-    }
-
-    /// Every event published, with the hop budget it was given.
-    pub fn published(&self) -> Vec<(Event, u8)> {
-        self.published.lock().unwrap().clone()
-    }
-
-    /// Every pull requested: the raw filters and the hop budget.
-    pub fn pulled(&self) -> Vec<(Vec<serde_json::Value>, u8)> {
-        self.pulled.lock().unwrap().clone()
-    }
-
-    /// What peers answer every later pull with, in order.
-    pub fn answer_pulls_with(&self, events: Vec<Event>) {
-        *self.pull_answers.lock().unwrap() = events;
-    }
-
-    /// Change the caps under a running context, as a settings change would.
-    pub fn set_limits(&self, limits: crate::seams::MeshLimits) {
-        *self.limits.lock().unwrap() = limits;
-    }
-
-    pub fn set_reach(&self, online: bool, peers: usize) {
-        *self.reach.lock().unwrap() = crate::seams::MeshReach { online, peers };
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::seams::MeshSink for MemMesh {
-    async fn limits(&self) -> crate::seams::MeshLimits {
-        *self.limits.lock().unwrap()
-    }
-
-    async fn reach(&self) -> anyhow::Result<crate::seams::MeshReach> {
-        Ok(*self.reach.lock().unwrap())
-    }
-
-    async fn publish(&self, event: Event, ttl: u8) -> anyhow::Result<()> {
-        self.store.publish(event.clone()).await?;
-        self.published.lock().unwrap().push((event, ttl));
-        Ok(())
-    }
-
-    async fn rebroadcast(&self, event: Event, ttl: u8) -> anyhow::Result<()> {
-        self.store.publish(event.clone()).await?;
-        self.rebroadcast.lock().unwrap().push((event, ttl));
-        Ok(())
-    }
-
-    async fn pull(
-        &self,
-        filters: Vec<serde_json::Value>,
-        ttl: u8,
-    ) -> anyhow::Result<crate::seams::PulledEvents> {
-        self.pulled.lock().unwrap().push((filters, ttl));
-        let answers = self.pull_answers.lock().unwrap().clone();
-        Ok(Box::pin(futures_util::stream::iter(answers)))
-    }
-
-    async fn blob_holders(&self, hashes: &[String]) -> Option<crate::seams::BlobReach> {
-        let table = self.blob_holders.lock().unwrap().clone()?;
-        self.blob_asks.lock().unwrap().push(hashes.to_vec());
-        Some(crate::seams::BlobReach {
-            peers: table.peers,
-            holders: hashes
-                .iter()
-                .map(|h| (h.clone(), table.holders.get(h).copied().unwrap_or(0)))
-                .collect(),
-        })
     }
 }
 

@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableStateOf
  *
  * Needed because the share/add surfaces are [androidx.compose.material3.ModalBottomSheet]s
  * shown in their own focused window: there the OS's passive `NDEF_DISCOVERED` intent
- * dispatch (what the Circle full-screen relies on) no longer reaches the Activity,
+ * dispatch (what the full-screen scan surface relies on) no longer reaches the Activity,
  * so a tap goes unnoticed. Reader mode is foreground-scoped and works regardless of
  * which window has focus.
  *

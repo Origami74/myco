@@ -6,14 +6,12 @@
 //! into the shell: the napplet hands over filters and intent, the shell
 //! resolves the relays, asks them, deduplicates by id and says how sure it is.
 //!
-//! ## The three lanes
+//! ## The two lanes
 //!
-//! A plan is a list of [`RelayLane`]s — this device's relay, a Circle peer's
-//! relay over the mesh, or an internet relay — because a NIP-65 list can name
-//! `ws://<npub>.fips:4870` beside `wss://` relays and the outbox model works
-//! unmodified (design §7.4). A mesh lane here is a *directed* connection to
-//! one peer's relay. It is not the flood: that is NAP-MESH's, behind its own
-//! grant and a hop budget, and nothing in this domain reaches it.
+//! A plan is a list of [`RelayLane`]s — this device's relay, or an internet
+//! relay. A `.fips` URL (a peer's relay over the mesh) is refused: what people
+//! nearby share travels through NAP-NEIGHBOR, and nothing in this domain
+//! reaches a peer.
 //!
 //! ## What is awaited and what is not
 //!
@@ -39,9 +37,7 @@ use nostr::{Event, EventId, Filter, PublicKey};
 
 use crate::dispatch::NapContext;
 use crate::nap::relay::{event_json, filters_from, signed_or_template};
-use crate::seams::{
-    is_mesh_relay_url, mesh_relay_npub, mesh_relay_url, Direction, Envelope, RelayLane, RelayPlan,
-};
+use crate::seams::{Direction, Envelope, RelayLane, RelayPlan};
 use crate::session::Session;
 
 /// How long a read waits for its lanes when the napplet did not say.
@@ -53,8 +49,7 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(8);
 /// napplet is told it succeeded. The rest keep going in the background: one
 /// slow relay out of five used to hold every "Published" for the full
 /// timeout. Two, not one, so a success means the event is findable from more
-/// than a single server — or, for a mesh lane, handed to more than one
-/// Circle member's connection.
+/// than a single server.
 const PUBLISH_QUORUM: usize = 2;
 /// How long the answer waits for the `toInboxes` relays. NAP-OUTBOX makes
 /// each a required target whose failure must be reported, so the answer
@@ -64,8 +59,8 @@ const PUBLISH_QUORUM: usize = 2;
 /// hold "Published" for the full [`PUBLISH_TIMEOUT`] on the slowest of them,
 /// and for every one of the user's own outbox relays too.
 const INBOX_WAIT: Duration = Duration::from_secs(3);
-/// Bounds on a napplet-supplied `timeoutMs`: below the floor a relay across
-/// the mesh cannot answer, above the ceiling the session loop is hostage.
+/// Bounds on a napplet-supplied `timeoutMs`: below the floor a distant relay
+/// cannot answer, above the ceiling the session loop is hostage.
 const MIN_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -107,11 +102,22 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
         Ok(authors) => authors,
         Err(e) => return message.to_error(e),
     };
-    let hints = match hint_lanes(options) {
+    let (hints, addresses) = match hint_lanes(options) {
         Ok(hints) => hints,
         Err(e) => return message.to_error(e),
     };
     let timeout = timeout_in(options, DEFAULT_READ_TIMEOUT);
+    // Named neighborhoods are read through the host, never as lanes.
+    let from_addresses = if addresses.is_empty() {
+        Vec::new()
+    } else {
+        match crate::nap::neighbor::route::read(ctx, session, &addresses, &[Filter::new().id(id)])
+            .await
+        {
+            Ok(events) => events,
+            Err(e) => return message.to_error(e.as_str()),
+        }
+    };
 
     let plan = ctx
         .outbox
@@ -124,7 +130,7 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
     );
     // One id is one event, and an event never changes: the first lane to
     // have it — this device's included — is the answer.
-    let answers = ctx
+    let mut answers = ctx
         .lanes
         .query_early(
             &lanes,
@@ -137,6 +143,7 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
             &session.work(),
         )
         .await;
+    answers.push((RelayLane::Local, Some(from_addresses)));
 
     let mut found: Option<Event> = None;
     let mut hints_for: Vec<String> = Vec::new();
@@ -191,7 +198,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
         }
     }
     let authors = dedupe_keys(authors);
-    let hints = match hint_lanes(options) {
+    let (hints, addresses) = match hint_lanes(options) {
         Ok(hints) => hints,
         Err(e) => return message.to_error(e),
     };
@@ -200,6 +207,15 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
         .and_then(|o| o.get("limit"))
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
+    // Named neighborhoods are read through the host, never as lanes.
+    let from_addresses = if addresses.is_empty() {
+        Vec::new()
+    } else {
+        match crate::nap::neighbor::route::read(ctx, session, &addresses, &filters).await {
+            Ok(events) => events,
+            Err(e) => return message.to_error(e.as_str()),
+        }
+    };
 
     let plan = ctx
         .outbox
@@ -210,7 +226,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
             .chain(plan.lanes.iter().cloned())
             .chain(hints),
     );
-    let answers = ctx
+    let mut answers = ctx
         .lanes
         .query_early(
             &lanes,
@@ -220,6 +236,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
             &session.work(),
         )
         .await;
+    answers.push((RelayLane::Local, Some(from_addresses)));
 
     let mut incomplete = !plan.missing_authors.is_empty();
     let (events, hints_by_id) = merge(answers, &mut incomplete);
@@ -270,18 +287,36 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         }
     }
     let authors = dedupe_keys(authors);
-    let hints = match hint_lanes(options) {
+    let (hints, addresses) = match hint_lanes(options) {
         Ok(hints) => hints,
         Err(e) => return closed(e),
     };
+    if !addresses.is_empty() && !session.is_granted("neighbor") {
+        return closed(super::neighbor::NeighborError::Denied.as_str().to_string());
+    }
 
-    let out =
+    let mut out =
         match crate::nap::open_subscription(ctx, session, "outbox", &sub_id, &filters, Vec::new())
             .await
         {
             Ok(backlog) => backlog,
             Err(reason) => return closed(reason),
         };
+    // Named neighborhoods followed through the host, as `relay.subscribe`
+    // on each address is.
+    if !addresses.is_empty() {
+        match crate::nap::neighbor::route::follow(
+            ctx, session, "outbox", &sub_id, &filters, &addresses,
+        )
+        .await
+        {
+            Ok(frames) => out.extend(frames),
+            Err(e) => {
+                session.unsubscribe_in("outbox", &sub_id);
+                return closed(e.as_str().to_string());
+            }
+        }
+    }
 
     if let Err(e) = ctx
         .lanes
@@ -302,14 +337,14 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
 /// `outbox.publish` — sign once, fan out to the user's outbox, the named
 /// inboxes and any validated explicit relays, and say per relay how it went.
 /// An event the napplet was delivered goes out as it is (NAP-LOCAL); the
-/// local lane keeps it either way.
+/// local lane keeps it, unless it was published into a neighborhood address.
 async fn publish(
     ctx: &NapContext,
     session: &crate::session::Session,
     message: &Envelope,
 ) -> Envelope {
     let options = options_of(message);
-    let explicit = match hint_lanes(options) {
+    let (explicit, addresses) = match hint_lanes_and_addresses(options) {
         Ok(hints) => hints,
         Err(e) => return failed(message, e),
     };
@@ -325,7 +360,16 @@ async fn publish(
     // Plans first, template second: a fanout that cannot be satisfied is
     // reported before anything is signed, so a refused publish leaves no
     // event behind.
-    let mut lanes: Vec<RelayLane> = vec![RelayLane::Local];
+    // NAP-NEIGHBOR: traffic to a neighborhood address goes only to its
+    // peers, never to this device's relay as a side effect; there every
+    // napplet's device-wide subscription would see it. What the napplet
+    // asks for besides (`toOutbox`, inboxes, relay URLs) still goes out.
+    let keep_here = addresses.is_empty();
+    let mut lanes: Vec<RelayLane> = if keep_here {
+        vec![RelayLane::Local]
+    } else {
+        Vec::new()
+    };
     if to_outbox {
         let Ok(user) = ctx.signer.public_key().await else {
             return failed(message, "there is no user key on this device yet");
@@ -352,9 +396,35 @@ async fn publish(
         Err(e) => return failed(message, e),
     };
 
-    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, &required).await;
-    if !stored {
+    let (stored, mut relays) = if lanes.is_empty() {
+        (false, serde_json::Map::new())
+    } else {
+        publish_to_quorum(ctx, lanes, &signed, &required).await
+    };
+    if keep_here && !stored {
         return failed(message, "could not store the event");
+    }
+    // NAP-NEIGHBOR: each address is reported like a relay, under the address
+    // the napplet named.
+    let mut refused = None;
+    let mut any_address = false;
+    for (addr, r) in crate::nap::neighbor::route::publish(ctx, session, &addresses, &signed).await {
+        match &r {
+            Ok(_) => any_address = true,
+            Err(e) => {
+                tracing::info!(error = %e, "neighborhood publish refused");
+                refused.get_or_insert_with(|| e.as_str().to_string());
+            }
+        }
+        relays.insert(addr, serde_json::Value::Bool(r.is_ok()));
+    }
+    // Only addresses, and none took it: nothing holds the event.
+    if !keep_here && !any_address && !relays.values().any(|v| v.as_bool() == Some(true)) {
+        return failed(
+            message,
+            refused.unwrap_or_else(|| "could not store the event".to_string()),
+        )
+        .with_field("relays", serde_json::Value::Object(relays));
     }
 
     let id = signed.id.to_hex();
@@ -485,14 +555,24 @@ fn dedupe(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane> {
 /// ten is already more than any real list.
 pub const MAX_HINT_RELAYS: usize = 10;
 
-/// `options.relays`, validated. A napplet may name relays; it may not make the
-/// shell connect to a loopback or private-network address, and it may not
-/// name so many that one call opens thousands of sockets.
+/// `options.relays` for a read: relay lanes, and `neighborhood:` addresses,
+/// which are read through the host as `relay.subscribe` on the address is
+/// ([`crate::nap::neighbor::route::read`]). NAP-NEIGHBOR accepts them here.
 fn hint_lanes(
     options: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Result<Vec<RelayLane>, String> {
+) -> Result<(Vec<RelayLane>, Vec<String>), String> {
+    hint_lanes_and_addresses(options)
+}
+
+/// `options.relays`, validated, with `neighborhood:` addresses set apart for
+/// the host. A napplet may name relays; it may not make the shell connect to
+/// a loopback or private-network address, and it may not name so many that
+/// one call opens thousands of sockets. Addresses count toward that cap.
+fn hint_lanes_and_addresses(
+    options: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<(Vec<RelayLane>, Vec<String>), String> {
     let Some(raw) = options.and_then(|o| o.get("relays")) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let Some(items) = raw.as_array() else {
         return Err("relays must be a list of URLs".to_string());
@@ -501,18 +581,25 @@ fn hint_lanes(
         return Err(format!("at most {MAX_HINT_RELAYS} relays may be named"));
     }
     let mut out = Vec::with_capacity(items.len());
+    let mut addresses = Vec::new();
     for item in items {
         let Some(url) = item.as_str() else {
             return Err("relays must be a list of URLs".to_string());
         };
+        if crate::nap::neighbor::address::is_address(url) {
+            if !addresses.iter().any(|a| a == url) {
+                addresses.push(url.to_string());
+            }
+            continue;
+        }
         out.push(validate_relay_url(url)?);
     }
-    Ok(out)
+    Ok((out, addresses))
 }
 
-/// Accept `ws://` and `wss://` URLs to public hosts and to `.fips` mesh
-/// peers; refuse anything that would point the shell at itself or at a
-/// private network.
+/// Accept `ws://` and `wss://` URLs to public hosts; refuse anything that
+/// would point the shell at itself, at a private network, or at a `.fips`
+/// mesh peer.
 ///
 /// Parsed by the `url` crate — the same parser the WebSocket client uses —
 /// so the host *we* judge is the host *it* dials. Hand-splitting the
@@ -521,9 +608,7 @@ fn hint_lanes(
 /// parser also normalises `127.1`, `2130706433`, `0x7f000001` and
 /// `0177.0.0.1` to `127.0.0.1` before we look, so no shorthand slips past.
 ///
-/// An Internet lane keeps the URL as given; a `.fips` lane is rebuilt from
-/// its npub and never carries the napplet's string (see [`mesh_relay_npub`]).
-/// What a public *name* resolves to is checked again at the dial site, since
+/// The lane keeps the URL as given. What a public *name* resolves to is checked again at the dial site, since
 /// resolving is the dialler's, not this crate's.
 pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
     use nostr::types::url::Host;
@@ -532,21 +617,13 @@ pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
     if !matches!(parsed.scheme(), "ws" | "wss") {
         return Err(format!("relay URL must be ws:// or wss://: {url}"));
     }
-    // Classified leniently (a `?`, `#` or `@` glued to the host counts too)
-    // so a malformed `.fips` URL is refused here, with the mesh shape named
-    // as the reason, rather than falling through to the Internet branch.
-    let looks_mesh = is_mesh_relay_url(url)
-        || matches!(parsed.host(), Some(Host::Domain(d)) if d.ends_with(".fips"));
-    if looks_mesh {
-        // Never carry the string as given: the lane holds the canonical
-        // `ws://<npub>.fips:4870` rebuilt from the npub, so no userinfo, port
-        // or path a napplet wrote can reach the peer pool.
-        let npub = mesh_relay_npub(url).ok_or_else(|| {
-            "mesh relay URL must be ws://<npub>.fips:4870 with no userinfo or path".to_string()
-        })?;
-        return Ok(RelayLane::Mesh {
-            url: mesh_relay_url(&npub),
-        });
+    // A `.fips` name is a peer's relay over the mesh, which no napplet
+    // reaches through this domain. Refused before the userinfo check so the
+    // reason names the mesh; `@` userinfo glued to a `.fips` label is
+    // refused there too.
+    if matches!(parsed.host(), Some(Host::Domain(d)) if d.trim_end_matches('.').ends_with(".fips"))
+    {
+        return Err(format!("mesh relay URLs are not supported: {url}"));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!("relay URL must not carry userinfo: {url}"));
@@ -1142,47 +1219,27 @@ mod tests {
                 url: "wss://relay.damus.io".into()
             }
         );
-        assert_eq!(
-            validate_relay_url("ws://npub1abc.fips:4870").unwrap(),
-            RelayLane::Mesh {
-                url: "ws://npub1abc.fips:4870".into()
-            }
-        );
 
-        // A `.fips` URL is only ever the canonical `ws://<npub>.fips:4870`.
-        // `ws://npub1peer.fips:4870@evil.example/` is userinfo on
-        // `evil.example` to the WebSocket client; a wrong port points the
-        // pool at the peer's Blossom and mutes the peer; a path or query is
-        // nothing a mesh relay has. All refused, never fall through to
-        // Internet (H2 of the PR #52 review).
+        // A `.fips` URL is a peer's relay over the mesh: never a lane, and
+        // never fallen through to Internet (H2 of the PR #52 review).
         for bad in [
-            "ws://npub1peer.fips:4870@evil.example/",
+            "ws://npub1abc.fips:4870",
+            "ws://npub1peer.fips",
             "ws://npub1peer.fips:24243",
             "ws://npub1peer.fips:4870/path",
             "ws://npub1peer.fips?x=1",
             "ws://npub1peer.fips#frag",
-            "ws://user@npub1peer.fips:4870",
             "ws://evil.fips:4870",
-            "ws://npub1-peer.fips:4870",
+            "wss://npub1peer.fips",
         ] {
             let err = validate_relay_url(bad).unwrap_err();
-            assert!(
-                err.contains("ws://<npub>.fips:4870"),
-                "{bad} gave the wrong error: {err}"
-            );
+            assert!(err.contains("mesh"), "{bad} gave the wrong error: {err}");
         }
-        for (loose, canonical) in [
-            ("ws://npub1peer.fips", "ws://npub1peer.fips:4870"),
-            ("ws://npub1peer.fips:4870/", "ws://npub1peer.fips:4870"),
-            ("ws://npub1peer.fips/", "ws://npub1peer.fips:4870"),
+        for bad in [
+            "ws://npub1peer.fips:4870@evil.example/",
+            "ws://user@npub1peer.fips:4870",
         ] {
-            assert_eq!(
-                validate_relay_url(loose).unwrap(),
-                RelayLane::Mesh {
-                    url: canonical.into()
-                },
-                "{loose} should be rebuilt as {canonical}"
-            );
+            assert!(validate_relay_url(bad).is_err(), "{bad} was accepted");
         }
     }
 
@@ -1199,7 +1256,7 @@ mod tests {
             m
         };
         let ten = urls(MAX_HINT_RELAYS);
-        assert_eq!(hint_lanes(Some(&ten)).unwrap().len(), MAX_HINT_RELAYS);
+        assert_eq!(hint_lanes(Some(&ten)).unwrap().0.len(), MAX_HINT_RELAYS);
         let eleven = urls(MAX_HINT_RELAYS + 1);
         let err = hint_lanes(Some(&eleven)).unwrap_err();
         assert_eq!(err, "at most 10 relays may be named");

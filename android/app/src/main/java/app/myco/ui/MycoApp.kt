@@ -4,7 +4,6 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.net.Uri
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -61,8 +60,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.listSaver
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,9 +83,6 @@ import androidx.compose.ui.platform.LocalContext
 import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
-import app.myco.core.CircleContact
-import app.myco.core.FileTransfer
-import app.myco.core.NativeActions
 import app.myco.core.forShell
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
@@ -96,14 +90,8 @@ import app.myco.onboarding.SetupNotice
 import app.myco.ui.onboarding.SetupSnackbar
 import app.myco.ui.onboarding.SetupSnackbarVisuals
 import app.myco.share.DeviceName
-import app.myco.share.PairSecrets
-import app.myco.ui.screens.PairConnectedDialog
-import app.myco.ui.screens.PairPendingDialog
-import app.myco.ui.screens.PeerShareSheet
 import app.myco.ui.screens.AppsScreen
-import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
-import app.myco.ui.screens.QrScreen
 import app.myco.update.rememberSoftwareUpdates
 import app.myco.update.SoftwareUpdateBanner
 import app.myco.ui.screens.SettingsScreen
@@ -118,7 +106,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * The consumer shell: a bottom-nav app over four surfaces — **Apps** (the nsite
- * launcher), **Circle** (paired peers), **Settings**, and **Dev** (diagnostics).
+ * launcher), **Neighbors** (neighborhoods),
+ * **Settings**, and **Dev** (diagnostics).
  * The Rust `AppState` is polled once a second here and handed down to every tab,
  * so all screens share one read: the tabs get its [forShell] projection, and
  * the diagnostics screens the full snapshot through [LocalLiveState].
@@ -127,19 +116,9 @@ private data class Tab(val route: String, val label: String, val icon: ImageVect
 
 private val TABS = listOf(
     Tab("apps", "Apps", Icons.Filled.GridView),
-    Tab("circle", "Circle", Icons.Filled.People),
+    Tab("neighbors", "Neighbors", Icons.Filled.People),
     Tab("settings", "Settings", Icons.Filled.Settings),
     Tab("dev", "Dev", Icons.Filled.Terminal),
-)
-
-/**
- * Picked share URIs across a configuration change. A `Uri` is Parcelable, but the
- * list handed back by the picker is not guaranteed to be a shape the default saver
- * can store, so save the strings and parse them back.
- */
-private val UriListSaver = listSaver<List<Uri>, String>(
-    save = { it.map(Uri::toString) },
-    restore = { it.map(Uri::parse) },
 )
 
 @Composable
@@ -175,18 +154,6 @@ fun MycoApp(
     onExitProxyChange: (String) -> Unit = {},
     /** Clears the intro's "already seen" flag so it plays in full again. */
     onReplayIntro: () -> Unit = {},
-    /** Documents received from Android's system Sharesheet. */
-    externalShareUris: List<Uri> = emptyList(),
-    onExternalShareDismissed: () -> Unit = {},
-    /** Selected peer hand-off; the native file transport will plug in here. */
-    onShareToPeer: (List<Uri>, CircleContact) -> Unit = { _, _ -> },
-    /** Copies a completed native receive into a user-visible Android location. */
-    onFileReceived: (FileTransfer) -> Unit = {},
-    /** Completed receive currently shown in the app-root preview dialog. */
-    receivedFile: FileTransfer? = null,
-    receivedFileUri: Uri? = null,
-    onDismissReceivedFile: () -> Unit = {},
-    onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
     // Two views of one poll. `live` is the full latest snapshot, provided as
     // [LocalLiveState] to the screens that draw per-second diagnostics. `state`
@@ -213,17 +180,6 @@ fun MycoApp(
     var lanEnabled by remember { mutableStateOf(initialLanEnabled) }
     // BLE advertiser exhaustion (set by the radio, read here for the Settings badge).
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
-    // Name of a peer we just connected to (drives the "connected" celebration).
-    var justConnected by remember { mutableStateOf<String?>(null) }
-    // Name of a peer we just invited who hasn't accepted yet — drives the
-    // "waiting" dialog, so a bump that can't be delivered says so.
-    var justInvited by remember { mutableStateOf<String?>(null) }
-    var dismissedFileOffers by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var handledReceivedFiles by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var showMycoAppPicker by remember { mutableStateOf(false) }
-    val knownInvites = remember { mutableStateOf(state.outboundPairs.map { it.npub }.toSet()) }
-    // Circle members we already knew about — anything new means a fresh pairing.
-    val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
     val context = LocalContext.current
     // Re-poll the native state each second (every two on a low-RAM device) off
     // the main thread (it crosses JNI into the Rust core). Pure read — does not
@@ -250,72 +206,7 @@ fun MycoApp(
         }
     }
 
-    // Auto-accept while presenting (QR/NFC): a request whose secret is one we just
-    // issued is proof the peer read our live code. Consuming it is single-use, so a
-    // replayed code can't pair again; those fall through to the manual inbox.
-    androidx.compose.runtime.LaunchedEffect(state.pendingPairRequests) {
-        // Auto-accept is a *pairing* behavior: while the file-share hotspot owns
-        // the NFC surface no pair code is presented, so nothing may pair silently.
-        if (!PairPresent.presenting || PairPresent.hotspotActive) return@LaunchedEffect
-        for (req in state.pendingPairRequests) {
-            if (PairSecrets.consume(context, req.secret)) {
-                publish(client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name)))
-                PairPresent.rotate(context, state.ownNpub, DeviceName.current(context, state.ownNpub))
-            }
-        }
-    }
-
-    // Celebrate any new Circle member — fires on BOTH sides of a pairing (the one
-    // who accepted and the one whose request was accepted), so both see "connected".
-    androidx.compose.runtime.LaunchedEffect(state.circle) {
-        val current = state.circle.map { it.npub }.toSet()
-        val added = current - knownCircle.value
-        if (added.isNotEmpty()) {
-            state.circle.firstOrNull { it.npub in added }?.let { justConnected = it.name.ifEmpty { "a device" } }
-        }
-        knownCircle.value = current
-    }
-
-    // An invite that just started waiting. Only *new* ones raise the dialog:
-    // the list persists until they accept, so keying on its contents alone
-    // would re-open it on every poll.
-    androidx.compose.runtime.LaunchedEffect(state.outboundPairs) {
-        val current = state.outboundPairs.map { it.npub }.toSet()
-        val added = current - knownInvites.value
-        if (added.isNotEmpty()) {
-            state.outboundPairs.firstOrNull { it.npub in added }?.let {
-                // Resolve the name the same way every other surface does, so an
-                // invite recorded without one says the peer's npub-derived name
-                // rather than borrowing whatever string happened to be stored.
-                justInvited = peerLabel(state, it.npub)
-            }
-        }
-        knownInvites.value = current
-    }
-
-    // Native transfer completion happens in Rust. Copy the decrypted file into
-    // Android's Downloads through the activity-owned MediaStore bridge exactly
-    // once per transfer.
-    androidx.compose.runtime.LaunchedEffect(state.fileTransfers) {
-        state.fileTransfers
-            .filter { it.status == "completed" && it.publishPending && it.receivedPath.isNotEmpty() }
-            .filterNot { it.id in handledReceivedFiles }
-            .forEach { transfer ->
-                handledReceivedFiles = handledReceivedFiles + transfer.id
-                onFileReceived(transfer)
-            }
-    }
-
     val nav = rememberNavController()
-    // "Send a file" from a Circle contact: remember who, then let the user pick what.
-    // Saveable, not merely remembered: the document picker is another activity, and
-    // a rotation behind it — or the sheet rotating afterwards — would otherwise drop
-    // the contact and the picks on the floor, leaving the user to start over with no
-    // sign of why.
-    var sendFileNpub by rememberSaveable { mutableStateOf<String?>(null) }
-    var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
-        mutableStateOf<List<Uri>>(emptyList())
-    }
     // The setup popup's parting word, or a one-off notice. A "Settings" tap
     // goes to Settings › Permissions, where everything setup skipped can be
     // fixed — or, for news, to Settings itself.
@@ -335,23 +226,21 @@ fun MycoApp(
         // Last: clearing it changes this effect's key and cancels it.
         onSetupNoticeShown()
     }
-    val pickFilesForPeer = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) pickedShareUris = uris else sendFileNpub = null
-    }
     // Keep the navigation host and all transient surfaces in one app-root layer.
-    // File offers must not be owned by Circle or any other selected destination.
     Box(Modifier.fillMaxSize()) {
         androidx.compose.runtime.CompositionLocalProvider(
             LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
             LocalLiveState provides live,
         ) {
     val current by nav.currentBackStackEntryAsState()
-    // The full-screen pairing / Add surfaces hide the tab bar.
+    // The full-screen Add surface hides the tab bar.
     val showTabs = current?.destination?.route != "qr"
     val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
-    val isSelected = { tab: Tab -> current?.destination?.hierarchy?.any { it.route == tab.route } == true }
+    val isSelected = { tab: Tab ->
+        current?.destination?.hierarchy?.any { it.route == tab.route } == true ||
+            // A neighborhood's page belongs to the Neighbors tab.
+            (tab.route == "neighbors" && current?.destination?.route?.startsWith("neighborhood/") == true)
+    }
     val select = { tab: Tab ->
         nav.navigate(tab.route) {
             popUpTo(nav.graph.findStartDestination().id) { saveState = true }
@@ -364,7 +253,8 @@ fun MycoApp(
             tab.route == "settings" &&
                 (bleExhausted || radioAlert || backendErrors(state).isNotEmpty() || softwareUpdateState.availableTag != null)
             ) ||
-            (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
+            (tab.route == "neighbors" &&
+                state.neighborhoods.links.any { it.pending.isNotEmpty() })
         if (badged) {
             BadgedBox(badge = { Badge() }) {
                 Icon(tab.icon, contentDescription = tab.label)
@@ -423,6 +313,16 @@ fun MycoApp(
             }
         }
         Surface(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.background) {
+            // A neighborhood invitation from any tab's scan, a tap or a link.
+            app.myco.neighbor.IncomingInvite.pending.value?.let { invite ->
+                // A second invitation arriving gets a fresh sheet, not this
+                // one's state swapped under the user's thumb.
+                androidx.compose.runtime.key(invite.raw) {
+                    app.myco.neighbor.JoinConfirmSheet(invite, client, state.ownNpub) {
+                        app.myco.neighbor.IncomingInvite.pending.value = null
+                    }
+                }
+            }
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
                     AppsScreen(
@@ -435,14 +335,26 @@ fun MycoApp(
                         onScanned = onScanned,
                     )
                 }
-                composable("circle") {
-                    CircleScreen(
+                composable("neighbors") {
+                    app.myco.neighbor.NeighborsScreen(
                         state,
                         client,
-                        onOpenQr = { nav.navigate("qr") },
-                        onSendFile = { peer ->
-                            sendFileNpub = peer.npub
-                            pickFilesForPeer.launch(arrayOf("*/*"))
+                        onOpenNeighborhood = { id -> nav.navigate("neighborhood/$id") },
+                        onScanned = onScanned,
+                    )
+                }
+                composable("neighborhood/{id}") { entry ->
+                    app.myco.neighbor.NeighborhoodPage(
+                        id = entry.arguments?.getString("id").orEmpty(),
+                        state = state,
+                        client = client,
+                        // Leaving pops back, and the page then notices the
+                        // neighborhood is gone and asks again: only pop while
+                        // a neighborhood page is actually on top.
+                        onBack = {
+                            if (nav.currentDestination?.route?.startsWith("neighborhood/") == true) {
+                                nav.popBackStack()
+                            }
                         },
                     )
                 }
@@ -473,51 +385,12 @@ fun MycoApp(
                         onReplayIntro = onReplayIntro,
                     )
                 }
-                composable("dev") { DevScreen(client) }
-                composable("qr") {
-                    QrScreen(
-                        state = state,
-                        onScanned = { text -> nav.popBackStack(); onScanned(text) },
-                        onBack = { nav.popBackStack() },
-                    )
-                }
+                composable("dev") { DevScreen() }
             }
         }
         } // Row
     }
         } // CompositionLocalProvider(LocalMeshControl)
-
-        // The incoming-offer prompt is the one piece of transfer UI that has to
-        // sit above everything: it interrupts. Progress lives where the user
-        // went looking for it — the share sheet, and the Circle tab.
-        FileOfferLayer(
-            offer = state.fileTransfers.firstOrNull {
-                it.direction == "incoming" &&
-                    it.status == "waiting_user" &&
-                    it.id !in dismissedFileOffers
-            },
-            onAccept = {
-                dismissedFileOffers = dismissedFileOffers + it.id
-                publish(client.dispatch(NativeActions.acceptFileTransfer(it.id)))
-            },
-            onDeny = {
-                dismissedFileOffers = dismissedFileOffers + it.id
-                publish(client.dispatch(NativeActions.declineFileTransfer(it.id)))
-            },
-        )
-
-    // Incoming pair requests now live in the persistent Requests inbox (badged on
-    // the Circle tab + surfaced on the pairing home), not a transient pop-up.
-    justInvited?.let { name ->
-        // Suppressed once they are actually in the Circle — an invite accepted
-        // before this was dismissed should show the celebration, not the wait.
-        if (state.circle.none { it.name == name }) {
-            PairPendingDialog(theirName = name, onDone = { justInvited = null })
-        }
-    }
-    justConnected?.let { name ->
-        PairConnectedDialog(theirName = name, onDone = { justConnected = null })
-    }
 
     // A hotspot guest started a transfer — pop the AirDrop-style accept/reject
     // dialog wherever in the app you are (their browser is blocked on this
@@ -562,82 +435,6 @@ fun MycoApp(
         )
     }
 
-    // Completed native receives are also app-root UI. This remains visible when
-    // the user accepted from Apps, Circle, Settings, or Dev; it is not attached
-    // to the Circle destination that initiated pairing.
-    val completedTransfer = receivedFile
-    val completedUri = receivedFileUri
-    if (completedTransfer != null && completedUri != null) {
-        ReceivedFileDialog(
-            transfer = completedTransfer,
-            receivedUri = completedUri,
-            onOpenWithMycoApp = { showMycoAppPicker = true },
-            onOpenWithAnotherApp = { onOpenReceivedFile(completedTransfer, completedUri) },
-            onDismiss = onDismissReceivedFile,
-        )
-    }
-    if (showMycoAppPicker && completedTransfer != null) {
-        MycoAppPickerDialog(
-            transfer = completedTransfer,
-            apps = state.sites,
-            onDismiss = { showMycoAppPicker = false },
-        )
-    }
-
-    // Files come either from Android's Sharesheet (peer chosen afterwards) or from
-    // a contact's sheet on the Circle tab (peer chosen first, files picked here).
-    // Both end in the same sheet; the Circle path just arrives with a preselection.
-    val shareUris = externalShareUris.ifEmpty { pickedShareUris }
-    var peerShareVisible by remember { mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(shareUris) {
-        if (shareUris.isNotEmpty()) peerShareVisible = true
-    }
-    if (peerShareVisible && shareUris.isNotEmpty()) {
-        PeerShareSheet(
-            state = state,
-            uris = shareUris,
-            // Only if they are still there: a contact can drop off the mesh between
-            // the tap and the picker closing, and a preselection the picker then
-            // hides under "offline" is a selection the user cannot see.
-            preselectedNpub = sendFileNpub?.takeIf {
-                externalShareUris.isEmpty() &&
-                    (it in state.reachableNpubs || state.blePeers.any { p -> p.npub == it && p.connected })
-            },
-            onDismiss = {
-                peerShareVisible = false
-                // Closing the sheet acknowledges the outcomes it was showing.
-                // Cancelled and declined are decisions the user watched happen,
-                // so they go with it rather than queueing up on the Circle tab
-                // waiting to be dismissed a second time. `failed` stays — that
-                // one is news, and may never have been on screen at all.
-                state.fileTransfers
-                    .filter { it.status == "cancelled" || it.status == "denied" }
-                    .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
-                publish(client.state())
-                pickedShareUris = emptyList()
-                sendFileNpub = null
-                onExternalShareDismissed()
-            },
-            onShare = { peer -> onShareToPeer(shareUris, peer) },
-            onCancelTransfer = {
-                publish(client.dispatch(NativeActions.cancelFileTransfer(it.id)))
-            },
-        )
-    }
-
-    // A request only auto-accepts while you're on the Circle tab (presenting). If
-    // it arrives while you're elsewhere — another tab, or Myco was launched by the
-    // tap — prompt to accept/ignore instead of silently pairing.
-    if (!PairPresent.presenting) {
-        state.pendingPairRequests.firstOrNull()?.let { req ->
-            IncomingRequestDialog(
-                name = req.name.ifEmpty { "A nearby device" },
-                onAccept = { publish(client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))) },
-                onIgnore = { publish(client.dispatch(NativeActions.declinePairRequest(req.npub))) },
-            )
-        }
-    }
-
     // Loud warning if our local relay couldn't bind 4870 (another relay holds it):
     // nsites would talk to that foreign relay and show messages that aren't yours.
     var relayWarnDismissed by remember { mutableStateOf(false) }
@@ -659,18 +456,6 @@ fun MycoApp(
     }
 }
 
-/** Accept/ignore prompt for an incoming pair request that didn't auto-accept. */
-@Composable
-private fun IncomingRequestDialog(name: String, onAccept: () -> Unit, onIgnore: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onIgnore,
-        title = { Text("Connect with $name?") },
-        text = { Text("They want to join your circle. Check the name matches what they tell you, then accept to pair (it's mutual).") },
-        confirmButton = { TextButton(onClick = onAccept) { Text("Accept") } },
-        dismissButton = { TextButton(onClick = onIgnore) { Text("Ignore") } },
-    )
-}
-
 // ----- shared UI building blocks used across screens -----
 
 /** Mesh master-switch state + toggle, provided by [MycoApp] so the status pill
@@ -681,8 +466,8 @@ data class MeshControl(val enabled: Boolean, val toggle: (Boolean) -> Unit)
 val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl(true) {} }
 
 /**
- * The status pill shown top-right on every screen. Three segments:
- * mesh on/off toggle · Circle reachable/total · live peer count.
+ * The status pill shown top-right on every screen: mesh on/off toggle ·
+ * live peer count.
  *
  * Tapping anywhere but the switch opens [MeshStatusSheet] — the pill is a
  * summary, and the summary is only useful if the thing it summarises is one
@@ -694,11 +479,6 @@ val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl
 fun PeersPill(state: AppState) {
     val mesh = LocalMeshControl.current
     val connected = state.blePeers.count { it.connected }
-    // Reachability is "we hold a live mesh relay to them", not "they are an
-    // adjacent node" — a Circle member many hops away is just as reachable, and
-    // counting only direct peers showed 0 while sync was working fine.
-    val reachable = state.reachableNpubs.size
-    val circle = state.circle.size
     var sheetOpen by remember { mutableStateOf(false) }
 
     if (sheetOpen) {
@@ -779,22 +559,10 @@ fun PeersPill(state: AppState) {
                 modifier = Modifier
                     .clickable(
                         onClick = { sheetOpen = true },
-                        onClickLabel = "Show mesh and circle status",
+                        onClickLabel = "Show mesh status",
                     )
                     .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             ) {
-                PillDivider()
-                // Circle: reachable now / total paired.
-                Icon(
-                    Icons.Filled.People,
-                    contentDescription = "Circle reachable / total",
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    "$reachable/$circle",
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                )
                 PillDivider()
                 // Live mesh peers, coloured by how much mesh you actually have:
                 // none is a fault (and pulses, since it is the one state you

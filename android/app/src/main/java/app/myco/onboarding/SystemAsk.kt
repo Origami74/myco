@@ -152,7 +152,8 @@ enum class SystemAsk(
 
     /**
      * Android's per-app "Install unknown apps" switch, which installing a
-     * Myco update carried by the Circle needs (`update/ReleaseInstaller`).
+     * Myco update a neighbor shared through a neighborhood needs
+     * (`update/ReleaseInstaller`).
      * Off by default on every phone; a switch the user can turn off again.
      */
     InstallUpdates(

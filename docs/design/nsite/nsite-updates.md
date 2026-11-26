@@ -1,14 +1,15 @@
-# nsite updates: staged activation + mesh propagation
+# nsite updates: staged activation + neighborhood propagation
 
-> Status: PARTLY BUILT. Discovery (§3), staging (§2), mesh propagation (§4) and
-> auto-activation ship today. Open-instance gating (§5.2) and version
+> Status: PARTLY BUILT. Discovery (§3), staging (§2), propagation through
+> neighborhoods (§4) and auto-activation ship today. Open-instance gating (§5.2) and version
 > history/pinning/revert (§6) are still proposals. Open questions are marked
 > **TBD / open**.
 >
-> **Wire note.** Mesh hop state travels in a `MESH` envelope *beside* the NIP-01
-> message, never inside the event or a filter. Two links stay plain NIP-01: the
-> nsite ↔ `localhost:4870` link and the proxy ↔ backing-relay link. See
-> [event-gossip.md §0 and §2](../core/event-gossip.md).
+> **How updates travel between phones.** Through neighborhoods, as the
+> `nsite-updates` extension (and `napplet-updates` for napplets), each with a
+> Get and a Share switch per neighborhood
+> ([nap-neighbor/extensions.md](../nap-neighbor/extensions.md)). The update
+> check itself asks public relays only.
 
 An nsite is a set of author-signed manifest events (kinds 15128/35128) plus
 content-addressed blobs ([nsite-layer.md](./nsite-layer.md),
@@ -21,8 +22,7 @@ specifies how an installed device:
 2. **stages** it without breaking the working copy — never switching the served
    version until *every* blob of the new version is local,
 3. **activates** it atomically, respecting open instances (no mid-session swap),
-4. **propagates** it to mesh peers using the *same* push plane as ordinary app
-   events ([event-gossip.md](../core/event-gossip.md)).
+4. **propagates** it into its neighborhoods (§4).
 
 > **Scope.** Core/native work in `myco-core` + `myco-relay`, plus a small
 > lifecycle signal from the Android shell. The WebView is unaware any of this
@@ -43,15 +43,14 @@ it would swap even under a live WebView session.
 
 **We do not fix this by holding manifests back from the relay.** The relay must
 stay a faithful NIP-01 store: a newer replaceable manifest **replaces immediately**
-and is **served to and propagated to peers** like any other event. Withholding new
-versions to protect our own serving would make us lie to the mesh and stall
-propagation — exactly what we don't want.
+like any other event. Withholding new versions to protect our own serving would
+make the store lie and stall propagation — exactly what we don't want.
 
 **The fix is to decouple *local serving* from the relay store.** Two independent
 views over a site's manifests:
 
-- **Relay store (the mesh view).** Pure NIP-01 — newest replaceable wins,
-  immediately, and is what we answer peers' REQs with and propagate (§4). Older
+- **Relay store (the faithful view).** Pure NIP-01 — newest replaceable wins,
+  immediately. Older
   versions it replaces are **persisted separately** by core (the version history,
   §6) before they fall out of the store.
 - **Gateway active pointer (the local view).** A core-owned choice of *which*
@@ -85,7 +84,7 @@ PendingUpdate {
     state: Downloading | Ready | Failed
 }
 
-enum UpdateSource { Online, Mesh(IpAddr) }  // online Blossom, or the peer that surfaced it
+enum UpdateSource { Online, Neighborhood }  // online Blossom, or the neighborhood it arrived in
 ```
 
 The candidate manifest **is** in the relay store (we don't withhold it); it just
@@ -110,13 +109,11 @@ pipeline (§2) and treated identically once a candidate is in hand:
 
 - **Pull (we poll).** A bounded subscription we initiate — manual or background
   (§3.1–3.2).
-- **Push (a peer tells us).** Because manifests propagate over the *same* push
-  plane as chat (§4), a peer can gossip a newer manifest to us **unsolicited, up
-  to 3 hops** away — we don't have to ask. It arrives as a `MESH`-wrapped `EVENT`
-  on the mesh socket, the proxy stores the canonical event and re-propagates it,
-  and core notices it exactly as it would a polled candidate (§4.2). So a device
-  often learns of an update from a nearby peer before it ever runs a check — and
-  even fully offline.
+- **Push (a neighbor shares it).** A device that activates an update shares
+  it into neighborhoods where it shares `nsite-updates`; it travels the
+  neighborhood's publish hops (§4). Where this device gets `nsite-updates`, the
+  candidate is staged exactly as a polled one. So a device often learns of an
+  update from a neighbor before it ever runs a check — and even fully offline.
 
 The rest of §3 covers the pull channel; the push channel is §4.
 
@@ -148,10 +145,9 @@ rules hold however many triggers fire:
 Timing choices:
 
 - **Foreground: 20 s after coming to the foreground**, cancelled if the app
-  leaves first. The mesh gets to reconnect, so the check finds Circle peers to
-  ask, and a quick app switch costs nothing.
-- **Periodic: 6 h.** Updates are rare, deliberate publishes, and a nearby peer
-  often pushes one before any poll would (§4). Four checks a day keep a
+  leaves first. A quick app switch costs nothing.
+- **Periodic: 6 h.** Updates are rare, deliberate publishes, and a neighbor
+  often shares one before any poll would (§4). Four checks a day keep a
   long-lived process current without polling from a phone in a pocket.
 - **Per process.** The gate lives in memory, so a new process starts open:
   a cold start always checks, 20 s after the app comes up.
@@ -162,20 +158,16 @@ Timing choices:
 - **No wake-ups.** There is no alarm or WorkManager job. The timer is a
   coroutine delay, which stops while the phone sleeps. The throttle uses wall
   time, so a check before bed does not look recent in the morning.
-- **Offline-only** still checks: the nsite half asks Circle peers' mesh relays
-  only, and the napplet half has nowhere to ask (§7.2 of
-  [napplet-runtime.md](../napplet/napplet-runtime.md)).
+- **Offline-only** has nowhere to ask: the check reads public relays only.
+  Updates still arrive from neighborhoods (§4).
 
 ### 3.2 Check = one bounded subscription per relay
 
 `CheckNsiteUpdates` is **not** a per-site, per-relay fan of fetches. It is a set of
 **REQ subscriptions that run until EOSE** against a *deduplicated* relay set, with
 one combined filter per relay covering every site we care about. The relay set is
-the union of:
+the union of (public relays only — peers are never asked):
 
-- **Relays around us** — the embedded relays of connected mesh peers
-  (`ws://[fd00::peer]:4870`), always reachable offline. (Reuse the existing
-  peer-relay pool's live connections where possible rather than dialing afresh.)
 - **The authors' relays** — each Library author's NIP-65 write relays (kind
   `10002` as stored in the local relay; at most 12 in total), then
   `default_relays()`, used **only when online**. The author publishes updates
@@ -192,25 +184,17 @@ sites — `{ kinds: [15128, 35128], authors: [...all site authors...], "#d":
 combined REQ, not one per site; the relay returns each slot's newest.)
 
 **The check is core-driven, not client-driven.** It goes straight to the
-peer-relay pool rather than through the loopback relay socket, which is the same
-route discovery takes. That split is deliberate: a `REQ` from an nsite never fans
-out to peers, so multi-hop reads only ever happen where the core asks for them
-([event-gossip.md §7](../core/event-gossip.md)).
+internet relay pool rather than through the loopback relay socket. A `REQ`
+from an nsite never fans out to peers.
 
 A returned manifest is a candidate iff `candidate.created_at > active.created_at`
 for its slot (and newer than any already-staged candidate). Each such candidate is
-**published into our own relay** — which (a) keeps us NIP-01-faithful so peers
-REQ-ing us get the newest, (b) propagates it onward via the normal gossip path
-(§4), and (c) lets core notice it and open a `PendingUpdate` to stage its blobs
-(preferring the manifest's `["server", …]` hints, then
-`default_blossom_servers()` when online, or the mesh peer that surfaced it). The
+**published into our own relay** — which (a) keeps the local store holding the
+newest, (b) once activated, is shared into neighborhoods (§4), and (c) lets
+core notice it and open a `PendingUpdate` to stage its blobs (preferring the
+manifest's `["server", …]` hints, then `default_blossom_servers()` when
+online). The
 active pointer does not move until staging completes (§5).
-
-> **Known gap.** Discovery sends its mesh `REQ` inside a `MESH` envelope with
-> `ttl: 1`, so it reaches two hops. The update check currently sends a **plain**
-> `REQ` to each peer and therefore reaches **one** hop, even though the code
-> comment beside it still claims parity with discovery. Either the check should
-> carry the same envelope or the comment should go; as written the two disagree.
 
 > **Settled:** an author's update relays are their NIP-65 write relays, with
 > `default_relays()` always asked too as the fallback
@@ -229,74 +213,27 @@ long-press sheet offers "Update now" (a no-op nudge if it'll auto-apply on close
 
 ---
 
-## 4. Propagation over the mesh (R3)
+## 4. Propagation through neighborhoods (R3)
 
-> **Rule:** **storing** a newer manifest is always immediate and
-> protocol-faithful — it enters our relay at once and is answerable to peers'
-> REQs; we never withhold a version. **Forwarding** (the active hop-bounded push
-> to peers) is *interest-aware*:
-> - **Not interested** (we don't have this nsite in our Library): forward
->   **immediately** — a pure relay passthrough; we won't download the blobs, so
->   there's nothing to wait for.
-> - **Interested** (it's one of our installed sites): **best-effort download the
->   blobs first, then forward**, so the next hop can pull the bytes from us. This is
->   bounded — a slow/failed download still forwards eventually, never stalling the
->   wave.
->
-> **Activation** (what we serve locally) is separate again, gated on *all* blobs
-> being local (§5). So: never withhold a version, never serve one we can't back,
-> and be a useful blob source for sites we actually run.
+Updates travel as the `nsite-updates` extension; napplets use
+`napplet-updates`. The full rules are in
+[nap-neighbor/extensions.md](../nap-neighbor/extensions.md); in short:
 
-Napplet manifests (15129/35129) follow the same policy, with the napplet's own
-checks in front — see
-[napplet-runtime.md §7.3](../napplet/napplet-runtime.md).
+- **Sharing.** When an update is activated here, the manifest and every file
+  it names are put in the scope of each neighborhood where this device
+  **shares** `nsite-updates`, and the manifest is published there with the
+  neighborhood's publish hops.
+- **Getting.** Where this device **gets** `nsite-updates`, a newer manifest for
+  a site in the Library is staged (§2): files come from that neighborhood (its
+  scope, then its links), then the public servers unless offline-only. Once
+  activated, it is shared onward by the same rule.
+- **Not in the Library.** The manifest is kept and passed on like any
+  neighborhood event; nothing is fetched.
 
-### 4.1 Manifests gossip like any event — with an interest check on forward
-
-The proxy treats manifest kinds like any other event: it stores the canonical
-event and hands it to the gossiper, exactly as for chat (no interceptor, no
-deferral in the proxy). The *forward policy* lives in core's gossiper, which
-routes manifest kinds to their own handler and branches on interest:
-
-- **Not interested** → build `["MESH", {"ttl": n}, ["EVENT", <manifest>]]` and fan
-  to connected circle peers immediately, split-horizon, with the hop budget
-  decremented ([event-gossip.md §2–3](../core/event-gossip.md)). The manifest event
-  itself is canonical NIP-01 — nothing is added to it and nothing has to be
-  stripped before storing.
-- **Interested** → open a `PendingUpdate { source: Mesh(sender_ip) }`, download
-  the blobs (best-effort, from the peer that sent it), and fan out when the
-  download completes **or** a bound elapses — whichever first. Then activate (§5)
-  if/when complete.
-
-The loop guard is the same as chat: the proxy's **seen-set** decides novelty, so
-only a first sighting is handed to the gossiper and a copy arriving by a second
-path is stored but never re-forwarded. The hop budget then bounds the wave's
-reach ([event-gossip.md §4](../core/event-gossip.md)). Locally-originated candidates
-(an online check, §3.2) are "interested" by definition — we checked because we run
-the site — so they follow the download-then-forward path.
-
-### 4.2 Blob availability is the natural gate
-
-Forwarding the manifest never implies we can serve its blobs — the two travel on
-different channels, so even the immediate (not-interested) forward is safe:
-
-- The **manifest event** propagates per §4.1; peers learn the version exists.
-- The **blobs** are only ever served from our Blossom *if we actually hold them*.
-  A peer pulling a blob we don't have simply gets a 404 from us and falls back to
-  its other sources — the manifest's `["server", …]` hints, or another peer who
-  has it ([sync.rs](../../../nsite-deck/src/sync.rs) already tries sources in order).
-
-The interested-path download-first (§4.1) is therefore an **optimisation**, not a
-correctness requirement: it makes us a ready blob source for the sites we run, so
-the next hop usually succeeds against us instead of falling back.
-
-### 4.3 Why reuse the push plane
-
-Manifests *are* just events. Reusing the hop-bounded push plane plus neighbour
-pull means an offline cluster gets author updates the same way it gets chat:
-whoever next meets a peer that holds the newer manifest gets it and re-spreads
-it, then each device downloads the blobs and activates on its own schedule. No
-separate update-distribution protocol, and no special-casing in the store.
+**Blob availability is the natural gate.** A manifest never implies a source
+can serve its blobs. A link that doesn't hold a blob answers 404 and the next
+source is tried ([sync.rs](../../../nsite-deck/src/sync.rs) tries sources in
+order). Activation stays gated on every blob being local (§5).
 
 ---
 
@@ -389,7 +326,7 @@ change at all** — we don't touch the relay store, which keeps faithfully holdi
 and propagating the author's newest. Revert just moves the gateway pointer and, by
 default, **pins** the reverted version so the next check doesn't immediately pull
 the device forward again. Revert obeys §5.2 — a running instance keeps its version
-until it closes. We do **not** re-propagate a revert over the mesh (it's a local,
+until it closes. We do **not** share a revert into neighborhoods (it's a local,
 per-device choice; the author's newest is still what spreads).
 
 ### 6.4 UI — the per-app settings window
@@ -403,7 +340,7 @@ The proposal stands as a new entry: **"App settings"** — a per-app window that
 - **Check for updates** (manual trigger; shows progress + `updateAvailable`),
 - **Version** — the active version with its date, a **Pin** toggle, and the
   **history list**; tapping an older version offers **Revert** (which pins),
-- (later) per-app update policy + gossip-kinds ([nsite-permissions.md](./nsite-permissions.md)).
+- (later) per-app update policy ([nsite-permissions.md](./nsite-permissions.md)).
 
 "Remove app" (§ delete-nsite) stays on the sheet or moves here — **TBD**.
 
@@ -430,17 +367,15 @@ The proposal stands as a new entry: **"App settings"** — a per-app window that
    foundational decoupling: a core-owned active-version pointer behind a
    `RelayBackend` wrapper the gateway reads (§1); split `sync.rs` fetch/store; add
    `pending_updates`, `CheckNsiteUpdates`, `SiteStatusView.updateAvailable/
-   Progress`; activate (move pointer) when complete. No gossip, no history yet.
+   Progress`; activate (move pointer) when complete. No propagation, no history yet.
    Delivers "check for updates" end to end.
 2. **P-U2 — version history + pin/revert + app-settings window.** `SiteVersions`
    store (persisted); the per-app settings window (§6.4) replacing the Info row,
    with pin/revert (pure pointer moves — no relay change).
 3. **P-U3 — open-instance deferral (R4).** `SetNsiteOpen` lifecycle + `open_hosts`
    gating; defer activation/revert under a live task; UI affordances.
-4. **P-U4 — mesh propagation (R3).** Make manifest kinds gossip-eligible; the
-   gossiper applies the interest-aware forward policy (§4.1) — not-interested
-   forwards immediately, interested downloads-then-forwards (bounded) and activates
-   on completion. No relay interceptor.
+4. **P-U4 — propagation (R3).** Built as the `nsite-updates` neighborhood
+   extension (§4).
 5. **P-U5 — background eager refresh.** Throttled foreground and periodic
    checks (§3.1). Built.
 
@@ -449,8 +384,6 @@ The proposal stands as a new entry: **"App settings"** — a per-app window that
 ## 9. Open questions
 
 - **History bound N** (§6.1) — last 3–5 versions + pinned?
-- **Interested-forward bound** (§4.1) — how long to best-effort download blobs
-  before forwarding the manifest anyway (so the wave never stalls)?
 - **Throttle/interval** for background checks (§3.1) — settled at 30 min
   global throttle, 6 h period. Per-site throttling is not needed: one check
   covers every site in one REQ per relay.
