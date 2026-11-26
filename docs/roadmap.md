@@ -522,6 +522,14 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Set reconciliation (NIP-77 negentropy)** between links in a
   neighborhood, so backlog catch-up is a sync rather than a replay —
   [propagation.md](./design/nsite/propagation.md) §5.
+- **Larger files in Nearby.** A shared file is capped at 64 MB, as the
+  old file transfer was: it is held whole in memory on the way in, out and
+  back, a link fetch takes at most 64 MiB, and a neighborhood keeps 256 MiB
+  of files. Larger needs streaming end to end (copy into the store while
+  hashing, serve from the file, fetch to a temp file checked against the
+  hash), Nearby's quota bounded by free disk, progress on the sheet, and
+  saying which lane a file goes over: on Bluetooth a few hundred MB is over
+  an hour — [proximity.md](design/nap-neighbor/proximity.md#files).
 - **Neighborhood follow-ups.** Pushing blobs by the per-neighborhood blob
   hops, history from further than one hop (backlog hops), reading one peer's
   view, `neighbor.invite` for napplets, and Tor or public endpoints in
