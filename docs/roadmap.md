@@ -205,6 +205,39 @@ nearby phone and joins a neighborhood; a linked phone on an older version
 updates from a
 newer one with no internet.
 
+### N13 — File sharing as a napplet
+
+**Goal.** Sharing a file between phones moves out of Myco into a napplet,
+filedrop, and Myco keeps only what a napplet can't do itself. Until then
+Myco shares files natively with the people in Nearby (the interim share,
+built on NAP-NEIGHBOR's `nearby`); this replaces it.
+
+**Shape.** Built on the `feat/share-target-notify` branch, not merged:
+
+- **Share menu into a napplet.** A file shared from another app goes to
+  the napplet filling NAP-INTENT's `file` role (`napplet:file/share`), and
+  joins its NAP-FS picked files read-only. Design:
+  [nap-fs/](design/nap-fs/README.md).
+- **Raw uploads.** NAP-UPLOAD bytes reach Rust as raw bytes, not base64,
+  up to 64 MiB, as the spec wants: the napplet hands over a Blob and the
+  shell never turns it into text
+  ([NAP-UPLOAD.md](design/napplet/NAP-UPLOAD.md)).
+- **NAP-NOTIFY** ([N4](#n4--notifications)), and delivery while the app is
+  closed, so "a file arrived" reaches the user.
+- **Filedrop itself:** pick or share a file, send it to chosen
+  neighborhoods and/or public Blossom servers, encrypted by default with a
+  per-file key that travels only in the link's fragment, and a
+  `napplet:file/download` link to fetch it.
+
+**Open first.** Upstream: the `file/share` convention and handing a shared
+file into NAP-FS, NAP-UPLOAD's `destination` (napplet/naps#33), delete and
+expiry, and saving a fetched file straight to a picked file (raw SVG may
+not be delivered to a napplet). Neighborhood blob fetches beyond one hop.
+
+**Exit criterion.** A photo shared from the gallery reaches a phone in a
+neighborhood through filedrop, encrypted, with a notification while the
+receiver's filedrop is closed; the interim native share is removed.
+
 ### N9 — An onboarding flow for permissions
 
 **Built** — `onboarding/MeshSetup.kt` (the decisions, unit-tested),
@@ -349,8 +382,10 @@ napplet — with the grant on the review screen and the permissions sheet. The
 Kotlin half that notified of file offers (`FileOfferNotifier`) went with file
 transfer; its channel setup and deep link are in git history to start from.
 A closed napplet cannot notify (no background execution); a doorbell that
-should ring while the app is closed needs a Myco-side subscription, which is a
-later item.
+should ring while the app is closed needs a Myco-side subscription. Built,
+while the window is open, on the `feat/share-target-notify` branch (design
+in its `docs/design/nap-notify/`), for
+[N13](#n13--file-sharing-as-a-napplet).
 
 **Exit criterion.** A napplet with `notify` granted posts a notification while
 its window is open; without the grant the call is refused; the notification
