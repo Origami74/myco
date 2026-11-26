@@ -282,9 +282,7 @@ private fun NearbyCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (on) {
-                androidx.compose.material3.TextButton(onClick = { NearbyFiles.showing.value = true }) { Text("Files") }
-            }
+
             Switch(checked = on, onCheckedChange = onToggle, modifier = Modifier.padding(end = 16.dp))
         }
     }

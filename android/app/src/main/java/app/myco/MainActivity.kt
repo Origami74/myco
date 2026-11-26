@@ -1351,6 +1351,11 @@ class MainActivity : ComponentActivity() {
     ) {
         // Whatever it was, the scan sheet that may be open has done its job.
         app.myco.ui.screens.ScanSheetEvents.handled.intValue++
+        // A shared file's code: Myco saves it from Nearby.
+        app.myco.neighbor.NearbyFiles.read(core, text)?.let {
+            app.myco.neighbor.NearbyFiles.receiving.value = it
+            return
+        }
         // A neighborhood invitation: confirm first, then join.
         app.myco.neighbor.InvitePreview.read(text, source)?.let { invite ->
             app.myco.neighbor.IncomingInvite.pending.value = invite
@@ -1413,12 +1418,12 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        // The "A file nearby" notification: the files sheet.
-        if (intent?.getBooleanExtra(app.myco.neighbor.NearbyFiles.EXTRA_OPEN, false) == true) {
-            app.myco.neighbor.NearbyFiles.showing.value = true
+        val data = intent?.data ?: return
+        // A shared file's code, tapped or opened: Myco saves it from Nearby.
+        app.myco.neighbor.NearbyFiles.read(core, data.toString())?.let {
+            app.myco.neighbor.NearbyFiles.receiving.value = it
             return
         }
-        val data = intent?.data ?: return
         // A neighborhood invitation, whatever its spelling: the shell's own
         // `neighborhood/join`, never handed to a napplet. A tapped tag comes
         // as NDEF_DISCOVERED; anything else is a link from another app.

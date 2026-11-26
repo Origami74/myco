@@ -35,43 +35,94 @@ fn open() -> Neighbors {
     n
 }
 
-#[tokio::test]
-async fn a_shared_file_is_listed_as_ours_and_its_bytes_read_back() {
-    let n = open();
-    let bytes = b"holiday photo".to_vec();
-    let shared = n
-        .share_file_nearby(bytes.clone(), "beach.jpg", "image/jpeg")
-        .await
-        .unwrap();
-    assert_eq!(shared.name, "beach.jpg");
-    assert_eq!(shared.mime, "image/jpeg");
-    assert_eq!(shared.size, bytes.len() as u64);
-    assert!(shared.mine);
-    assert_eq!(n.nearby_files().await, std::slice::from_ref(&shared));
-    assert_eq!(n.nearby_file_bytes(&shared.sha256).await, Some(bytes));
-    assert_eq!(n.nearby_file_bytes(&"0".repeat(64)).await, None);
+#[test]
+fn the_envelope_opens_with_its_key_only_and_detects_damage() {
+    let key = seal::new_key();
+    for size in [
+        0usize,
+        1,
+        seal::CHUNK - 1,
+        seal::CHUNK,
+        seal::CHUNK + 1,
+        2 * seal::CHUNK + 7,
+    ] {
+        let plain: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let sealed = seal::seal(&plain, &key);
+        assert_eq!(sealed.len(), seal::sealed_size(size), "{size}");
+        assert_eq!(
+            seal::open(&sealed, &key).as_deref(),
+            Some(plain.as_slice()),
+            "{size}"
+        );
+    }
+    let plain = vec![7u8; seal::CHUNK + 10];
+    let sealed = seal::seal(&plain, &key);
+    assert_eq!(seal::open(&sealed, &seal::new_key()), None, "another key");
+    let mut flipped = sealed.clone();
+    flipped[20] ^= 1;
+    assert_eq!(seal::open(&flipped, &key), None, "damaged");
+    // Cut at the chunk boundary: the first chunk was sealed as not-final.
+    let cut = &sealed[..seal::HEADER_BYTES + seal::CHUNK + seal::TAG_BYTES];
+    assert_eq!(seal::open(cut, &key), None, "truncated");
+    assert_eq!(seal::open(b"not a filedrop file at all", &key), None);
+}
+
+#[test]
+fn a_link_round_trips_and_keeps_the_key_in_the_fragment() {
+    let link = FileLink {
+        x: "ab".repeat(32),
+        name: "Trip photos & notes.zip".into(),
+        mime: "application/zip".into(),
+        size: 1234,
+        encrypted: true,
+        key: Some([9u8; seal::KEY_BYTES]),
+    };
+    let url = link.to_url();
+    let (query, fragment) = url.split_once('#').unwrap();
+    assert!(query.starts_with("https://napplet.link/file/download?enc=1&mime="));
+    assert!(!query.contains("k="), "the key never in the query");
+    assert!(fragment.starts_with("k="));
+    assert_eq!(FileLink::parse(&url), Some(link.clone()));
+    // An alphanumeric QR upper-cases scheme and host.
+    let shouty = url.replacen("https://napplet.link", "HTTPS://NAPPLET.LINK", 1);
+    assert_eq!(FileLink::parse(&shouty), Some(link));
+    // Without its key an encrypted file can't be opened: not a link for us.
+    assert_eq!(FileLink::parse(query), None);
+    assert_eq!(
+        FileLink::parse("https://napplet.link/neighborhood/join#invite=x"),
+        None
+    );
+    assert_eq!(
+        FileLink::parse("https://napplet.link/file/download?x=zz&enc=1#k=AA"),
+        None
+    );
 }
 
 #[tokio::test]
-async fn each_share_is_signed_by_a_key_of_its_own() {
+async fn a_shared_file_is_kept_sealed_and_opens_from_its_link() {
     let n = open();
-    n.share_file_nearby(b"a".to_vec(), "a.txt", "text/plain")
+    let bytes = b"holiday photo".to_vec();
+    let link = n
+        .share_file_nearby(bytes.clone(), "../beach.jpg", "image/jpeg; q=1")
         .await
         .unwrap();
-    n.share_file_nearby(b"b".to_vec(), "b.txt", "text/plain")
-        .await
-        .unwrap();
-    let id = crate::neighbor::nearby::id();
-    let filter = Filter::new().kind(Kind::from(FILE_KIND));
-    let authors: std::collections::BTreeSet<_> = n
+    assert_eq!(link.name, "..beach.jpg");
+    assert_eq!(link.mime, "image/jpeg");
+    assert_eq!(link.size, bytes.len() as u64);
+    // What is kept is sealed: its hash is the link's, not the file's.
+    let kept = n
         .scoped
-        .backlog(id, &[filter])
+        .blob(crate::neighbor::nearby::id(), &link.x)
         .await
         .unwrap()
-        .into_iter()
-        .map(|(e, _)| e.pubkey)
-        .collect();
-    assert_eq!(authors.len(), 2, "no key links two shares");
+        .unwrap();
+    assert_ne!(kept, bytes);
+    assert_eq!(nsite_deck::sync::sha256_hex(&kept), link.x);
+    let parsed = FileLink::parse(&link.to_url()).unwrap();
+    assert_eq!(n.fetch_nearby_file(&parsed).await, Ok(bytes));
+    let mut wrong = parsed.clone();
+    wrong.key = Some(seal::new_key());
+    assert_eq!(n.fetch_nearby_file(&wrong).await, Err(FileError::WrongKey));
 }
 
 #[tokio::test]
@@ -79,51 +130,16 @@ async fn nothing_is_shared_with_nearby_off_or_too_big_or_empty() {
     let n = open();
     assert_eq!(
         n.share_file_nearby(Vec::new(), "x", "text/plain").await,
-        Err(ShareError::Empty)
+        Err(FileError::Empty)
     );
     assert_eq!(
         n.share_file_nearby(vec![0; MAX_FILE_BYTES + 1], "x", "text/plain")
             .await,
-        Err(ShareError::TooLarge)
+        Err(FileError::TooLarge)
     );
     n.set_nearby(false);
     assert_eq!(
         n.share_file_nearby(b"x".to_vec(), "x", "text/plain").await,
-        Err(ShareError::NearbyOff)
+        Err(FileError::NearbyOff)
     );
-    assert!(n.nearby_files().await.is_empty());
-}
-
-#[test]
-fn names_and_types_are_cleaned_and_odd_announcements_skipped() {
-    let keys = Keys::generate();
-    let sha = "a".repeat(64);
-    let at = now();
-    let ok = announcement(&sha, "../etc/pass\u{7}wd", "text/plain", 3, at)
-        .sign_with_keys(&keys)
-        .unwrap();
-    let f = parse(&ok, false, at).unwrap();
-    assert_eq!(f.name, "..etcpasswd");
-    assert!(!f.mine);
-    // Expired.
-    assert!(parse(&ok, false, at + SHARED_FOR_SECS + 1).is_none());
-    // Not filedrop's, or encrypted (filedrop opens those with its key).
-    let other = EventBuilder::new(Kind::from(FILE_KIND), "")
-        .tags([Tag::custom(TagKind::custom("x"), [sha.clone()])])
-        .sign_with_keys(&keys)
-        .unwrap();
-    assert!(parse(&other, false, at).is_none());
-    let sealed = announcement(&sha, "s.bin", "application/octet-stream", 3, at)
-        .tag(Tag::custom(
-            TagKind::custom("encrypted"),
-            ["filedrop-aes256gcm-v1"],
-        ))
-        .sign_with_keys(&keys)
-        .unwrap();
-    assert!(parse(&sealed, false, at).is_none());
-    // A bad hash.
-    let bad = announcement("zz", "x", "text/plain", 1, at)
-        .sign_with_keys(&keys)
-        .unwrap();
-    assert!(parse(&bad, false, at).is_none());
 }

@@ -791,15 +791,16 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
 
     fun state(): AppState = AppState.parse(NativeCore.stateJson(requireHandle()))
 
-    /** Share a detached [fd] with Nearby. Off the main thread. */
+    /** Seal a detached [fd] for Nearby. Off the main thread. */
     fun nearbyShare(fd: Int, metaJson: String): JSONObject =
         JSONObject(NativeCore.nearbyShare(requireHandle(), fd, metaJson))
 
-    /** The files in Nearby now (JSON array). Off the main thread. */
-    fun nearbyFiles(): String = NativeCore.nearbyFiles(requireHandle())
+    /** [text] as a shared file's link, or null. */
+    fun nearbyLink(text: String): JSONObject? =
+        NativeCore.nearbyLink(text).takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
 
-    /** Save a Nearby file into a detached [fd]. Off the main thread: it may fetch over a link. */
-    fun nearbySave(sha256: String, fd: Int): Boolean = NativeCore.nearbySave(requireHandle(), sha256, fd)
+    /** Fetch, open and write a Nearby file into a detached [fd]. Off the main thread: it fetches over a link. */
+    fun nearbySave(link: String, fd: Int): JSONObject = JSONObject(NativeCore.nearbySave(requireHandle(), link, fd))
 
     fun refresh(): AppState = AppState.parse(NativeCore.refreshJson(requireHandle()))
 

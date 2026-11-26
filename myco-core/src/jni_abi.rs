@@ -999,8 +999,10 @@ fn nearby_context(
 
 /// Share a file with the people in Nearby: `fd` a descriptor the activity
 /// opened for it (detached; **owned from here**), `meta_json`
-/// `{name, mime}`. Answers `{"ok":true,"file":{…}}` or
-/// `{"ok":false,"error":"…"}`. See `Neighbors::share_file_nearby`.
+/// `{name, mime}`. Sealed under a new key and kept for Nearby; nobody is
+/// told. Answers `{"ok":true,"link":"https://napplet.link/file/download?…#k=…",
+/// "name","size"}` or `{"ok":false,"error":"…"}`. See
+/// `Neighbors::share_file_nearby`.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nearbyShare(
     mut env: JNIEnv,
@@ -1026,7 +1028,12 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nearbyShare(
                     let name = meta["name"].as_str().unwrap_or("file");
                     let mime = meta["mime"].as_str().unwrap_or("");
                     match rt.block_on(neighbors.share_file_nearby(bytes, name, mime)) {
-                        Ok(file) => serde_json::json!({ "ok": true, "file": file }),
+                        Ok(link) => serde_json::json!({
+                            "ok": true,
+                            "link": link.to_url(),
+                            "name": link.name,
+                            "size": link.size,
+                        }),
                         Err(e) => failed(e.as_str()),
                     }
                 }
@@ -1037,48 +1044,51 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nearbyShare(
     jstr(&mut env, answer.to_string())
 }
 
-/// The files in Nearby now, newest first, as a JSON array of
-/// `{id, sha256, name, mime, size, at, mine}`.
+/// Whether `text` is a shared file's link this phone can open: its
+/// `{x, name, mime, size, encrypted}` as JSON, or `""` when it isn't one.
 #[no_mangle]
-pub extern "system" fn Java_app_myco_core_NativeCore_nearbyFiles(
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyLink(
     mut env: JNIEnv,
     _class: JClass,
-    handle: jlong,
+    text: JString,
 ) -> jstring {
-    let files = match nearby_context(handle) {
-        Some((neighbors, rt)) => rt.block_on(neighbors.nearby_files()),
-        None => Vec::new(),
-    };
-    jstr(
-        &mut env,
-        serde_json::to_string(&files).unwrap_or_else(|_| "[]".into()),
-    )
+    let text = get_string(&mut env, &text);
+    let out = crate::neighbor::files::link::FileLink::parse(&text)
+        .and_then(|l| serde_json::to_string(&l).ok())
+        .unwrap_or_default();
+    jstr(&mut env, out)
 }
 
-/// Save a file in Nearby to `fd`, a document the user chose (detached;
-/// **owned from here**): fetched over a nearby link if it isn't here, and
-/// checked against `sha256`. False when it couldn't be had or written.
+/// Save the file a link names into `fd`, a document the user chose
+/// (detached; **owned from here**): fetched from a phone in reach if it
+/// isn't here, checked against the hash and opened with the link's key.
+/// Answers `{"ok":true}` or `{"ok":false,"error":"…"}`.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nearbySave(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
-    sha256: JString,
+    link: JString,
     fd: jni::sys::jint,
-) -> jboolean {
+) -> jstring {
     use std::io::Write as _;
     use std::os::fd::FromRawFd as _;
     // SAFETY: as above.
     let file = (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) });
-    let sha256 = get_string(&mut env, &sha256);
-    let saved = match (nearby_context(handle), file) {
-        (Some((neighbors, rt)), Some(mut file)) => {
-            match rt.block_on(neighbors.nearby_file_bytes(&sha256)) {
-                Some(bytes) => file.write_all(&bytes).and_then(|_| file.sync_all()).is_ok(),
-                None => false,
+    let link = crate::neighbor::files::link::FileLink::parse(&get_string(&mut env, &link));
+    let failed = |error: &str| serde_json::json!({ "ok": false, "error": error });
+    let answer = match (nearby_context(handle), file, link) {
+        (_, _, None) => failed("that isn't a file's link"),
+        (Some((neighbors, rt)), Some(mut file), Some(link)) => {
+            match rt.block_on(neighbors.fetch_nearby_file(&link)) {
+                Ok(bytes) => match file.write_all(&bytes).and_then(|_| file.sync_all()) {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(_) => failed("the file couldn't be written there"),
+                },
+                Err(e) => failed(e.as_str()),
             }
         }
-        _ => false,
+        _ => failed("Myco isn't ready yet"),
     };
-    saved as jboolean
+    jstr(&mut env, answer.to_string())
 }

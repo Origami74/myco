@@ -166,34 +166,32 @@ caller lost its side. The auth plane's rate limits apply
 
 ## Files
 
-Myco's own, interim file share, until a napplet takes it over (roadmap
-N13). Share a file from any app and pick Myco: it goes to the people in
-Nearby.
+Myco's own, interim file share, until the filedrop napplet takes it over
+(roadmap N13). Share a file from any app and pick Myco.
 
-- **How it travels.** The bytes are kept in `nearby`'s scope on the
-  sending phone. An announcement is published into `nearby` like any post,
-  so the phones in reach see it. A phone that saves it fetches the bytes
-  over its nearby link, checked against the hash.
-- **The announcement** is filedrop's: a NIP-94 kind 1063 event with `x`,
-  `m`, `size`, `file` (name, type, size), `t=filedrop`, `alt` and a NIP-40
-  `expiration` an hour out. The napplet that replaces this reads it as is.
-  Encrypted announcements are filedrop's own and not listed here.
-- **Anonymous.** Each announcement is signed by a key made for it and
-  thrown away. Nothing says who shared a file, and two files can't be tied
-  to one phone by their key.
-- **Not private.** Anyone in reach can see and save it, unencrypted; the
-  share sheet says so. Like everything in Nearby it is forgotten when
-  nobody is in reach.
-- **Limits.** 64 MB per file, the neighborhood's quota in all. One hop: a
-  phone saves from the phone that shared, so the sender must still be in
-  reach.
-- **On the phone.** Myco is in Android's share menu; a sheet confirms
-  before sending. The Nearby card's **Files** opens the list, with **Save**
-  to a place the user picks. A notification says when someone in reach
-  shares a file (checked every 10 s).
+- **Sealed, told to nobody.** The file is encrypted under a key made for
+  it (filedrop's envelope, `filedrop-aes256gcm-v1`) and the sealed bytes
+  are kept in `nearby`'s scope on the sending phone. Nothing is announced:
+  no notification, no list, no name anyone can see.
+- **A code for the person it's for.** The sender gets the file's link,
+  shown as a QR code, offered on an NFC tap, and copyable:
+  `https://napplet.link/file/download?enc=1&mime=…&name=…&size=…&x=…#k=…`.
+  `x` is the sealed blob's hash; the key rides only in the fragment.
+  It is filedrop's own link, so the napplet opens what Myco shares.
+- **Receiving.** Scanning, tapping or opening the link shows a sheet with
+  the name and size. **Save** fetches the sealed bytes from a phone in
+  reach over its nearby link, checks the hash, opens them with the key and
+  writes the file where the user picks. The phones in between see only
+  sealed bytes.
+- **Mesh or Nearby off:** both sheets offer to turn it on.
+- **Limits.** 64 MB a file, as the old file transfer, and the
+  neighborhood's quota in all. One hop: the receiver fetches from the phone
+  that shared it, so stay in reach. A fetch has no total time limit, only a
+  30 s idle one, and is tried 4 times. Like everything in Nearby, it is
+  forgotten when nobody is in reach.
 
-Code: `myco-core/src/neighbor/files.rs`, `NearbyFiles.kt`,
-`NearbyFileSheets.kt`.
+Code: `myco-core/src/neighbor/files.rs` (`seal.rs`, `link.rs`),
+`NearbyFiles.kt`, `NearbyFileSheets.kt`.
 
 ## Names
 
