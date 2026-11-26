@@ -28,6 +28,11 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 /// How long an announcement stays up (NIP-40): Nearby forgets sooner when
 /// nobody is in reach.
 pub const SHARED_FOR_SECS: u64 = 60 * 60;
+/// How many times a file is fetched from the links before giving up, and
+/// how long between tries. Each try has no total limit, only an idle one
+/// (`http::TRANSFER_IDLE`), as the old file transfer had.
+pub const FETCH_ATTEMPTS: u32 = 4;
+pub const FETCH_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 /// The most files listed, newest first.
 pub const MAX_LISTED: usize = 100;
 
@@ -241,14 +246,25 @@ impl Neighbors {
     }
 
     /// The bytes of a file in Nearby: kept here, else fetched from a phone
-    /// in reach over its nearby link. Checked against the hash.
+    /// in reach over its nearby link, tried [`FETCH_ATTEMPTS`] times (a
+    /// radio link that flaps mid-file is back within seconds). Checked
+    /// against the hash.
     pub async fn nearby_file_bytes(&self, sha256: &str) -> Option<Vec<u8>> {
         let n = super::nearby::id();
-        let bytes = match self.scoped.blob(n, sha256).await.ok().flatten() {
-            Some(bytes) => bytes,
-            None => self.blob_from_links(n, sha256, None).await?,
-        };
-        (nsite_deck::sync::sha256_hex(&bytes) == sha256).then_some(bytes)
+        if let Some(bytes) = self.scoped.blob(n, sha256).await.ok().flatten() {
+            return (nsite_deck::sync::sha256_hex(&bytes) == sha256).then_some(bytes);
+        }
+        for attempt in 0..FETCH_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(FETCH_RETRY_AFTER).await;
+            }
+            if let Some(bytes) = self.blob_from_links(n, sha256, None).await {
+                if nsite_deck::sync::sha256_hex(&bytes) == sha256 {
+                    return Some(bytes);
+                }
+            }
+        }
+        None
     }
 }
 

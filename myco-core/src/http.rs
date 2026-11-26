@@ -240,6 +240,34 @@ pub(crate) fn shared_mesh() -> HttpClient {
         .clone()
 }
 
+/// How long a transfer may go with nothing arriving before it is given up.
+/// A transfer has no total limit: a file over a Bluetooth hop takes minutes
+/// and is still making progress.
+pub(crate) const TRANSFER_IDLE: Duration = Duration::from_secs(30);
+
+/// [`shared_mesh`] for transfers: no total timeout, only [`TRANSFER_IDLE`].
+pub(crate) fn shared_mesh_transfer() -> HttpClient {
+    static CLIENT: OnceLock<HttpClient> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| HttpClient::mesh(reqwest::Client::builder().read_timeout(TRANSFER_IDLE)))
+        .clone()
+}
+
+/// [`shared_internet`] for transfers: no total timeout, only
+/// [`TRANSFER_IDLE`].
+pub(crate) fn shared_internet_transfer() -> HttpClient {
+    static CLIENT: OnceLock<HttpClient> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            HttpClient::internet(
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .read_timeout(TRANSFER_IDLE),
+            )
+        })
+        .clone()
+}
+
 /// Whether `url` is one a client of `reach` may dial, by what it says
 /// before any lookup: the scheme, userinfo, and the host — an address
 /// literal judged in full, a name judged by its shape (its addresses are the

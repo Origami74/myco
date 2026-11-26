@@ -724,6 +724,12 @@ pub(super) async fn read_capped(
 /// addresses, the internet otherwise. Either refuses what its reach does not
 /// cover (see [`crate::http`]).
 pub(super) fn client_for(url: &str) -> crate::http::HttpClient {
+    client_of(url, false)
+}
+
+/// The client for `url`, mesh or internet; `transfer` for one without a
+/// total timeout ([`crate::http::TRANSFER_IDLE`] only), for blobs.
+fn client_of(url: &str, transfer: bool) -> crate::http::HttpClient {
     let parsed = reqwest::Url::parse(url).ok();
     let mesh = match parsed.as_ref().and_then(|u| u.host()) {
         Some(nostr::types::url::Host::Domain(d)) => d.trim_end_matches('.').ends_with(".fips"),
@@ -732,10 +738,11 @@ pub(super) fn client_for(url: &str) -> crate::http::HttpClient {
         }
         _ => false,
     };
-    if mesh {
-        crate::http::shared_mesh()
-    } else {
-        crate::http::shared_internet()
+    match (mesh, transfer) {
+        (true, false) => crate::http::shared_mesh(),
+        (true, true) => crate::http::shared_mesh_transfer(),
+        (false, false) => crate::http::shared_internet(),
+        (false, true) => crate::http::shared_internet_transfer(),
     }
 }
 
@@ -802,6 +809,22 @@ pub async fn call(
     rest: &str,
     body: Option<serde_json::Value>,
 ) -> anyhow::Result<reqwest::Response> {
+    call_on(link, method, rest, body, false).await
+}
+
+/// [`call`] for a transfer (a blob): no total timeout, only an idle one,
+/// so a file that takes minutes over Bluetooth still arrives.
+pub async fn call_transfer(link: &Link, rest: &str) -> anyhow::Result<reqwest::Response> {
+    call_on(link, reqwest::Method::GET, rest, None, true).await
+}
+
+async fn call_on(
+    link: &Link,
+    method: reqwest::Method,
+    rest: &str,
+    body: Option<serde_json::Value>,
+    transfer: bool,
+) -> anyhow::Result<reqwest::Response> {
     let keys = link.keys();
     let urls: Vec<String> = link
         .services()
@@ -818,7 +841,7 @@ pub async fn call(
             last = anyhow::anyhow!("{url}: not dialled");
             continue;
         }
-        let req = match client_for(&url).request(method.clone(), &url) {
+        let req = match client_of(&url, transfer).request(method.clone(), &url) {
             Ok(req) => req,
             Err(e) => {
                 last = anyhow::anyhow!("{url}: {}", e.0);

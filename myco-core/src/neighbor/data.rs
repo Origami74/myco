@@ -1179,8 +1179,7 @@ impl Neighbors {
             if peer.is_some_and(|p| p != link.peer) {
                 continue;
             }
-            let Ok(resp) = super::service::call(&link, reqwest::Method::GET, &rest, None).await
-            else {
+            let Ok(resp) = super::service::call_transfer(&link, &rest).await else {
                 continue;
             };
             links.mark_seen(&link.id);
