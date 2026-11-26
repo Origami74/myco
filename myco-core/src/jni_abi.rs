@@ -981,3 +981,104 @@ pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
         }
     }
 }
+
+// --- Nearby's file share --------------------------------------------------
+// Outside the reducer: each takes the app lock only to clone the
+// neighborhoods, then reads, fetches or writes with it released.
+
+fn nearby_context(
+    handle: jlong,
+) -> Option<(
+    std::sync::Arc<crate::neighbor::Neighbors>,
+    tokio::runtime::Handle,
+)> {
+    let h = unsafe { handle_ref(handle) }?;
+    let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+    guard.neighbors_context()
+}
+
+/// Share a file with the people in Nearby: `fd` a descriptor the activity
+/// opened for it (detached; **owned from here**), `meta_json`
+/// `{name, mime}`. Answers `{"ok":true,"file":{…}}` or
+/// `{"ok":false,"error":"…"}`. See `Neighbors::share_file_nearby`.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyShare(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    fd: jni::sys::jint,
+    meta_json: JString,
+) -> jstring {
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: the activity detached this descriptor for us and keeps no copy.
+    let file = (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) });
+    let meta: serde_json::Value =
+        serde_json::from_str(&get_string(&mut env, &meta_json)).unwrap_or_default();
+    let failed = |error: &str| serde_json::json!({ "ok": false, "error": error });
+    let answer = match (nearby_context(handle), file) {
+        (Some((neighbors, rt)), Some(file)) => {
+            let limit = crate::neighbor::files::MAX_FILE_BYTES as u64 + 1;
+            let mut bytes = Vec::new();
+            match file.take(limit).read_to_end(&mut bytes) {
+                Err(_) => failed("the file could not be read"),
+                Ok(_) => {
+                    let name = meta["name"].as_str().unwrap_or("file");
+                    let mime = meta["mime"].as_str().unwrap_or("");
+                    match rt.block_on(neighbors.share_file_nearby(bytes, name, mime)) {
+                        Ok(file) => serde_json::json!({ "ok": true, "file": file }),
+                        Err(e) => failed(e.as_str()),
+                    }
+                }
+            }
+        }
+        _ => failed("Myco isn't ready yet"),
+    };
+    jstr(&mut env, answer.to_string())
+}
+
+/// The files in Nearby now, newest first, as a JSON array of
+/// `{id, sha256, name, mime, size, at, mine}`.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyFiles(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    let files = match nearby_context(handle) {
+        Some((neighbors, rt)) => rt.block_on(neighbors.nearby_files()),
+        None => Vec::new(),
+    };
+    jstr(
+        &mut env,
+        serde_json::to_string(&files).unwrap_or_else(|_| "[]".into()),
+    )
+}
+
+/// Save a file in Nearby to `fd`, a document the user chose (detached;
+/// **owned from here**): fetched over a nearby link if it isn't here, and
+/// checked against `sha256`. False when it couldn't be had or written.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbySave(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    sha256: JString,
+    fd: jni::sys::jint,
+) -> jboolean {
+    use std::io::Write as _;
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: as above.
+    let file = (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) });
+    let sha256 = get_string(&mut env, &sha256);
+    let saved = match (nearby_context(handle), file) {
+        (Some((neighbors, rt)), Some(mut file)) => {
+            match rt.block_on(neighbors.nearby_file_bytes(&sha256)) {
+                Some(bytes) => file.write_all(&bytes).and_then(|_| file.sync_all()).is_ok(),
+                None => false,
+            }
+        }
+        _ => false,
+    };
+    saved as jboolean
+}

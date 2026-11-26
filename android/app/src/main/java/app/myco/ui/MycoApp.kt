@@ -313,6 +313,15 @@ fun MycoApp(
             }
         }
         Surface(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.background) {
+            // Files shared into Myco from another app, for Nearby.
+            app.myco.neighbor.NearbyFiles.sharing.value?.let { uris ->
+                app.myco.neighbor.NearbyShareSheet(uris, state, client) {
+                    app.myco.neighbor.NearbyFiles.sharing.value = null
+                }
+            }
+            if (app.myco.neighbor.NearbyFiles.showing.value) {
+                app.myco.neighbor.NearbyFilesSheet(client) { app.myco.neighbor.NearbyFiles.showing.value = false }
+            }
             // A neighborhood invitation from any tab's scan, a tap or a link.
             app.myco.neighbor.IncomingInvite.pending.value?.let { invite ->
                 // A second invitation arriving gets a fresh sheet, not this

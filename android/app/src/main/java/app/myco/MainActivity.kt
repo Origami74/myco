@@ -1406,6 +1406,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleDeepLink(intent: Intent?) {
+        // Files shared from another app: to Nearby, after the user says so.
+        if (app.myco.share.ExternalShare.isShare(intent)) {
+            app.myco.share.ExternalShare.uris(intent).takeIf { it.isNotEmpty() }?.let {
+                app.myco.neighbor.NearbyFiles.sharing.value = it
+            }
+            return
+        }
+        // The "A file nearby" notification: the files sheet.
+        if (intent?.getBooleanExtra(app.myco.neighbor.NearbyFiles.EXTRA_OPEN, false) == true) {
+            app.myco.neighbor.NearbyFiles.showing.value = true
+            return
+        }
         val data = intent?.data ?: return
         // A neighborhood invitation, whatever its spelling: the shell's own
         // `neighborhood/join`, never handed to a napplet. A tapped tag comes

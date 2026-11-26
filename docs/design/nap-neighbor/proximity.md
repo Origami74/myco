@@ -164,6 +164,37 @@ A request from a device that already has an ephemeral link replaces it: the
 caller lost its side. The auth plane's rate limits apply
 ([ports.md](../../reference/ports.md#1a-link-service--4873)).
 
+## Files
+
+Myco's own, interim file share, until a napplet takes it over (roadmap
+N13). Share a file from any app and pick Myco: it goes to the people in
+Nearby.
+
+- **How it travels.** The bytes are kept in `nearby`'s scope on the
+  sending phone. An announcement is published into `nearby` like any post,
+  so the phones in reach see it. A phone that saves it fetches the bytes
+  over its nearby link, checked against the hash.
+- **The announcement** is filedrop's: a NIP-94 kind 1063 event with `x`,
+  `m`, `size`, `file` (name, type, size), `t=filedrop`, `alt` and a NIP-40
+  `expiration` an hour out. The napplet that replaces this reads it as is.
+  Encrypted announcements are filedrop's own and not listed here.
+- **Anonymous.** Each announcement is signed by a key made for it and
+  thrown away. Nothing says who shared a file, and two files can't be tied
+  to one phone by their key.
+- **Not private.** Anyone in reach can see and save it, unencrypted; the
+  share sheet says so. Like everything in Nearby it is forgotten when
+  nobody is in reach.
+- **Limits.** 64 MB per file, the neighborhood's quota in all. One hop: a
+  phone saves from the phone that shared, so the sender must still be in
+  reach.
+- **On the phone.** Myco is in Android's share menu; a sheet confirms
+  before sending. The Nearby card's **Files** opens the list, with **Save**
+  to a place the user picks. A notification says when someone in reach
+  shares a file (checked every 10 s).
+
+Code: `myco-core/src/neighbor/files.rs`, `NearbyFiles.kt`,
+`NearbyFileSheets.kt`.
+
 ## Names
 
 None. A nearby offer never carries a name, and nothing nearby sends does.

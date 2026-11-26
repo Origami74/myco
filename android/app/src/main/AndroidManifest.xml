@@ -97,6 +97,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- A file shared from another app: sent to the people in Nearby
+                 once the user confirms (neighbor/files.rs). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
             <!-- Handle scanned myco:// links (a share QR: open the nsite from the
                  sharer, or a neighborhood invitation). BROWSABLE so a camera/QR scanner can hand
                  it to Myco. -->

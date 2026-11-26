@@ -807,7 +807,12 @@ impl Scoped {
         Ok(Added::New)
     }
 
-    async fn add_blob(&self, id: NeighborhoodId, bytes: &[u8], sha256: &str) -> anyhow::Result<()> {
+    pub(super) async fn add_blob(
+        &self,
+        id: NeighborhoodId,
+        bytes: &[u8],
+        sha256: &str,
+    ) -> anyhow::Result<()> {
         let quota = *self.quota.lock().unwrap();
         if bytes.len() as u64 > quota.bytes {
             anyhow::bail!("larger than a neighborhood keeps");
@@ -839,7 +844,11 @@ impl Scoped {
             .is_some()
     }
 
-    async fn blob(&self, id: NeighborhoodId, sha256: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    pub(super) async fn blob(
+        &self,
+        id: NeighborhoodId,
+        sha256: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         if !self.scopes_blob(id, sha256) {
             return Ok(None);
         }
@@ -909,7 +918,7 @@ impl Scoped {
     }
 
     /// Everything kept in `id` matching `filters`, with how it got there.
-    async fn backlog(
+    pub(super) async fn backlog(
         &self,
         id: NeighborhoodId,
         filters: &[Filter],

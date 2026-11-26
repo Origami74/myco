@@ -98,6 +98,17 @@ internal object NativeCore {
      */
     external fun nappletLink(handle: Long, url: String, pick: String): String
 
+    // --- Nearby's file share (`neighbor/files.rs`) -----------------------
+
+    /** Share a file with Nearby: [fd] detached for Rust, [metaJson] `{name, mime}`. Answers `{ok, file?, error?}`. */
+    external fun nearbyShare(handle: Long, fd: Int, metaJson: String): String
+
+    /** The files in Nearby now, as a JSON array. */
+    external fun nearbyFiles(handle: Long): String
+
+    /** Save the file [sha256] from Nearby into [fd], a document the user chose. */
+    external fun nearbySave(handle: Long, sha256: String, fd: Int): Boolean
+
     /** Carry one shell frame; returns the frames to send back, one JSON object each. */
     external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): Array<String>?
 

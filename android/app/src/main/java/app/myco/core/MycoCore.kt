@@ -2,6 +2,7 @@ package app.myco.core
 
 import android.content.Context
 import app.myco.BuildConfig
+import app.myco.neighbor.NearbyFiles
 import app.myco.signer.ExternalSigner
 
 /**
@@ -35,6 +36,8 @@ object MycoCore {
                     PublicNodesLane.start(app, it)
                     // The nearby secret: advertised over BLE, heard ones passed in.
                     NearbyBeacon.start(it)
+                    // Files someone in reach shares with Nearby: a notification.
+                    NearbyFiles.start(app, it)
                 }
             }
         }

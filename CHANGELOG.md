@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Share files with the people around you.** Share a photo or any file
+  from another app and pick Myco: after a confirm, it goes to everyone in
+  Nearby, who see it under **Files** on the Nearby card and get a
+  notification. Nothing says who shared it, it isn't encrypted (the sheet
+  says so), files are up to 64 MB, and like everything in Nearby they're
+  forgotten when nobody is in reach. A napplet takes this over later.
 - **Neighborhoods replace the Circle.** Start a neighborhood ("Household",
   "Sports club") and invite people with a QR code, a share link or an NFC
   tap. Each invitation sets up a link with its own key, used once. Posts

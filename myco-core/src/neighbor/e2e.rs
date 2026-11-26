@@ -1493,3 +1493,37 @@ async fn a_napplet_not_installed_is_not_exposed() {
     let (sha, _) = held.blobs[0].clone();
     assert_eq!(alice.neighbors.link_blob(id, &sha).await, None);
 }
+
+/// The interim file share: a file Alice shares with Nearby shows up on Bob's
+/// phone, unsigned by anyone he knows, and he fetches it over the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_shared_with_nearby_reaches_the_phone_in_reach() {
+    let p = pair().await;
+    p.in_reach();
+    p.alice_tick().await;
+    assert_eq!(p.alice.svc.links.ephemeral().len(), 1);
+    let bytes = b"a picture of the river".to_vec();
+    let shared = p
+        .alice
+        .neighbors
+        .share_file_nearby(bytes.clone(), "river.jpg", "image/jpeg")
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..100 {
+        seen = p.bob.neighbors.nearby_files().await;
+        if !seen.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen.len(), 1, "Bob sees Alice's file");
+    assert_eq!(seen[0].name, "river.jpg");
+    assert_eq!(seen[0].sha256, shared.sha256);
+    assert!(!seen[0].mine);
+    assert_eq!(
+        p.bob.neighbors.nearby_file_bytes(&shared.sha256).await,
+        Some(bytes),
+        "fetched over the nearby link"
+    );
+}
