@@ -24,8 +24,8 @@ use link::FileLink;
 /// The largest file shared, as the old file transfer took.
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 /// How many times a file is fetched from the links before giving up, and
-/// how long between tries. Each try has no total limit, only an idle one
-/// (`http::TRANSFER_IDLE`), as the old file transfer had.
+/// how long between tries. Each try has no fixed total limit: only an idle
+/// one (`http::TRANSFER_IDLE`) and a minimum rate (`http::TRANSFER_MIN_RATE`).
 pub const FETCH_ATTEMPTS: u32 = 4;
 pub const FETCH_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -55,14 +55,26 @@ impl FileError {
     }
 }
 
-/// Text from a file's link or the share menu: no control characters or
-/// path separators, trimmed and short.
-pub(crate) fn clean(s: &str, max: usize) -> String {
-    let kept: String = s
+/// The longest file name kept, as filedrop's `cleanName`.
+pub const MAX_NAME: usize = 200;
+
+/// A file name from a link or the share menu, as filedrop's `cleanName`
+/// makes it: control characters, bidi marks and overrides (which can make
+/// `x\u{202E}gpj.exe` read as `xexe.jpg`) and path separators become `_`;
+/// trimmed and at most [`MAX_NAME`] characters.
+pub(crate) fn clean(s: &str) -> String {
+    let swapped: String = s
         .chars()
-        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
+        .map(|c| {
+            let bidi = matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || bidi || c == '/' || c == '\\' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
-    match kept.trim().chars().take(max).collect::<String>() {
+    match swapped.trim().chars().take(MAX_NAME).collect::<String>() {
         n if n.is_empty() => "file".to_string(),
         n => n,
     }
@@ -110,7 +122,7 @@ impl Neighbors {
         tracing::info!(size = bytes.len(), "file sealed and kept for Nearby");
         Ok(FileLink {
             x,
-            name: clean(name, 120),
+            name: clean(name),
             mime: clean_mime(mime).unwrap_or_else(|| "application/octet-stream".into()),
             size: bytes.len() as u64,
             encrypted: true,
@@ -143,11 +155,20 @@ impl Neighbors {
                 .filter(|b| nsite_deck::sync::sha256_hex(b) == link.x);
         }
         let blob = blob.ok_or(FileError::NotInReach)?;
-        if !link.encrypted {
-            return Ok(blob);
-        }
         let key = link.key.as_ref().ok_or(FileError::WrongKey)?;
         seal::open(&blob, key).ok_or(FileError::WrongKey)
+    }
+
+    /// Whether Nearby can serve the blob `x`: kept here, or held by a phone
+    /// in reach (asked with a bounded `HEAD`). `None` when some could not be
+    /// asked. A link Myco can parse may still be a filedrop file shared into
+    /// another neighborhood; this tells the two apart before Myco claims it.
+    pub async fn nearby_has(&self, x: &str) -> Option<bool> {
+        let n = super::nearby::id();
+        if self.record(n).is_none() || !self.nearby_on() {
+            return Some(false);
+        }
+        self.has_in(n, x, None).await
     }
 }
 

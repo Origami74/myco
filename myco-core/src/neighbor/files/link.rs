@@ -87,8 +87,10 @@ impl FileLink {
     }
 
     /// Read a link (`https://napplet.link/file/download?…#k=…`, any case of
-    /// scheme and host), or `None` if it isn't one this can open: an
-    /// encrypted file needs its key.
+    /// scheme and host), or `None` if it isn't one Myco shares: sealed, with
+    /// its key, and held on no public server. Such a link may still be a
+    /// filedrop file in another neighborhood; whether Nearby can serve it is
+    /// [`Neighbors::nearby_has`](crate::neighbor::Neighbors::nearby_has).
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         let head = text.get(..PREFIX.len())?;
@@ -129,12 +131,15 @@ impl FileLink {
             })
             .and_then(|k| <[u8; super::seal::KEY_BYTES]>::try_from(k).ok());
         let x = x.filter(|x| x.len() == 64 && x.bytes().all(|b| b.is_ascii_hexdigit()))?;
-        if encrypted && key.is_none() {
+        // Myco only ever shares sealed files, with their key. Anything else
+        // (unencrypted, or without its key) is filedrop's, for whichever
+        // app takes `file/download`.
+        if !encrypted || key.is_none() {
             return None;
         }
         Some(Self {
             x,
-            name: super::clean(&name.unwrap_or_default(), 120),
+            name: super::clean(&name.unwrap_or_default()),
             mime: mime
                 .as_deref()
                 .and_then(super::clean_mime)

@@ -793,14 +793,26 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
 
     /** Seal a detached [fd] for Nearby. Off the main thread. */
     fun nearbyShare(fd: Int, metaJson: String): JSONObject =
-        JSONObject(NativeCore.nearbyShare(requireHandle(), fd, metaJson))
+        JSONObject(NativeCore.nearbyShare(handleTaking(fd), fd, metaJson))
 
     /** [text] as a shared file's link, or null. */
     fun nearbyLink(text: String): JSONObject? =
         NativeCore.nearbyLink(text).takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
 
+    /** Whether Nearby can serve the file [link] names: "yes", "no" or "unknown". Off the main thread. */
+    fun nearbyHas(link: String): String = NativeCore.nearbyHas(requireHandle(), link)
+
     /** Fetch, open and write a Nearby file into a detached [fd]. Off the main thread: it fetches over a link. */
-    fun nearbySave(link: String, fd: Int): JSONObject = JSONObject(NativeCore.nearbySave(requireHandle(), link, fd))
+    fun nearbySave(link: String, fd: Int): JSONObject = JSONObject(NativeCore.nearbySave(handleTaking(fd), link, fd))
+
+    /** [requireHandle] for a call the detached [fd] is handed to: when there is
+     *  no handle the core never takes it, so it is closed here. */
+    private fun handleTaking(fd: Int): Long = try {
+        requireHandle()
+    } catch (e: IllegalStateException) {
+        runCatching { android.os.ParcelFileDescriptor.adoptFd(fd).close() }
+        throw e
+    }
 
     fun refresh(): AppState = AppState.parse(NativeCore.refreshJson(requireHandle()))
 

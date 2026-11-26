@@ -106,6 +106,9 @@ internal object NativeCore {
     /** A shared file's link this phone can open, as JSON, or "" when [text] isn't one. */
     external fun nearbyLink(text: String): String
 
+    /** Whether Nearby can serve the file [link] names: "yes", "no" or "unknown". Asks over links: off the main thread. */
+    external fun nearbyHas(handle: Long, link: String): String
+
     /** Fetch, open and write the file [link] names into [fd]. Answers `{ok, error?}`. */
     external fun nearbySave(handle: Long, link: String, fd: Int): String
 

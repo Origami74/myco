@@ -1,5 +1,6 @@
 package app.myco.share
 
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -20,9 +21,27 @@ object ExternalShare {
     fun isShare(intent: Intent?): Boolean =
         intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_SEND_MULTIPLE
 
-    /** The documents attached to a SEND or SEND_MULTIPLE intent. */
+    /**
+     * The documents attached to a SEND or SEND_MULTIPLE intent, as far as
+     * Myco will open them: `content://` from another app only. Myco reads
+     * each with its own permissions, so a `file://` URI or one of Myco's own
+     * providers would let any app hand Myco's private files (its device key
+     * among them) to the share sheet.
+     */
+    fun uris(context: Context, intent: Intent?): List<Uri> = attached(intent).filter { isForeign(context, it) }
+
+    /** Whether [uri] is another app's content, never one of Myco's own files. */
+    internal fun isForeign(context: Context, uri: Uri): Boolean {
+        if (!uri.scheme.equals(ContentResolver.SCHEME_CONTENT, ignoreCase = true)) return false
+        val authority = uri.authority ?: return false
+        // Myco's own providers always resolve to Myco; another app's may not
+        // resolve at all (package visibility), and that is fine.
+        val owner = runCatching { context.packageManager.resolveContentProvider(authority, 0) }.getOrNull()
+        return owner?.packageName != context.packageName
+    }
+
     @Suppress("DEPRECATION")
-    fun uris(intent: Intent?): List<Uri> {
+    private fun attached(intent: Intent?): List<Uri> {
         if (intent == null) return emptyList()
         val found = buildList {
             when (intent.action) {

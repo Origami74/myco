@@ -1059,6 +1059,28 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nearbyLink(
     jstr(&mut env, out)
 }
 
+/// Whether Nearby can serve the file a link names: `"yes"`, `"no"` or
+/// `"unknown"` (a phone in reach could not be asked). Bounded: a `HEAD` to
+/// each nearby link, a few seconds at most. Off the main thread.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyHas(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    link: JString,
+) -> jstring {
+    let link = crate::neighbor::files::link::FileLink::parse(&get_string(&mut env, &link));
+    let answer = match (nearby_context(handle), link) {
+        (Some((neighbors, rt)), Some(link)) => match rt.block_on(neighbors.nearby_has(&link.x)) {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        },
+        _ => "no",
+    };
+    jstr(&mut env, answer.to_string())
+}
+
 /// Save the file a link names into `fd`, a document the user chose
 /// (detached; **owned from here**): fetched from a phone in reach if it
 /// isn't here, checked against the hash and opened with the link's key.

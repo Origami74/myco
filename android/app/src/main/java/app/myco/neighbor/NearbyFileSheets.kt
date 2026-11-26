@@ -228,6 +228,10 @@ fun NearbyReceiveSheet(
                         Text("Turn on Nearby")
                     }
                 }
+                NearbyFiles.checking.value == receive.link -> {
+                    Explain("Looking for it on the phones around you…")
+                    CircularProgressIndicator(Modifier.height(24.dp))
+                }
                 else -> {
                     Explain("It comes from the phone that shared it, so stay in reach until it's saved.")
                     problem?.let { Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }

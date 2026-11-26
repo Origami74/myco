@@ -182,13 +182,31 @@ Myco's own, interim file share, until the filedrop napplet takes it over
   the name and size. **Save** fetches the sealed bytes from a phone in
   reach over its nearby link, checks the hash, opens them with the key and
   writes the file where the user picks. The phones in between see only
-  sealed bytes.
+  sealed bytes. A save that fails leaves no empty file behind.
+- **Only Nearby's links.** Myco takes a link only when it is sealed, has
+  its key, and names no public server. Filedrop writes the same link for a
+  file shared into another neighborhood, so the sheet first asks whether
+  Nearby holds the blob; when it doesn't and a napplet takes
+  `file/download`, the napplet gets the link instead.
+- **Only other apps' files.** The share target opens `content://` URIs from
+  other apps only: never `file://`, never Myco's own providers, so no app
+  can hand Myco's private files to the sheet.
+- **Names** are cleaned as filedrop's `cleanName` does: control
+  characters, bidi marks and path separators become `_`, at most 200
+  characters.
 - **Mesh or Nearby off:** both sheets offer to turn it on.
 - **Limits.** 64 MB a file, as the old file transfer, and the
-  neighborhood's quota in all. One hop: the receiver fetches from the phone
-  that shared it, so stay in reach. A fetch has no total time limit, only a
-  30 s idle one, and is tried 4 times. Like everything in Nearby, it is
-  forgotten when nobody is in reach.
+  neighborhood's quota in all (256 MiB): a share past it evicts the oldest
+  shared file, whose code then no longer works. One hop: the receiver
+  fetches from the phone that shared it, so stay in reach. A fetch has no
+  fixed total time limit: it connects within 10 s, gets its headers within
+  60 s, may sit idle 30 s at most, and after its first 60 s must average
+  8 KiB/s (far below Bluetooth), so a peer dripping bytes can't hold it
+  open. It is tried 4 times. Like everything in Nearby, it is forgotten
+  when nobody is in reach.
+- **Metadata.** The file goes as it is: a photo keeps its EXIF, location
+  included, for the person who opens it. Filedrop strips metadata before
+  it seals; this share doesn't.
 
 Code: `myco-core/src/neighbor/files.rs` (`seal.rs`, `link.rs`),
 `NearbyFiles.kt`, `NearbyFileSheets.kt`.

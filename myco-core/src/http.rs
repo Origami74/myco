@@ -241,15 +241,35 @@ pub(crate) fn shared_mesh() -> HttpClient {
 }
 
 /// How long a transfer may go with nothing arriving before it is given up.
-/// A transfer has no total limit: a file over a Bluetooth hop takes minutes
-/// and is still making progress.
+/// A transfer has no fixed total limit: a file over a Bluetooth hop takes
+/// minutes and is still making progress. What bounds it instead is
+/// [`TRANSFER_MIN_RATE`], which the reader enforces.
 pub(crate) const TRANSFER_IDLE: Duration = Duration::from_secs(30);
 
-/// [`shared_mesh`] for transfers: no total timeout, only [`TRANSFER_IDLE`].
+/// How long a transfer may take to connect.
+pub(crate) const TRANSFER_CONNECT: Duration = Duration::from_secs(10);
+
+/// The slowest a transfer may average, bytes a second, after
+/// [`TRANSFER_GRACE`]: a peer dripping a byte just inside
+/// [`TRANSFER_IDLE`] would otherwise hold a fetch open forever. Well
+/// under a Bluetooth hop (tens of KB/s).
+pub(crate) const TRANSFER_MIN_RATE: u64 = 8 * 1024;
+
+/// How long a transfer may run before [`TRANSFER_MIN_RATE`] applies.
+pub(crate) const TRANSFER_GRACE: Duration = Duration::from_secs(60);
+
+/// [`shared_mesh`] for transfers: no total timeout, only [`TRANSFER_IDLE`]
+/// and [`TRANSFER_CONNECT`].
 pub(crate) fn shared_mesh_transfer() -> HttpClient {
     static CLIENT: OnceLock<HttpClient> = OnceLock::new();
     CLIENT
-        .get_or_init(|| HttpClient::mesh(reqwest::Client::builder().read_timeout(TRANSFER_IDLE)))
+        .get_or_init(|| {
+            HttpClient::mesh(
+                reqwest::Client::builder()
+                    .connect_timeout(TRANSFER_CONNECT)
+                    .read_timeout(TRANSFER_IDLE),
+            )
+        })
         .clone()
 }
 
@@ -261,7 +281,7 @@ pub(crate) fn shared_internet_transfer() -> HttpClient {
         .get_or_init(|| {
             HttpClient::internet(
                 reqwest::Client::builder()
-                    .connect_timeout(Duration::from_secs(10))
+                    .connect_timeout(TRANSFER_CONNECT)
                     .read_timeout(TRANSFER_IDLE),
             )
         })

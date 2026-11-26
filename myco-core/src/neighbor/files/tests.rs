@@ -102,6 +102,28 @@ fn a_link_round_trips_and_keeps_the_key_in_the_fragment() {
         "ab".repeat(32)
     );
     assert_eq!(FileLink::parse(&public), None);
+    // Unencrypted: never one Myco shares, so filedrop's.
+    let plain = format!(
+        "https://napplet.link/file/download?name=a&size=1&x={}",
+        "ab".repeat(32)
+    );
+    assert_eq!(FileLink::parse(&plain), None);
+}
+
+/// A sealed filedrop link shared into some other neighborhood parses like
+/// a Nearby one; Nearby saying it doesn't hold it is what leaves it to the
+/// napplet.
+#[tokio::test]
+async fn nearby_has_only_what_it_keeps() {
+    let n = open();
+    let link = n
+        .share_file_nearby(b"kept".to_vec(), "a.txt", "text/plain")
+        .await
+        .unwrap();
+    assert_eq!(n.nearby_has(&link.x).await, Some(true));
+    assert_eq!(n.nearby_has(&"cd".repeat(32)).await, Some(false));
+    n.set_nearby(false);
+    assert_eq!(n.nearby_has(&link.x).await, Some(false));
 }
 
 #[tokio::test]
@@ -112,7 +134,7 @@ async fn a_shared_file_is_kept_sealed_and_opens_from_its_link() {
         .share_file_nearby(bytes.clone(), "../beach.jpg", "image/jpeg; q=1")
         .await
         .unwrap();
-    assert_eq!(link.name, "..beach.jpg");
+    assert_eq!(link.name, ".._beach.jpg");
     assert_eq!(link.mime, "image/jpeg");
     assert_eq!(link.size, bytes.len() as u64);
     // What is kept is sealed: its hash is the link's, not the file's.
@@ -129,6 +151,17 @@ async fn a_shared_file_is_kept_sealed_and_opens_from_its_link() {
     let mut wrong = parsed.clone();
     wrong.key = Some(seal::new_key());
     assert_eq!(n.fetch_nearby_file(&wrong).await, Err(FileError::WrongKey));
+}
+
+/// Names are cleaned as filedrop cleans them: a bidi override can't make
+/// a file look like another type, and nothing becomes a path.
+#[test]
+fn names_are_cleaned_as_filedrop_does() {
+    assert_eq!(clean("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+    assert_eq!(clean("a\u{2066}b\u{200F}c"), "a_b_c");
+    assert_eq!(clean("dir/sub\\x\n.txt"), "dir_sub_x_.txt");
+    assert_eq!(clean("   "), "file");
+    assert_eq!(clean(&"é".repeat(300)).chars().count(), MAX_NAME);
 }
 
 /// The largest file shared still fits through a link once sealed.

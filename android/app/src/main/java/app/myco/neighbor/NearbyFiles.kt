@@ -2,6 +2,7 @@ package app.myco.neighbor
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.compose.runtime.mutableStateOf
 import app.myco.core.AppCoreClient
 import app.myco.share.ExternalShare
@@ -23,6 +24,9 @@ object NearbyFiles {
     /** A file's link that was scanned, tapped or opened, waiting to be saved. */
     val receiving = mutableStateOf<Receive?>(null)
 
+    /** The link of [receiving] while Myco checks Nearby can serve it. */
+    val checking = mutableStateOf<String?>(null)
+
     /** One file sent: its name and link, or why it wasn't. */
     data class Sent(val name: String, val link: String?, val error: String?)
 
@@ -43,6 +47,8 @@ object NearbyFiles {
     fun share(context: Context, client: AppCoreClient, uris: List<Uri>): List<Sent> = uris.map { uri ->
         val item = ExternalShare.describe(context, uri)
         val answer = runCatching {
+            // Checked again where it's opened: never one of Myco's own files.
+            if (!ExternalShare.isForeign(context, uri)) return@runCatching null
             val fd = context.contentResolver.openFileDescriptor(uri, "r")?.detachFd() ?: return@runCatching null
             val meta = JSONObject().put("name", item.name).put("mime", item.mimeType).toString()
             client.nearbyShare(fd, meta)
@@ -54,10 +60,22 @@ object NearbyFiles {
         }
     }
 
-    /** Fetch, open and write the file [receive] names into [target]. Null when saved, else why not. */
-    fun save(context: Context, client: AppCoreClient, receive: Receive, target: Uri): String? = runCatching {
-        val fd = context.contentResolver.openFileDescriptor(target, "w")?.detachFd() ?: return "couldn't write there"
-        val answer = client.nearbySave(receive.link, fd)
-        if (answer.optBoolean("ok")) null else answer.optString("error").ifEmpty { "it couldn't be saved" }
-    }.getOrElse { "it couldn't be saved" }
+    /**
+     * Fetch, open and write the file [receive] names into [target]. Null when
+     * saved, else why not. The picker created [target] before the fetch, so
+     * on failure it is deleted: no empty file is left where the user looked.
+     * Not cancellable: once started, the fetch runs to its end in the core.
+     */
+    fun save(context: Context, client: AppCoreClient, receive: Receive, target: Uri): String? {
+        val error = runCatching {
+            val fd = context.contentResolver.openFileDescriptor(target, "w")?.detachFd()
+                ?: return@runCatching "couldn't write there"
+            val answer = client.nearbySave(receive.link, fd)
+            if (answer.optBoolean("ok")) null else answer.optString("error").ifEmpty { "it couldn't be saved" }
+        }.getOrElse { "it couldn't be saved" }
+        if (error != null) {
+            runCatching { DocumentsContract.deleteDocument(context.contentResolver, target) }
+        }
+        return error
+    }
 }
