@@ -71,7 +71,10 @@ fun NearbyShareSheet(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val nearby = state.neighborhoods.nearby
-    val items = remember(uris) { uris.map { ExternalShare.describe(context, it) } }
+    // A content-provider query each: off the main thread.
+    val items by androidx.compose.runtime.produceState(emptyList<app.myco.share.SharedItem>(), uris) {
+        value = withContext(Dispatchers.IO) { uris.map { ExternalShare.describe(context, it) } }
+    }
     var sending by remember { mutableStateOf(false) }
     var sent by remember { mutableStateOf<List<NearbyFiles.Sent>?>(null) }
     ModalBottomSheet(

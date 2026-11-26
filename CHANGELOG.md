@@ -134,6 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Wi-Fi Aware reconnects after a phone restarts its mesh.** Two phones
+  could stay on Bluetooth for good: after five failed attempts Myco waited
+  for a rediscovery that never comes, and a restarted phone's new session
+  was blocked by a request to its old one. Discovery now restarts a minute
+  after giving up, and the stale request is dropped.
 - **AppStore's Install on an app you already have shows its sheet with
   Open.** `intent.launch` opened an installed app directly, which did
   nothing visible when that app was already open (or was AppStore itself),

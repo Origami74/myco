@@ -1529,8 +1529,9 @@ impl Drop for AbortOnDrop {
 /// How long a peer may take to say whether it has a blob.
 const HAS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// The largest blob taken from a link.
-const MAX_LINK_BLOB: u64 = 64 * 1024 * 1024;
+/// The largest blob taken from a link: a Nearby file at its 64 MB cap once
+/// sealed (`files::seal` adds a header and a tag per MiB).
+pub(super) const MAX_LINK_BLOB: u64 = 64 * 1024 * 1024 + 64 * 1024;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;

@@ -282,7 +282,6 @@ private fun NearbyCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-
             Switch(checked = on, onCheckedChange = onToggle, modifier = Modifier.padding(end = 16.dp))
         }
     }

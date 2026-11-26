@@ -113,6 +113,9 @@ impl FileLink {
                 "mime" => mime = Some(v),
                 "size" => size = v.parse().ok(),
                 "enc" => encrypted = v == "1",
+                // Held on public servers: filedrop's link, not a Nearby
+                // file. Left to whichever app takes `file/download`.
+                "servers" | "url" => return None,
                 _ => {}
             }
         }

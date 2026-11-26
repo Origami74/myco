@@ -96,6 +96,12 @@ fn a_link_round_trips_and_keeps_the_key_in_the_fragment() {
         FileLink::parse("https://napplet.link/file/download?x=zz&enc=1#k=AA"),
         None
     );
+    // A filedrop link to public servers is filedrop's, not Nearby's.
+    let public = format!(
+        "https://napplet.link/file/download?name=a&servers=blossom.example&x={}",
+        "ab".repeat(32)
+    );
+    assert_eq!(FileLink::parse(&public), None);
 }
 
 #[tokio::test]
@@ -123,6 +129,15 @@ async fn a_shared_file_is_kept_sealed_and_opens_from_its_link() {
     let mut wrong = parsed.clone();
     wrong.key = Some(seal::new_key());
     assert_eq!(n.fetch_nearby_file(&wrong).await, Err(FileError::WrongKey));
+}
+
+/// The largest file shared still fits through a link once sealed.
+#[test]
+fn a_sealed_file_at_the_cap_fits_through_a_link() {
+    assert!(
+        seal::sealed_size(MAX_FILE_BYTES) as u64 <= crate::neighbor::data::MAX_LINK_BLOB,
+        "a 64 MB file sealed must be fetchable"
+    );
 }
 
 #[tokio::test]
