@@ -133,6 +133,18 @@ class AwareRadio(
      *  the same moment (on different threads) cannot both request. */
     private val ndpCallbacks = ConcurrentHashMap<String, ConnectivityManager.NetworkCallback>()
 
+    /** The discovery handle each outstanding request was made against. A peer
+     *  that restarts comes back under a new handle; a request still running
+     *  against the old one can never complete and must not block the new. */
+    private val requestedWith = ConcurrentHashMap<String, PeerHandle>()
+
+    /** A rediscovery queued after giving up on a peer. See [scheduleRediscovery]. */
+    private var rediscovery: Runnable? = null
+
+    /** Peers given up on, waiting for [scheduleRediscovery] to find them
+     *  again. A peer leaves it once it is requested again. */
+    private val givenUp: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** What a peer's NDP would be re-requested against: the discovery session
      *  and handle it was last seen on, plus the port it advertised. Kept after
      *  the NDP drops so recovery does not have to wait for rediscovery. */
@@ -314,6 +326,10 @@ class AwareRadio(
         }
         for ((_, cb) in ndpCallbacks) runCatching { connectivity.unregisterNetworkCallback(cb) }
         ndpCallbacks.clear()
+        requestedWith.clear()
+        rediscovery?.let { handler.removeCallbacks(it) }
+        rediscovery = null
+        givenUp.clear()
         for ((_, st) in retries) st.pending?.let { handler.removeCallbacks(it) }
         retries.clear()
         liveNdps.clear()
@@ -378,8 +394,15 @@ class AwareRadio(
             // initiator — an NDP needs both, complementary.
             override fun onMessageReceived(peer: PeerHandle, message: ByteArray) {
                 val remote = parsePeer(message) ?: return
+                Log.i(TAG, "identity from ${short(remote.npub)} (publish side)")
                 peerIdentities[peer] = remote
                 onPeerIdentity(publishSession, peer, remote, initiate = ownNpub > remote.npub)
+            }
+
+            // A lost identity or port message was silent: the peer never
+            // requested its half and ours timed out 20 s later, five times.
+            override fun onMessageSendFailed(messageId: Int) {
+                Log.w(TAG, "an Aware message to a peer was not delivered (publish side, id $messageId)")
             }
         }, handler)
     }
@@ -424,8 +447,13 @@ class AwareRadio(
             // responder.
             override fun onMessageReceived(peer: PeerHandle, message: ByteArray) {
                 val remote = parsePeer(message) ?: return
+                Log.i(TAG, "identity from ${short(remote.npub)} (subscribe side)")
                 peerIdentities[peer] = remote
                 onPeerIdentity(subscribeSession, peer, remote, initiate = ownNpub < remote.npub)
+            }
+
+            override fun onMessageSendFailed(messageId: Int) {
+                Log.w(TAG, "an Aware message to a peer was not delivered (subscribe side, id $messageId)")
             }
         }, handler)
     }
@@ -588,6 +616,9 @@ class AwareRadio(
         // Remember what to re-request against if this NDP later drops, and
         // drop any queued retry: this request supersedes it.
         ndpTargets[peerNpub] = NdpTarget(sess, peer, remote.port)
+        // Found again (or never lost): no longer waiting on a rediscovery,
+        // and from here its session carries it.
+        givenUp.remove(peerNpub)
         if (isRetry) cancelPendingRetry(peerNpub) else clearRetry(peerNpub)
         // A socket to pin comes first. Without one, the data path could come up
         // and still carry nothing: the peer would have no port of ours to dial.
@@ -642,6 +673,7 @@ class AwareRadio(
                 }
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr (slot $slot)")
                 liveNdps.add(peerNpub)
+                givenUp.remove(peerNpub)
                 publishCoexState()
                 peerAddrs[peerNpub] = ipv6
                         // The link is good: hand the peer a fresh retry budget.
@@ -705,10 +737,28 @@ class AwareRadio(
         // thread and rediscovery on ours, so the check and the claim have to be
         // one operation or both paths can request the same peer at once —
         // two requests for one peer against a chipset with one data-path slot.
+        // A request still running against the peer's *old* handle (it
+        // restarted, and came back under a new one) can never complete: it
+        // would only time out, and hold this one back while it does.
+        val stale = requestedWith[peerNpub]?.takeIf { it != peer }
+        if (stale != null) {
+            ndpCallbacks.remove(peerNpub)?.let {
+                Log.i(TAG, "${short(peerNpub)} is back under a new handle; dropping the request to the old one")
+                runCatching { connectivity.unregisterNetworkCallback(it) }
+            }
+            // Unregistered, the old callback never sees its onLost: if its
+            // data path was up, say here what onLost would have said, or it
+            // counts as live (and holds rediscovery back) forever.
+            if (liveNdps.remove(peerNpub)) {
+                publishCoexState()
+                NativeCore.awarePeerLost(peerNpub, laneFor(slotPool.slotOf(peerNpub) ?: 0))
+            }
+        }
         if (ndpCallbacks.putIfAbsent(peerNpub, callback) != null) {
             Log.d(TAG, "NDP request to ${short(peerNpub)} already outstanding; not re-requesting")
             return false
         }
+        requestedWith[peerNpub] = peer
         Log.i(TAG, "requesting NDP to ${short(peerNpub)} (dial port ${remote.port}, ${logResources()})")
         setLink(peerNpub, addr = null, up = false)
         requestedAt = SystemClock.elapsedRealtime()
@@ -751,6 +801,7 @@ class AwareRadio(
             )
             clearRetry(peerNpub)
             surrenderSlot(peerNpub)
+            scheduleRediscovery(peerNpub)
             return
         }
         val delay = backoffMs(state.attempts)
@@ -809,6 +860,7 @@ class AwareRadio(
             )
             clearRetry(peerNpub)
             surrenderSlot(peerNpub)
+            scheduleRediscovery(peerNpub)
             return
         }
         val delay = backoffMs(state.deferrals - 1)
@@ -853,6 +905,86 @@ class AwareRadio(
             st.pending?.let { handler.removeCallbacks(it) }
             st.pending = null
         }
+    }
+
+    /**
+     * Find a given-up peer again by restarting the discovery session it was
+     * matched on. "Waiting for rediscovery" alone waits forever: the
+     * framework reports a match once per discovery session, so a peer already
+     * discovered is never discovered again while that session lives, and the
+     * exchange that would request its data path never runs again. A fresh
+     * session matches it anew, under a fresh handle.
+     *
+     * Only that session is restarted, and only once nothing else rides on it:
+     * no live data path, outstanding request or queued retry of another peer
+     * made against it. Otherwise it waits [REDISCOVER_AFTER_MS] and looks
+     * again. So in a room of three, A's data path to B (on one session) does
+     * not keep A from finding C again (on the other); only the two sharing a
+     * session wait for each other. A peer whose session is already gone has
+     * both current sessions as candidates. Handler thread only.
+     */
+    private fun scheduleRediscovery(peerNpub: String) {
+        if (!running) return
+        givenUp.add(peerNpub)
+        if (rediscovery != null) return
+        val run = object : Runnable {
+            override fun run() {
+                rediscovery = null
+                if (!running || givenUp.isEmpty()) return
+                val s = session ?: return
+                // Peers a session must not be restarted under.
+                val busy = HashSet<String>().apply {
+                    addAll(liveNdps)
+                    addAll(ndpCallbacks.keys)
+                    retries.forEach { (npub, st) -> if (st.pending != null) add(npub) }
+                    removeAll(givenUp)
+                }
+                fun carries(sess: DiscoverySession?): Boolean =
+                    sess != null && busy.any { ndpTargets[it]?.session === sess }
+                val wanted = HashSet<DiscoverySession?>()
+                for (npub in givenUp) {
+                    val on = ndpTargets[npub]?.session
+                    if (on === publishSession || on === subscribeSession) {
+                        wanted.add(on)
+                    } else {
+                        wanted.add(publishSession)
+                        wanted.add(subscribeSession)
+                    }
+                }
+                val pub = publishSession?.takeIf { it in wanted && !carries(it) }
+                val sub = subscribeSession?.takeIf { it in wanted && !carries(it) }
+                if (pub != null || sub != null) {
+                    val closed = listOfNotNull(pub, sub)
+                    // What pointed at a closed session can never complete:
+                    // forget it, so recovery waits for the new match.
+                    val stale = ndpTargets.filterValues { t -> closed.any { it === t.session } }.keys
+                    for (npub in stale) {
+                        ndpTargets.remove(npub)
+                        clearRetry(npub)
+                    }
+                    peerIdentities.entries.removeAll { it.value.npub in stale }
+                    givenUp.removeAll { npub -> npub in stale || ndpTargets[npub] == null }
+                    if (pub != null) {
+                        Log.i(TAG, "restarting publish so given-up peers are found again")
+                        runCatching { pub.close() }
+                        publishSession = null
+                        startPublish(s)
+                    }
+                    if (sub != null) {
+                        Log.i(TAG, "restarting subscribe so given-up peers are found again")
+                        runCatching { sub.close() }
+                        subscribeSession = null
+                        startSubscribe(s)
+                    }
+                }
+                if (givenUp.isNotEmpty()) {
+                    rediscovery = this
+                    handler.postDelayed(this, REDISCOVER_AFTER_MS)
+                }
+            }
+        }
+        rediscovery = run
+        handler.postDelayed(run, REDISCOVER_AFTER_MS)
     }
 
     /** Forget a peer's retry state entirely: it either connected or is out of
@@ -935,6 +1067,7 @@ class AwareRadio(
     private fun releaseNdp(peerNpub: String) {
         liveNdps.remove(peerNpub)
         publishCoexState()
+        requestedWith.remove(peerNpub)
         ndpCallbacks.remove(peerNpub)?.let {
             runCatching { connectivity.unregisterNetworkCallback(it) }
         }
@@ -1077,6 +1210,10 @@ class AwareRadio(
         /** Retries before falling back to waiting for rediscovery. With the
          *  backoff above that is 2+4+8+16+30s ≈ 1 minute of trying. */
         private const val MAX_NDP_RETRIES = 5
+
+        /** How long after giving up on a peer discovery is restarted to find
+         *  it again (and how often that waits while other paths are up). */
+        private const val REDISCOVER_AFTER_MS = 60_000L
 
         /** An `onUnavailable` faster than this is the framework refusing the
          *  request outright (no `aware_data` interface), not a negotiation that
