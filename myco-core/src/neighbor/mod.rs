@@ -26,6 +26,7 @@
 
 pub mod data;
 pub mod extensions;
+pub mod files;
 pub mod host;
 pub mod id;
 pub mod link;

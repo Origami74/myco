@@ -134,6 +134,7 @@ class SystemAskTest {
         Regex("""rememberLauncherForActivityResult""") to setOf(
             "ui/MycoApp.kt", // file picker: send files to a peer
             "ui/screens/AccountSettings.kt", // Amber signer login
+            "neighbor/NearbyFileSheets.kt", // save picker: keep a file from Nearby
         ),
         // Only a tap on an explanation makes a Confirmed.
         Regex("""(class|object)\b[^\n]*:\s*Confirmed\b""") to setOf(EXPLAIN_UI),

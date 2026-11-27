@@ -32,6 +32,9 @@ with no signal. Once you have it, you can hand it on to the next person.
   **Around you** shows the apps they have. It forgets them once nobody is
   in reach. Turn it off on its card in **Neighbors**.
 - **Hand over an app.** The other phone pulls it straight from yours.
+- **Share a file with someone nearby.** Share a photo or any file to Myco:
+  it's encrypted and nobody is told. Show the person the code (QR, NFC tap
+  or link) and their phone fetches it from yours while you're in reach.
 - **Open it with no internet**, full-screen, from the Apps grid or a
   home-screen icon.
 - **Pass it on.** The phone that received it can share it with someone else,

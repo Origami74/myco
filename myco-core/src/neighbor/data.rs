@@ -807,7 +807,12 @@ impl Scoped {
         Ok(Added::New)
     }
 
-    async fn add_blob(&self, id: NeighborhoodId, bytes: &[u8], sha256: &str) -> anyhow::Result<()> {
+    pub(super) async fn add_blob(
+        &self,
+        id: NeighborhoodId,
+        bytes: &[u8],
+        sha256: &str,
+    ) -> anyhow::Result<()> {
         let quota = *self.quota.lock().unwrap();
         if bytes.len() as u64 > quota.bytes {
             anyhow::bail!("larger than a neighborhood keeps");
@@ -839,7 +844,11 @@ impl Scoped {
             .is_some()
     }
 
-    async fn blob(&self, id: NeighborhoodId, sha256: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    pub(super) async fn blob(
+        &self,
+        id: NeighborhoodId,
+        sha256: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         if !self.scopes_blob(id, sha256) {
             return Ok(None);
         }
@@ -909,7 +918,7 @@ impl Scoped {
     }
 
     /// Everything kept in `id` matching `filters`, with how it got there.
-    async fn backlog(
+    pub(super) async fn backlog(
         &self,
         id: NeighborhoodId,
         filters: &[Filter],
@@ -1112,7 +1121,12 @@ impl Neighbors {
     /// at once, each bounded. `Some(true)` as soon as one has it,
     /// `Some(false)` when all said no (or there is nobody to ask), `None`
     /// when some could not be asked.
-    async fn has_in(&self, n: NeighborhoodId, sha256: &str, peer: Option<&str>) -> Option<bool> {
+    pub(super) async fn has_in(
+        &self,
+        n: NeighborhoodId,
+        sha256: &str,
+        peer: Option<&str>,
+    ) -> Option<bool> {
         if peer.is_none() && self.scoped.has_blob(n, sha256).await {
             return Some(true);
         }
@@ -1170,7 +1184,13 @@ impl Neighbors {
             if peer.is_some_and(|p| p != link.peer) {
                 continue;
             }
-            let Ok(resp) = super::service::call(&link, reqwest::Method::GET, &rest, None).await
+            // Headers are due within the grace a body gets; the body is then
+            // paced by `read_capped`.
+            let Ok(Ok(resp)) = tokio::time::timeout(
+                crate::http::TRANSFER_GRACE,
+                super::service::call_transfer(&link, &rest),
+            )
+            .await
             else {
                 continue;
             };
@@ -1521,8 +1541,9 @@ impl Drop for AbortOnDrop {
 /// How long a peer may take to say whether it has a blob.
 const HAS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// The largest blob taken from a link.
-const MAX_LINK_BLOB: u64 = 64 * 1024 * 1024;
+/// The largest blob taken from a link: a Nearby file at its 64 MB cap once
+/// sealed (`files::seal` adds a header and a tag per MiB).
+pub(super) const MAX_LINK_BLOB: u64 = 64 * 1024 * 1024 + 64 * 1024;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
@@ -1530,14 +1551,46 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A response body, read until `cap` (or the length it announced, if less)
-/// and no further: `None` past it, or when it broke off.
-async fn read_capped(mut resp: reqwest::Response, cap: u64) -> Option<Vec<u8>> {
+/// and no further: `None` past it, when it broke off, or when it came
+/// slower than [`crate::http::TRANSFER_MIN_RATE`].
+async fn read_capped(resp: reqwest::Response, cap: u64) -> Option<Vec<u8>> {
+    read_paced(
+        resp,
+        cap,
+        crate::http::TRANSFER_GRACE,
+        crate::http::TRANSFER_MIN_RATE,
+    )
+    .await
+}
+
+/// [`read_capped`] with its pace spelled out: past `grace`, the body must
+/// average at least `rate` bytes a second. Each chunk is due by the time
+/// what came so far would have taken at `rate`, after `grace`, so a peer
+/// that drips bytes just inside the idle timeout is cut off, and one that
+/// was fast early banks the slack.
+async fn read_paced(
+    mut resp: reqwest::Response,
+    cap: u64,
+    grace: std::time::Duration,
+    rate: u64,
+) -> Option<Vec<u8>> {
     let cap = resp.content_length().unwrap_or(cap);
     if cap > MAX_LINK_BLOB {
         return None;
     }
+    let start = tokio::time::Instant::now();
     let mut body = Vec::with_capacity(cap.min(1 << 20) as usize);
-    while let Some(chunk) = resp.chunk().await.ok()? {
+    loop {
+        let due = start
+            + grace
+            + std::time::Duration::from_secs_f64(body.len() as f64 / rate.max(1) as f64);
+        let Ok(next) = tokio::time::timeout_at(due, resp.chunk()).await else {
+            tracing::debug!(got = body.len(), "a transfer fell below its minimum rate");
+            return None;
+        };
+        let Some(chunk) = next.ok()? else {
+            break;
+        };
         if (body.len() + chunk.len()) as u64 > cap {
             return None;
         }
@@ -2209,5 +2262,53 @@ mod tests {
             n.publish(&other, &club, note("x")).await.unwrap_err(),
             NeighborError::NotFound
         );
+    }
+
+    /// A loopback server answering one request with `head` and then `body`
+    /// in `pieces`, `gap` apart.
+    async fn serve_slowly(body: Vec<u8>, pieces: usize, gap: std::time::Duration) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = s.read(&mut req).await;
+            let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len());
+            s.write_all(head.as_bytes()).await.unwrap();
+            for piece in body.chunks(body.len().div_ceil(pieces).max(1)) {
+                if s.write_all(piece).await.is_err() {
+                    return;
+                }
+                let _ = s.flush().await;
+                tokio::time::sleep(gap).await;
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    /// A peer dripping its blob just inside the idle timeout is cut off once
+    /// it falls below the minimum rate; one keeping up is read whole.
+    #[tokio::test]
+    async fn a_blob_dripped_below_the_minimum_rate_is_given_up() {
+        let fast = std::time::Duration::from_millis(1);
+        let grace = std::time::Duration::from_millis(300);
+        let client = reqwest::Client::new();
+
+        let url = serve_slowly(vec![7u8; 4096], 4, fast).await;
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(
+            read_paced(resp, MAX_LINK_BLOB, grace, 1 << 20)
+                .await
+                .map(|b| b.len()),
+            Some(4096)
+        );
+
+        // 1 byte every 200 ms: no read is idle long, but the pace is ~5 B/s.
+        let url = serve_slowly(vec![7u8; 64], 64, std::time::Duration::from_millis(200)).await;
+        let resp = client.get(&url).send().await.unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(read_paced(resp, MAX_LINK_BLOB, grace, 1024).await, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 }

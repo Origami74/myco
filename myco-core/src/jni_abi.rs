@@ -981,3 +981,136 @@ pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
         }
     }
 }
+
+// --- Nearby's file share --------------------------------------------------
+// Outside the reducer: each takes the app lock only to clone the
+// neighborhoods, then reads, fetches or writes with it released.
+
+fn nearby_context(
+    handle: jlong,
+) -> Option<(
+    std::sync::Arc<crate::neighbor::Neighbors>,
+    tokio::runtime::Handle,
+)> {
+    let h = unsafe { handle_ref(handle) }?;
+    let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+    guard.neighbors_context()
+}
+
+/// Share a file with the people in Nearby: `fd` a descriptor the activity
+/// opened for it (detached; **owned from here**), `meta_json`
+/// `{name, mime}`. Sealed under a new key and kept for Nearby; nobody is
+/// told. Answers `{"ok":true,"link":"https://napplet.link/file/download?…#k=…",
+/// "name","size"}` or `{"ok":false,"error":"…"}`. See
+/// `Neighbors::share_file_nearby`.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyShare(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    fd: jni::sys::jint,
+    meta_json: JString,
+) -> jstring {
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: the activity detached this descriptor for us and keeps no copy.
+    let file = (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) });
+    let meta: serde_json::Value =
+        serde_json::from_str(&get_string(&mut env, &meta_json)).unwrap_or_default();
+    let failed = |error: &str| serde_json::json!({ "ok": false, "error": error });
+    let answer = match (nearby_context(handle), file) {
+        (Some((neighbors, rt)), Some(file)) => {
+            let limit = crate::neighbor::files::MAX_FILE_BYTES as u64 + 1;
+            let mut bytes = Vec::new();
+            match file.take(limit).read_to_end(&mut bytes) {
+                Err(_) => failed("the file could not be read"),
+                Ok(_) => {
+                    let name = meta["name"].as_str().unwrap_or("file");
+                    let mime = meta["mime"].as_str().unwrap_or("");
+                    match rt.block_on(neighbors.share_file_nearby(bytes, name, mime)) {
+                        Ok(link) => serde_json::json!({
+                            "ok": true,
+                            "link": link.to_url(),
+                            "name": link.name,
+                            "size": link.size,
+                        }),
+                        Err(e) => failed(e.as_str()),
+                    }
+                }
+            }
+        }
+        _ => failed("Myco isn't ready yet"),
+    };
+    jstr(&mut env, answer.to_string())
+}
+
+/// Whether `text` is a shared file's link this phone can open: its
+/// `{x, name, mime, size, encrypted}` as JSON, or `""` when it isn't one.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyLink(
+    mut env: JNIEnv,
+    _class: JClass,
+    text: JString,
+) -> jstring {
+    let text = get_string(&mut env, &text);
+    let out = crate::neighbor::files::link::FileLink::parse(&text)
+        .and_then(|l| serde_json::to_string(&l).ok())
+        .unwrap_or_default();
+    jstr(&mut env, out)
+}
+
+/// Whether Nearby can serve the file a link names: `"yes"`, `"no"` or
+/// `"unknown"` (a phone in reach could not be asked). Bounded: a `HEAD` to
+/// each nearby link, a few seconds at most. Off the main thread.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbyHas(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    link: JString,
+) -> jstring {
+    let link = crate::neighbor::files::link::FileLink::parse(&get_string(&mut env, &link));
+    let answer = match (nearby_context(handle), link) {
+        (Some((neighbors, rt)), Some(link)) => match rt.block_on(neighbors.nearby_has(&link.x)) {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        },
+        _ => "no",
+    };
+    jstr(&mut env, answer.to_string())
+}
+
+/// Save the file a link names into `fd`, a document the user chose
+/// (detached; **owned from here**): fetched from a phone in reach if it
+/// isn't here, checked against the hash and opened with the link's key.
+/// Answers `{"ok":true}` or `{"ok":false,"error":"…"}`.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nearbySave(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    link: JString,
+    fd: jni::sys::jint,
+) -> jstring {
+    use std::io::Write as _;
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: as above.
+    let file = (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) });
+    let link = crate::neighbor::files::link::FileLink::parse(&get_string(&mut env, &link));
+    let failed = |error: &str| serde_json::json!({ "ok": false, "error": error });
+    let answer = match (nearby_context(handle), file, link) {
+        (_, _, None) => failed("that isn't a file's link"),
+        (Some((neighbors, rt)), Some(mut file), Some(link)) => {
+            match rt.block_on(neighbors.fetch_nearby_file(&link)) {
+                Ok(bytes) => match file.write_all(&bytes).and_then(|_| file.sync_all()) {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(_) => failed("the file couldn't be written there"),
+                },
+                Err(e) => failed(e.as_str()),
+            }
+        }
+        _ => failed("Myco isn't ready yet"),
+    };
+    jstr(&mut env, answer.to_string())
+}

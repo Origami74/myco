@@ -1351,6 +1351,11 @@ class MainActivity : ComponentActivity() {
     ) {
         // Whatever it was, the scan sheet that may be open has done its job.
         app.myco.ui.screens.ScanSheetEvents.handled.intValue++
+        // A shared file's code: Myco saves it from Nearby.
+        app.myco.neighbor.NearbyFiles.read(core, text)?.let {
+            receiveNearbyFile(it)
+            return
+        }
         // A neighborhood invitation: confirm first, then join.
         app.myco.neighbor.InvitePreview.read(text, source)?.let { invite ->
             app.myco.neighbor.IncomingInvite.pending.value = invite
@@ -1406,7 +1411,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleDeepLink(intent: Intent?) {
+        // Files shared from another app: to Nearby, after the user says so.
+        if (app.myco.share.ExternalShare.isShare(intent)) {
+            val uris = app.myco.share.ExternalShare.uris(this, intent)
+            if (uris.isNotEmpty()) {
+                app.myco.neighbor.NearbyFiles.sharing.value = uris
+            } else {
+                Toast.makeText(this, "Myco can't share that", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         val data = intent?.data ?: return
+        // A shared file's code, tapped or opened: Myco saves it from Nearby.
+        app.myco.neighbor.NearbyFiles.read(core, data.toString())?.let {
+            receiveNearbyFile(it)
+            return
+        }
         // A neighborhood invitation, whatever its spelling: the shell's own
         // `neighborhood/join`, never handed to a napplet. A tapped tag comes
         // as NDEF_DISCOVERED; anything else is a link from another app.
@@ -1453,6 +1473,46 @@ class MainActivity : ComponentActivity() {
             val answer = withContext(Dispatchers.IO) {
                 runCatching { core.nappletLink(url, pick) }.getOrNull()
             } ?: return@launch
+            followNappletLink(url, answer)
+        }
+    }
+
+    /**
+     * A shared file's code. Its receive sheet opens at once, checking first
+     * whether Nearby can serve it. A code Myco reads may also be a filedrop
+     * file shared into another neighborhood (filedrop's own link, same
+     * shape): when Nearby doesn't hold it and a napplet takes the link, the
+     * napplet gets it, as before Myco read these. Otherwise the sheet stays
+     * and says what's missing.
+     */
+    private fun receiveNearbyFile(receive: app.myco.neighbor.NearbyFiles.Receive) {
+        val files = app.myco.neighbor.NearbyFiles
+        files.receiving.value = receive
+        files.checking.value = receive.link
+        lifecycleScope.launch {
+            try {
+                val has = withContext(Dispatchers.IO) {
+                    runCatching { core.nearbyHas(receive.link) }.getOrDefault("unknown")
+                }
+                if (has != "no") return@launch
+                val answer = withContext(Dispatchers.IO) {
+                    runCatching { core.nappletLink(receive.link, "") }.getOrNull()
+                } ?: return@launch
+                val handled = answer.optString("channel") in
+                    setOf("open-napplet", "open-nsite", "choose-intent-handler")
+                if (handled && files.receiving.value == receive) {
+                    files.receiving.value = null
+                    followNappletLink(receive.link, answer)
+                }
+            } finally {
+                if (files.checking.value == receive.link) files.checking.value = null
+            }
+        }
+    }
+
+    /** Do what Rust answered for a `napplet.link`; see [openNappletLink]. */
+    private fun followNappletLink(url: String, answer: org.json.JSONObject) {
+        lifecycleScope.launch {
             when (answer.optString("channel")) {
                 "open-napplet" -> {
                     val pointer = answer.optString("pointer")

@@ -1493,3 +1493,30 @@ async fn a_napplet_not_installed_is_not_exposed() {
     let (sha, _) = held.blobs[0].clone();
     assert_eq!(alice.neighbors.link_blob(id, &sha).await, None);
 }
+
+/// The interim file share: Alice shares a file with Nearby and shows Bob
+/// its link; Bob's phone fetches the sealed bytes over the nearby link and
+/// opens them with the key in the link. Nobody else was told anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_shared_with_nearby_opens_on_the_phone_shown_its_link() {
+    use super::files::link::FileLink;
+    let p = pair().await;
+    p.in_reach();
+    p.alice_tick().await;
+    assert_eq!(p.alice.svc.links.ephemeral().len(), 1);
+    let bytes = b"a picture of the river".to_vec();
+    let shared = p
+        .alice
+        .neighbors
+        .share_file_nearby(bytes.clone(), "river.jpg", "image/jpeg")
+        .await
+        .unwrap();
+    // What Bob scans.
+    let link = FileLink::parse(&shared.to_url()).unwrap();
+    assert_eq!(link.name, "river.jpg");
+    assert_eq!(
+        p.bob.neighbors.fetch_nearby_file(&link).await,
+        Ok(bytes),
+        "fetched over the nearby link and opened with the key"
+    );
+}
