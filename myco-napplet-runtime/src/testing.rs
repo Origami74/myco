@@ -470,6 +470,7 @@ pub fn test_context() -> (crate::dispatch::NapContext, std::sync::Arc<TestSigner
         https: std::sync::Arc::new(crate::seams::NoHttps),
         https_memory: std::sync::Arc::default(),
         local_uploads: std::sync::Arc::default(),
+        cvm: std::sync::Arc::default(),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
@@ -502,6 +503,7 @@ pub fn test_context_with_outbox() -> (
         https: std::sync::Arc::new(crate::seams::NoHttps),
         https_memory: std::sync::Arc::default(),
         local_uploads: std::sync::Arc::default(),
+        cvm: std::sync::Arc::default(),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };

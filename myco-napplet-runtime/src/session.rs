@@ -30,7 +30,7 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
     "shell", "identity", "relay", "neighbor", "outbox", "local", "resource", "link", "theme",
-    "inc", "intent", "upload", "fs", "gamepad",
+    "inc", "intent", "upload", "fs", "gamepad", "cvm",
 ];
 
 /// Domains every napplet gets, grant or no grant.

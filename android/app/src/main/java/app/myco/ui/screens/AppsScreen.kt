@@ -1355,6 +1355,7 @@ internal fun capabilityWording(domain: String): Capability = when (domain) {
     "inc" -> Capability("App to app", "Receive what another app hands it when opening it")
     "upload" -> Capability("Upload files", "Put files on your Blossom servers, signed as you, where anyone with the link can see them")
     "fs" -> Capability("Files", "Open files you choose, and save files where you choose")
+    "cvm" -> Capability("Remote tools", "Call tools on ContextVM servers over the internet. What it sends them leaves this phone")
     "gamepad" -> Capability("Game controllers", "Read connected controllers while this app has focus")
     "notify" -> Capability("Notifications", "Send you notifications")
     "theme" -> Capability("Theme", "Match your colours")

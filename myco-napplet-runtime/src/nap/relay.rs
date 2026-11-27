@@ -1311,6 +1311,7 @@ mod tests {
             intents: base.intents.clone(),
             uploads: base.uploads.clone(),
             local_uploads: base.local_uploads.clone(),
+            cvm: base.cvm.clone(),
         };
 
         call(
@@ -1351,6 +1352,7 @@ mod tests {
             intents: base.intents.clone(),
             uploads: base.uploads.clone(),
             local_uploads: base.local_uploads.clone(),
+            cvm: base.cvm.clone(),
         };
 
         let mut ungranted = Session::new(
@@ -1426,6 +1428,7 @@ mod tests {
             intents: base.intents.clone(),
             uploads: base.uploads.clone(),
             local_uploads: base.local_uploads.clone(),
+            cvm: base.cvm.clone(),
         };
 
         for kind in [0u16, 3, 5, 10002, 10050, 19999] {

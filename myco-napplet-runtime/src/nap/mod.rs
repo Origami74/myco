@@ -8,6 +8,7 @@
 //! `NAP-NEIGHBOR` and `NAP-LOCAL` are Myco's own, specified in the registry's
 //! form so they can be proposed there.
 
+pub mod cvm;
 pub mod encrypted;
 pub mod fs;
 pub mod gamepad;

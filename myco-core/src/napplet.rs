@@ -170,6 +170,10 @@ pub(crate) struct LiveNapplet {
     /// refused with "session not established", long after the message that
     /// went missing.
     pub(crate) session: Arc<tokio::sync::Mutex<Session>>,
+    /// The session's work-scope id, which NAP-CVM keys the window's
+    /// ContextVM sessions by. Kept here so closing the window can end them
+    /// without waiting on the session's lock.
+    cvm_window: Option<u64>,
     artifact: SrcdocArtifact,
     /// Frames the runtime wants to send this window without being asked —
     /// subscription deliveries, and later anything else the shell must be told.
@@ -735,6 +739,7 @@ impl NappletHost {
         self.sessions.lock().unwrap().insert(
             session_id.clone(),
             LiveNapplet {
+                cvm_window: session.work().id(),
                 session: Arc::new(tokio::sync::Mutex::new(session)),
                 artifact,
                 outbox,
@@ -804,6 +809,13 @@ impl NappletHost {
             if s.identity().d_tag == wanted && s.identity().author == author {
                 let gamepad_was_active = s.gamepad_subscribed();
                 s.set_granted(granted.clone());
+                if !s.is_granted("cvm") {
+                    // NAP-CVM sessions live outside the session's lock and
+                    // would keep delivering server messages: end them now.
+                    if let Some(window) = s.work().id() {
+                        self.ctx.cvm.end_window(window);
+                    }
+                }
                 if gamepad_was_active && !s.is_granted("gamepad") {
                     let _ = outbox.send(ToShell::Gamepad { enabled: false });
                     let _ = outbox.send(ToShell::to_napplet(
@@ -1236,6 +1248,12 @@ impl NappletHost {
     pub fn close(&self, session_id: &str) {
         let gone = self.sessions.lock().unwrap().remove(session_id);
         if let Some(gone) = gone {
+            // A NAP-CVM call still waiting holds a snapshot of the session,
+            // which keeps its work scope alive; end the window's ContextVM
+            // work now.
+            if let Some(window) = gone.cvm_window {
+                self.ctx.cvm.end_window(window);
+            }
             // Its live subscriptions end with it.
             let session = gone.session.clone();
             let ended = session.try_lock().map(|s| s.end_subscriptions()).is_ok();
@@ -2328,6 +2346,7 @@ mod tests {
             https: Arc::new(myco_napplet_runtime::seams::NoHttps),
             https_memory: Arc::default(),
             local_uploads: Arc::default(),
+            cvm: Arc::default(),
             kept_blobs: blobs,
             intents: Arc::new(myco_napplet_runtime::NoIntents),
             uploads: Arc::new(myco_napplet_runtime::NoUploads),
@@ -4365,6 +4384,33 @@ mod tests {
             message.field("error").is_some(),
             "withdrawing did not reach the window"
         );
+    }
+
+    /// Withdrawing `cvm` ends the window's ContextVM work at once: its
+    /// sessions live outside the session's lock and would otherwise keep
+    /// delivering what servers send.
+    #[tokio::test]
+    async fn withdrawing_cvm_ends_the_windows_contextvm_work() {
+        let (host, addr) = host_with(NappletBuilder::new().requires(&["cvm"])).await;
+        let opened = host.open(&addr, Some(vec!["cvm".into()])).await.unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        host.frame(
+            &opened.session_id,
+            &format!(
+                r#"{{"channel":"napplet","message":{{"type":"cvm.request","id":"c1","server":{{"pubkey":"{}"}},"message":{{"jsonrpc":"2.0","method":"notifications/initialized"}}}}}}"#,
+                nostr::Keys::generate().public_key().to_hex()
+            ),
+        )
+        .await;
+        assert_eq!(host.ctx.cvm.open_windows(), 1, "the call opened no work");
+
+        host.apply_grants(&addr.author, Some("fixture"), vec![])
+            .await;
+        assert_eq!(host.ctx.cvm.open_windows(), 0);
     }
 
     /// A napplet without the grant receives nothing, even if it managed to

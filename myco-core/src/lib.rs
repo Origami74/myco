@@ -57,6 +57,8 @@ mod fs_pick;
 // the user. Spec: napplet/naps PR #33; Myco's choices in
 // `docs/design/napplet/NAP-UPLOAD.md`.
 mod blossom_upload;
+// NAP-CVM's relays: ContextVM over the shared relay pool.
+mod cvm_relays;
 // NAP-RESOURCE's `https:`: a napplet's GET to the open web, with the
 // private-address check made where the name is dialled.
 mod outbox;
