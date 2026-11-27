@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Share files with someone near you.** Share a photo or any file from
+  another app and pick Myco. It's encrypted and kept for the phones in
+  Nearby, and nobody is told: you get a code (QR, NFC tap or link) to show
+  the person it's for. They scan it with Myco and save the file, fetched
+  from your phone while you're in reach. Up to 64 MB; if the mesh or
+  Nearby is off, the sheet offers to turn it on.
 - **Neighborhoods replace the Circle.** Start a neighborhood ("Household",
   "Sports club") and invite people with a QR code, a share link or an NFC
   tap. Each invitation sets up a link with its own key, used once. Posts
@@ -128,6 +134,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Apps and files over a slow link arrive.** A blob fetched from a
+  linked phone was cut off at 60 s, about 5 MB over Bluetooth, so larger
+  apps and updates never came. A fetch now has no fixed limit; it gives up
+  when it stalls for 30 s or falls below 8 KiB/s.
 - **Wi-Fi Aware reconnects after a phone restarts its mesh.** Two phones
   could stay on Bluetooth for good: after five failed attempts Myco waited
   for a rediscovery that never comes, and a restarted phone's new session

@@ -28,6 +28,8 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 chacha20poly1305 = { workspace = true }
+# Nearby files: filedrop's envelope (AES-256-GCM), so the napplet opens them.
+aes-gcm = { workspace = true }
 subtle = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["socks"] }

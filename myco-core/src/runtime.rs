@@ -2563,6 +2563,17 @@ impl AppRuntime {
         }));
     }
 
+    /// The neighborhoods and a runtime handle to drive them on, for a JNI
+    /// call that must not hold the app lock while it works (Nearby's file
+    /// share: reading a file, fetching one over a link). `None` before the
+    /// content layer is up.
+    pub fn neighbors_context(
+        &mut self,
+    ) -> Option<(Arc<crate::neighbor::Neighbors>, tokio::runtime::Handle)> {
+        let handle = self.rt.as_ref()?.handle().clone();
+        Some((self.neighbors()?, handle))
+    }
+
     pub fn napplet_context(
         &mut self,
     ) -> Option<(Arc<crate::napplet::NappletHost>, tokio::runtime::Handle)> {
